@@ -1,0 +1,35 @@
+services:
+  nostream:
+    build: ./nostream
+    container_name: nostream
+    ports:
+      - "8008:8008"
+    restart: unless-stopped
+    volumes:
+      - ./data/nostream:/data
+
+  blossom:
+    build: ./blossom
+    container_name: blossom
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    volumes:
+      - ./data/blossom:/app/uploads
+    environment:
+      NODE_ID : node-1
+  # agent:
+  #   build: ./agent
+  #   container_name: storage-agent
+  #   ports:
+  #     - "9090:9090"
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./data/blossom:/blossom-data:ro
+  #     - ./data/nostream:/nostream-data:ro
+  #     - /:/host:ro
+  #   environment:
+  #     NODE_ID: node-1
+  #     AGENT_PORT: 9090
+  #     BLOSSOM_PORT: 3000
+  #     RELAY_PORT: 8008

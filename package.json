@@ -1,0 +1,8 @@
+{
+  "name": "orchestrator",
+  "private": true,
+  "workspaces": [
+    "proxy/blossom",
+    "proxy/relay"
+  ]
+}

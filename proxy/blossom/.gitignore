@@ -1,0 +1,15 @@
+node_modules
+
+# build
+dist
+*.tsbuildinfo
+
+# env
+.env
+.env.local
+
+# prisma generated client
+src/generated/prisma
+
+# logs
+*.log
