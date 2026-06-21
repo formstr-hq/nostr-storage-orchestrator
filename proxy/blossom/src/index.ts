@@ -20,7 +20,6 @@ const prisma = new PrismaClient({
   adapter,
 });
 
-
 app.get("/storage", async (req, res) => {
   try {
     if (!req.headers.authorization) {
@@ -32,6 +31,7 @@ app.get("/storage", async (req, res) => {
     const npub = getNpub(
       req.headers.authorization
     );
+    console.log("Npub", npub)
     const user = await prisma.user.upsert({
       where: { npub },
       update: {},
@@ -257,6 +257,7 @@ app.delete("/delete/:hash", async (req, res) => {
   }
 });
 
-app.listen(1000, () => {
-    console.log('Blossom Server is running on port 1000');
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3001;
+app.listen(PORT, () => {
+    console.log(`Blossom Server is running on port ${PORT}`);
 })
