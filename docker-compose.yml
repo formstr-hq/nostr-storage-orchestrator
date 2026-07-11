@@ -40,8 +40,12 @@ services:
       # Neon) by editing packages/db/.env instead and removing this override.
       DATABASE_URL: postgresql://${POSTGRES_USER:-orchestrator}:${POSTGRES_PASSWORD:-orchestrator}@postgres:5432/${POSTGRES_DB:-orchestrator}
       PORT: ${DB_API_PORT:-4000}
-    expose:
-      - "${DB_API_PORT:-4000}"
+    # Bound to the host's loopback only (not 0.0.0.0) — reachable from
+    # sibling containers on the bridge network via `db:$DB_API_PORT` as
+    # before, and from the host-networked `blossom` service (see below) via
+    # `localhost:$DB_API_PORT`. Never reachable from outside this machine.
+    ports:
+      - "127.0.0.1:${DB_API_PORT:-4000}:${DB_API_PORT:-4000}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,18 +60,23 @@ services:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
     container_name: nso_blossom
+    # Host networking (Linux-only) instead of the bridge network: BLOSSOM_SERVERS
+    # can point at a mesh-VPN hostname (e.g. nostr-vpn's MagicDNS, resolved via
+    # systemd-resolved on loopback) that only the host's own network namespace
+    # can see — a bridge-networked container has no path to that resolver.
+    # No `ports:` here; host networking binds PORT directly on the host.
+    network_mode: host
     env_file:
       - ./proxy/blossom/.env
     environment:
       PORT: ${BLOSSOM_PORT:-3001}
-      DB_API_URL: http://db:${DB_API_PORT:-4000}
-      # storage-client's blossom backend runs on the host, outside this
-      # compose network — reach it via the host gateway (see extra_hosts).
-      BLOSSOM_SERVERS: ${BLOSSOM_SERVERS:-http://host.docker.internal:3000}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "${BLOSSOM_PORT:-3001}:${BLOSSOM_PORT:-3001}"
+      # db is unreachable by service name under host networking — db-api's
+      # port is published to the host's loopback for exactly this reason.
+      DB_API_URL: http://localhost:${DB_API_PORT:-4000}
+      # Local dev default (storage-client's blossom backend, published on
+      # the host at :3000). For a mesh-VPN peer, set this in
+      # proxy/blossom/.env or .env — e.g. http://test.nvpn:3000.
+      BLOSSOM_SERVERS: ${BLOSSOM_SERVERS:-http://localhost:3000}
     depends_on:
       db:
         condition: service_healthy

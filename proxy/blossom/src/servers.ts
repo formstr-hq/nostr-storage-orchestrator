@@ -45,23 +45,12 @@ export async function getBestServers(replicaCount: number) {
     .slice(0, replicaCount);
 }
 
-export async function uploadBlob(blob: Buffer, authHeader: string, replicaCount: number) {
+export async function uploadBlob(blob: Buffer, hash: string, authHeader: string, replicaCount: number) {
   const servers = await getBestServers(replicaCount);
   console.log("Selected servers for upload:", servers);
   if (servers.length === 0) {
     throw new Error("No healthy servers available");
   }
-  const hashBuffer = await crypto.subtle.digest(
-    "SHA-256",
-    blob.buffer.slice(
-      blob.byteOffset,
-      blob.byteOffset + blob.byteLength,
-    ) as ArrayBuffer,
-  );
-
-  const hexHash = Array.from(new Uint8Array(hashBuffer))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 
   const successfulReplicas: string[] = [];
 
@@ -74,7 +63,7 @@ export async function uploadBlob(blob: Buffer, authHeader: string, replicaCount:
           headers: {
             Authorization: authHeader,
             "Content-Type": "application/octet-stream",
-            "X-SHA-256": hexHash,
+            "X-SHA-256": hash,
           },
         }
       );
@@ -95,7 +84,7 @@ export async function uploadBlob(blob: Buffer, authHeader: string, replicaCount:
   }
 
   return {
-    hash: hexHash,
+    hash,
     replicas: successfulReplicas,
   };
 }

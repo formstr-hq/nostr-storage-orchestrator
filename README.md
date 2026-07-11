@@ -170,7 +170,7 @@ This brings up the local `blossom` backend and the backend relay service.
 
 ### 6. Run everything else with Docker
 
-The root `docker-compose.yml` runs PostgreSQL, `db-api`, `proxy/blossom`, and `proxy/relay` together. `db-api` is internal-only — it isn't published to the host, only `postgres`, `blossom`, and `relay` are.
+The root `docker-compose.yml` runs PostgreSQL, `db-api`, `proxy/blossom`, and `proxy/relay` together. `db-api` binds only to the host's loopback (`127.0.0.1:4000`) — never reachable off-box. `proxy/blossom` runs with `network_mode: host` (Linux only) rather than the bridge network, so `BLOSSOM_SERVERS` can point at a hostname only the host's own network namespace can resolve — e.g. a mesh-VPN peer (WireGuard-based tools like [nostr-vpn](https://github.com/mmalmi/nostr-vpn) run a MagicDNS-style resolver bound to the host's loopback via systemd-resolved, which a normal bridge-networked container has no path to). `proxy/relay` stays on the regular bridge network.
 
 1. Create env files.
 
@@ -196,9 +196,10 @@ docker compose up --build
 
 3. Confirm services are running:
 
-- `proxy/blossom` on `http://localhost:3001`
+- `proxy/blossom` on `http://localhost:3001` (bound directly on the host via `network_mode: host`)
 - `proxy/relay` on `ws://localhost:8007`
-- `db-api` and PostgreSQL are reachable only from other containers on the compose network (`http://db:4000`, `postgres:5432`), not from the host — uncomment the `ports:` mapping on the `postgres` service in `docker-compose.yml` if you need direct access (e.g. for `prisma studio`)
+- `db-api` on `http://127.0.0.1:4000` — loopback only, not reachable from outside the host
+- PostgreSQL is reachable only from other containers on the compose network (`postgres:5432`) — uncomment the `ports:` mapping on the `postgres` service in `docker-compose.yml` if you need direct access (e.g. for `prisma studio`)
 
 ### 7. When using `storage-client`
 
@@ -261,4 +262,4 @@ pnpm -r run build
 - `BLOSSOM_SERVERS` controls which backend blob servers `proxy/blossom` will use.
 - `BACKEND_RELAYS` controls which downstream relays `proxy/relay` forwards events to.
 - `db-api` (`packages/db`) is the only service with a Postgres/Prisma dependency; both proxies talk to it over HTTP via the dependency-free `packages/db-client`, so their Docker images no longer need Prisma at all.
-- The `blossom`/`relay` containers reach `storage-client`'s host-published backends via `host.docker.internal` (see `extra_hosts` in `docker-compose.yml`); override `BLOSSOM_SERVERS`/`BACKEND_RELAYS` in the proxy `.env` files if your backends live elsewhere.
+- `relay` reaches `storage-client`'s host-published strfry backend via `host.docker.internal` (see `extra_hosts` in `docker-compose.yml`); `blossom` reaches host-published backends directly via `localhost` since it runs with `network_mode: host`. Override `BLOSSOM_SERVERS`/`BACKEND_RELAYS` in `.env` if your backends live elsewhere.
