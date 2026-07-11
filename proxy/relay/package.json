@@ -4,6 +4,9 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -11,13 +14,19 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^25.9.3",
-    "prisma": "^7.8.0",
     "ts-node": "^10.9.2",
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   },
   "dependencies": {
+    "@orchestrator/db": "workspace:*",
+    "@types/ws": "^8.18.1",
     "axios": "^1.18.0",
-    "nostr-tools": "^2.23.5"
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "nostr-tools": "^2.23.5",
+    "ws": "^8.21.0"
   }
 }

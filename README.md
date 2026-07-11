@@ -1,68 +1,85 @@
 # nostr-storage-orchestrator
 
-A pnpm workspace that sits between Nostr clients and raw storage backends. It authenticates users via Nostr keypairs, enforces per-plan storage quotas, and fans out blob uploads across multiple replica servers.
+A pnpm workspace for a Nostr-aware storage orchestrator. It combines a blob proxy, a WebSocket Nostr relay proxy, and backend storage services with PostgreSQL persistence.
 
 ## Architecture
 
 ```
 Client
-  │  Nostr auth header (NIP-98 signed event)
+  │  Authorization: Nostr <base64-signed-event>
   ▼
-proxy/blossom  ──► PostgreSQL (users, blobs, quotas)
+proxy/blossom  ──► PostgreSQL (@orchestrator/db)
   │
-  ├──► storage-client/blossom  (port 3000)  raw file store #1
-  ├──► storage-client/blossom  (port 3000)  raw file store #2  (if replicas > 1)
+  ├──► blossom blob backends (configured via BLOSSOM_SERVERS)
   └──► ...
 
-proxy/relay  (stub — not yet implemented)
-  └──► storage-client/nostream  (port 8008)  Nostr relay
+Client
+  │  WebSocket Nostr relay protocol
+  ▼
+proxy/relay  ──► backend relays (configured via BACKEND_RELAYS)
+  └──► PostgreSQL (@orchestrator/db)
 ```
 
-### `proxy/blossom` — Smart blob proxy (port 3001)
+## Components
 
-TypeScript/Express service. Handles:
+### `packages/db`
 
-- **Auth** — decodes the `Nostr <base64>` header, verifies the Nostr event signature, extracts the user's `npub`
-- **Quota enforcement** — checks per-plan upload size and total storage limits before forwarding
-- **Replica fanout** — selects the healthiest backends ranked by free space, uploads to `replicaCount` of them
-- **Metadata tracking** — stores blob hash, owner npub, size, and replica URLs in PostgreSQL
+- Prisma schema and generated client for shared persistence
+- Models: `User`, `Blob`, `RelayEvent`
+- Shared `Plan` enum used by both proxies
 
-### `storage-client` — Storage backends (Docker)
+### `proxy/blossom`
 
-Two Dockerised services launched together via `docker compose`:
+TypeScript/Express service that:
 
-| Service | Port | What it does |
-|---|---|---|
-| `blossom` | 3000 | Node.js blob server — stores files on disk by SHA-256 hash |
-| `nostream` | 8008 | Nostr relay — cloned from `formstr-hq/nostream-share` |
+- validates Nostr auth events from `Authorization: Nostr ...`
+- resolves `npub` from the signed event
+- enforces plan quotas and upload size limits
+- selects healthy backend blossom servers
+- uploads blob data to `replicaCount` backends
+- stores blob metadata and user storage usage in PostgreSQL
+- supports download and delete operations for authenticated owners
 
-### Plans
+### `proxy/relay`
 
-| Plan | Storage | Max upload | Replicas |
+TypeScript/Express + WebSocket Nostr relay proxy that:
+
+- accepts NIP-42-style `AUTH` handshake messages
+- validates relay auth events against a challenge and `PUBLIC_URL`
+- tracks client subscriptions and forwards `REQ` queries
+- accepts signed `EVENT` writes and enforces plan upload constraints
+- publishes events to healthy backend relays
+- records relay events and storage reservations in PostgreSQL
+
+### `storage-client`
+
+Dockerised backend services used for local testing:
+
+- `blossom` — raw blob server with upload, health, and storage endpoints
+- `strfry` — deployed via Docker Compose as a backend relay
+
+## Plan rules
+
+| Plan | Storage limit | Max upload size | Replica count |
 |---|---|---|---|
-| FREE | 15 GB | 50 MB | 1 |
-| BASIC | 50 GB | 500 MB | 3 |
-| PRO | 100 GB | 2 GB | 5 |
+| `FREE` | 15 GB | 50 MB | 1 |
+| `BASIC` | 50 GB | 500 MB | 3 |
+| `PRO` | 100 GB | 2 GB | 5 |
 
-### Database schema
+## Database schema
 
-```
-User   npub (PK), plan, usedStorage, createdAt
-Blob   hash (PK), npub (FK → User), size, replicas[], createdAt
-```
-
----
+- `User` — `npub` (PK), `plan`, `usedStorage`, `createdAt`
+- `Blob` — `hash` (PK), `npub`, `size`, `replicas`, `createdAt`
+- `RelayEvent` — `eventId` (PK), `npub`, `kind`, `size`, `replicas`, `createdAt`
 
 ## Prerequisites
 
 - Node.js 20+
 - pnpm
 - Docker + Docker Compose
-- PostgreSQL database (Neon or local)
+- PostgreSQL database
 
----
-
-## Local setup
+## Setup
 
 ### 1. Install dependencies
 
@@ -70,93 +87,130 @@ Blob   hash (PK), npub (FK → User), size, replicas[], createdAt
 pnpm install
 ```
 
-### 2. Start storage backends
+### 2. Prepare the database
+
+1. Create a local PostgreSQL database.
+2. Copy and edit the blossom proxy env file:
+
+```bash
+cp proxy/blossom/.env.example proxy/blossom/.env
+```
+
+3. Set `DATABASE_URL` in `proxy/blossom/.env`:
+
+```bash
+DATABASE_URL="postgresql://orchestrator:orchestrator@localhost:5435/orchestrator"
+PORT=3001
+BLOSSOM_SERVERS=http://localhost:3000
+```
+
+> `BLOSSOM_SERVERS` must list one or more backend blossom URLs separated by commas.
+
+### 3. Generate Prisma client
+
+```bash
+pnpm --filter @orchestrator/db run generate
+```
+
+### 4. Run Prisma migrations
+
+```bash
+pnpm --filter @orchestrator/db run migrate:deploy
+```
+
+### 5. Start storage backends
+
+The `storage-client` layer has its own Docker Compose configuration and is kept separate from the main orchestrator stack.
 
 ```bash
 cd storage-client
 ./scripts/start.sh
 ```
 
-This builds and starts the blossom blob server (port 3000) and the nostream Nostr relay (port 8008).
+This brings up the local `blossom` backend and the backend relay service.
 
-### 3. Start PostgreSQL
+### 6. Run everything else with Docker
 
-```bash
-cd proxy/blossom
-docker compose up -d
-```
+The root `docker-compose.yml` runs the database, `proxy/blossom`, and `proxy/relay` together.
 
-This launches a local PostgreSQL instance on port 5435 (`POSTGRES_USER/PASSWORD/DB`: `orchestrator`).
-
-### 4. Configure the blossom proxy
+1. Create env files for both proxies.
 
 ```bash
 cp proxy/blossom/.env.example proxy/blossom/.env
+cat > proxy/relay/.env <<'EOF'
+DATABASE_URL="postgresql://orchestrator:orchestrator@localhost:5435/orchestrator"
+PORT=8007
+PUBLIC_URL="ws://localhost:8007"
+BACKEND_RELAYS=ws://localhost:7777
+EOF
 ```
 
-Edit `proxy/blossom/.env` and fill in your PostgreSQL connection string:
+2. Edit `proxy/blossom/.env` to include the backend blob server list:
 
-```
+```bash
 DATABASE_URL="postgresql://orchestrator:orchestrator@localhost:5435/orchestrator"
 PORT=3001
+BLOSSOM_SERVERS=http://localhost:3000
 ```
 
-### 5. Generate the Prisma client
+3. Start the Docker stack:
 
 ```bash
-pnpm --filter @orchestrator/blossom exec prisma generate
+docker compose up --build
 ```
 
-### 6. Run database migrations
+4. Confirm services are running:
+
+- `proxy/blossom` on `http://localhost:3001`
+- `proxy/relay` on `ws://localhost:8007`
+- PostgreSQL on `localhost:5435`
+
+### 7. When using `storage-client`
+
+Keep `storage-client` running in its own Docker environment. In one terminal:
 
 ```bash
-pnpm --filter @orchestrator/blossom exec prisma migrate deploy
+cd storage-client
+./scripts/start.sh
 ```
 
-### 7. Start the blossom proxy
+Then use the main orchestrator Docker stack for `blossom`, `relay`, and `db`.
 
-```bash
-# Development (tsx)
-pnpm --filter @orchestrator/blossom run dev
+## `proxy/blossom` API
 
-# Production (compiled)
-pnpm --filter @orchestrator/blossom run build
-pnpm --filter @orchestrator/blossom run start
-```
-
-The proxy is available at `http://localhost:3001` (or the `PORT` set in `.env`).
-
----
-
-## API
-
-All endpoints require a `Authorization: Nostr <base64-encoded-signed-nostr-event>` header.
+All endpoints expect `Authorization: Nostr <base64-encoded-signed-nostr-event>`.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/storage` | Returns used/total/available bytes and current plan for the authenticated user |
-| POST | `/upload` | Upload a blob (`Content-Type: application/octet-stream`). Returns `{ hash, replicas, size }` |
-| GET | `/download/:hash` | Download a blob by its SHA-256 hash |
-| DELETE | `/delete/:hash` | Delete a blob and decrement the user's used storage |
+| GET | `/storage` | Returns storage usage, available bytes, and current plan |
+| POST | `/upload` | Uploads raw blob bytes (`Content-Type: application/octet-stream`) |
+| GET | `/download/:hash` | Downloads blob contents by SHA-256 hash |
+| DELETE | `/delete/:hash` | Deletes a blob and decrements user storage |
 
----
+### Example auth header
+
+The proxy expects a base64-encoded JSON event object signed with Nostr keys. The service verifies the event signature and derives `npub` from the event pubkey.
+
+## `proxy/relay` behavior
+
+- Listens for WebSocket clients at `ws://localhost:8007` by default.
+- Sends an initial `AUTH` challenge to clients.
+- Accepts `AUTH`, `EVENT`, `REQ`, and `CLOSE` messages.
+- Validates event signatures and publishes approved writes to backend relays.
 
 ## Workspace commands
 
 ```bash
-# Run a script in one package
 pnpm --filter @orchestrator/blossom run dev
-
-# Run a command (e.g. prisma) in one package
-pnpm --filter @orchestrator/blossom exec prisma migrate deploy
-
-# Build all packages
+pnpm --filter @orchestrator/relay run dev
+pnpm --filter @orchestrator/db run studio
+pnpm --filter @orchestrator/db run migrate:deploy
 pnpm -r run build
 ```
 
----
-
 ## Notes
 
-- `proxy/relay` is a stub — the Nostr relay proxy is not yet implemented.
-- Backend server URLs are hardcoded in `proxy/blossom/src/servers.ts`. Update `BLOSSOM_SERVERS` to point to your actual blob store instances before running in production.
+- `proxy/relay` is now implemented and actively proxies Nostr relay traffic.
+- `BLOSSOM_SERVERS` controls which backend blob servers `proxy/blossom` will use.
+- `BACKEND_RELAYS` controls which downstream relays `proxy/relay` forwards events to.
+- The repo uses `@orchestrator/db` as a shared Prisma client dependency across both proxies.

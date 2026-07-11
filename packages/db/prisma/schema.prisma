@@ -1,0 +1,54 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Plan {
+  FREE
+  BASIC
+  PRO
+}
+
+model Blob {
+  hash      String   @id
+  npub      String
+  size      BigInt
+  replicas  String[]
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [npub], references: [npub])
+}
+
+model RelayEvent {
+  eventId   String   @id
+  npub      String
+  kind      Int
+  size      BigInt
+  replicas  String[]
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [npub], references: [npub])
+
+  @@index([npub])
+  @@index([kind])
+  @@index([npub, kind])
+}
+
+model User {
+  npub        String   @id
+  plan        Plan     @default(FREE)
+  usedStorage BigInt   @default(0)
+  createdAt   DateTime @default(now())
+
+  blobs       Blob[]
+  relayEvents RelayEvent[]
+}

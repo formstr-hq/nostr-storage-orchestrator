@@ -3,6 +3,7 @@
   "private": true,
   "workspaces": [
     "proxy/blossom",
-    "proxy/relay"
+    "proxy/relay",
+    "packages/*"
   ]
 }

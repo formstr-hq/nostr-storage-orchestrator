@@ -1,12 +1,17 @@
 services:
-  nostream:
-    build: ./nostream
-    container_name: nostream
-    ports:
-      - "8008:8008"
+  relay:
+    image: ghcr.io/hoytech/strfry:latest
+    container_name: strfry
     restart: unless-stopped
+
+    ports:
+      - "7777:7777"
+
     volumes:
-      - ./data/nostream:/data
+      - ./data/strfry:/app/db
+      - ./strfry/strfry.conf:/etc/strfry.conf
+
+    command: ["relay"]
 
   blossom:
     build: ./blossom
@@ -18,18 +23,3 @@ services:
       - ./data/blossom:/app/uploads
     environment:
       NODE_ID : node-1
-  # agent:
-  #   build: ./agent
-  #   container_name: storage-agent
-  #   ports:
-  #     - "9090:9090"
-  #   restart: unless-stopped
-  #   volumes:
-  #     - ./data/blossom:/blossom-data:ro
-  #     - ./data/nostream:/nostream-data:ro
-  #     - /:/host:ro
-  #   environment:
-  #     NODE_ID: node-1
-  #     AGENT_PORT: 9090
-  #     BLOSSOM_PORT: 3000
-  #     RELAY_PORT: 8008

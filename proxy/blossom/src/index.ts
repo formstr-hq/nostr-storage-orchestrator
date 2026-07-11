@@ -1,24 +1,20 @@
 import express from 'express';
-import { PrismaClient } from "./generated/prisma/client.js";
+import { prisma } from "@orchestrator/db";
 import { getNpub } from './nostr.js';
 import { uploadBlob } from './servers.js';
 import { PLAN_CONFIG } from './plan.js';
-import { PrismaPg } from "@prisma/adapter-pg";
-import dotenv from 'dotenv';
 import { downloadBlob } from './servers.js';
+import cors from 'cors';
 
-dotenv.config();
 const app = express();
+app.use(cors({
+  origin: "*",
+}));
+
 app.use(express.raw({
   type: "application/octet-stream",
+  limit: "1gb", 
 }));
-const adapter = new PrismaPg({
-  connectionString: process.env.DATABASE_URL!,
-});
-
-const prisma = new PrismaClient({
-  adapter,
-});
 
 app.get("/storage", async (req, res) => {
   try {
@@ -32,6 +28,11 @@ app.get("/storage", async (req, res) => {
       req.headers.authorization
     );
     console.log("Npub", npub)
+    console.log("trying to find user with npub", npub)
+    const user2 = await prisma.user.findUnique({
+      where: { npub },
+    })
+    console.log("User found", user2)
     const user = await prisma.user.upsert({
       where: { npub },
       update: {},

@@ -1,13 +1,14 @@
 import axios from "axios";
+import "dotenv/config";
 
+export const BLOSSOM_SERVERS =
+  process.env.BLOSSOM_SERVERS?.split(",")
+    .map(url => url.trim())
+    .filter(Boolean) ?? [];
 
-export const BLOSSOM_SERVERS = [
-  "http://localhost:3000",
-];
-
-// export const RELAY_SERVERS = {
-//   "http://localhost:8008": true
-// };
+if (BLOSSOM_SERVERS.length === 0) {
+  throw new Error("BLOSSOM_SERVERS is not configured");
+}
 
 export async function getServerStatus(url : string) {
   try {
