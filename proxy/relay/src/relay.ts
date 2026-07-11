@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocket, type RawData } from "ws";
 import type { NostrEvent } from "nostr-tools";
-import "dotenv/config";
+import { config } from "dotenv";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+config({ path: path.resolve(__dirname, "../../../.env") });
 
 type RelaySubscription = {
   subId: string;

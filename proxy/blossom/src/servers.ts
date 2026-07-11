@@ -1,5 +1,10 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import axios from "axios";
-import "dotenv/config";
+import { config } from "dotenv";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+config({ path: path.resolve(__dirname, "../../../.env") });
 
 export const BLOSSOM_SERVERS =
   process.env.BLOSSOM_SERVERS?.split(",")

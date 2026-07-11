@@ -21,7 +21,8 @@ app.use(express.json({ limit: "10mb" }));
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 const relayPool = new RelayPool();
-const relayUrl = process.env.PUBLIC_URL ?? `ws://localhost:${process.env.PORT ?? 8007}`;
+const PORT = process.env.RELAY_PORT ?? process.env.PORT ?? "8007";
+const relayUrl = process.env.PUBLIC_URL ?? `ws://localhost:${PORT}`;
 const authState = new Map<WebSocket, RelaySocketState>();
 
 const db = new DbClient({
@@ -232,7 +233,6 @@ wss.on("connection", (socket) => {
 });
 
 
-const port = Number(process.env.PORT ?? 8007);
-server.listen(port, () => {
-    console.log(`Nostr relay listening on port ${port}`);
+server.listen(Number(PORT), () => {
+    console.log(`Nostr relay listening on port ${PORT}`);
 });

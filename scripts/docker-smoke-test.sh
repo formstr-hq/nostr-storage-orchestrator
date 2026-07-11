@@ -52,25 +52,10 @@ wait_for_healthy() {
   return 0
 }
 
-log "step 1/5: ensuring env files exist"
+log "step 1/5: ensuring .env exists"
 if [ ! -f .env ]; then
   log "creating .env from .env.example"
   cp .env.example .env
-fi
-if [ ! -f packages/db/.env ]; then
-  log "creating packages/db/.env from .env.example"
-  cp packages/db/.env.example packages/db/.env
-fi
-if [ ! -f proxy/blossom/.env ]; then
-  log "creating proxy/blossom/.env from .env.example"
-  cp proxy/blossom/.env.example proxy/blossom/.env
-fi
-if [ ! -f proxy/relay/.env ]; then
-  log "creating proxy/relay/.env"
-  cat > proxy/relay/.env <<'EOF'
-PORT=8007
-PUBLIC_URL=ws://localhost:8007
-EOF
 fi
 
 log "step 2/5: ensuring storage-client backends are reachable (blossom :3000, strfry :7777)"

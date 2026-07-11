@@ -1,8 +1,12 @@
 # version: "3.9"
 #
-# Variables below (server locations, credentials, ports) are read from a
-# root .env file — copy .env.example to .env and edit as needed:
+# All config (server locations, credentials, ports) lives in a single root
+# .env file — copy .env.example to .env and edit as needed:
 #   cp .env.example .env
+# It's read two ways: interpolated directly into this file via ${VAR}
+# (needed for e.g. `ports:` mappings, resolved at `docker compose` parse
+# time), and injected into each container's runtime environment via
+# `env_file:`.
 
 services:
   postgres:
@@ -33,17 +37,17 @@ services:
       dockerfile: ./packages/db/Dockerfile
     container_name: nso_db
     env_file:
-      - ./packages/db/.env
+      - ./.env
     environment:
       # Always talk to the compose-managed postgres service above using the
       # credentials from .env. Point this at an external database (e.g.
-      # Neon) by editing packages/db/.env instead and removing this override.
+      # Neon) by editing DATABASE_URL in .env instead and removing this
+      # override.
       DATABASE_URL: postgresql://${POSTGRES_USER:-orchestrator}:${POSTGRES_PASSWORD:-orchestrator}@postgres:5432/${POSTGRES_DB:-orchestrator}
-      PORT: ${DB_API_PORT:-4000}
     # Bound to the host's loopback only (not 0.0.0.0) — reachable from
     # sibling containers on the bridge network via `db:$DB_API_PORT` as
-    # before, and from the host-networked `blossom` service (see below) via
-    # `localhost:$DB_API_PORT`. Never reachable from outside this machine.
+    # before, and from the host-networked `blossom`/`relay` services (see
+    # below) via `localhost:$DB_API_PORT`. Never reachable off this machine.
     ports:
       - "127.0.0.1:${DB_API_PORT:-4000}:${DB_API_PORT:-4000}"
     depends_on:
@@ -64,19 +68,13 @@ services:
     # can point at a mesh-VPN hostname (e.g. nostr-vpn's MagicDNS, resolved via
     # systemd-resolved on loopback) that only the host's own network namespace
     # can see — a bridge-networked container has no path to that resolver.
-    # No `ports:` here; host networking binds PORT directly on the host.
+    # No `ports:` here; host networking binds BLOSSOM_PORT directly on the
+    # host. DB_API_URL/BLOSSOM_SERVERS come straight from .env with no
+    # override needed — host networking means the local-dev and Docker
+    # values are identical.
     network_mode: host
     env_file:
-      - ./proxy/blossom/.env
-    environment:
-      PORT: ${BLOSSOM_PORT:-3001}
-      # db is unreachable by service name under host networking — db-api's
-      # port is published to the host's loopback for exactly this reason.
-      DB_API_URL: http://localhost:${DB_API_PORT:-4000}
-      # Local dev default (storage-client's blossom backend, published on
-      # the host at :3000). For a mesh-VPN peer, set this in
-      # proxy/blossom/.env or .env — e.g. http://test.nvpn:3000.
-      BLOSSOM_SERVERS: ${BLOSSOM_SERVERS:-http://localhost:3000}
+      - ./.env
     depends_on:
       db:
         condition: service_healthy
@@ -86,18 +84,10 @@ services:
       context: .
       dockerfile: ./proxy/relay/Dockerfile
     container_name: nso_relay
+    # Host networking (Linux-only), same reasoning as `blossom` above.
+    network_mode: host
     env_file:
-      - ./proxy/relay/.env
-    environment:
-      PORT: ${RELAY_PORT:-8007}
-      DB_API_URL: http://db:${DB_API_PORT:-4000}
-      # storage-client's strfry backend runs on the host, outside this
-      # compose network — reach it via the host gateway (see extra_hosts).
-      BACKEND_RELAYS: ${BACKEND_RELAYS:-ws://host.docker.internal:7777}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "${RELAY_PORT:-8007}:${RELAY_PORT:-8007}"
+      - ./.env
     depends_on:
       db:
         condition: service_healthy

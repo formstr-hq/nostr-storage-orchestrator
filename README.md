@@ -108,7 +108,7 @@ All internal-only, no auth. `size`/`usedStorage` are decimal strings. `db-api` o
 - Node.js 20+
 - pnpm
 - Docker + Docker Compose
-- PostgreSQL database (the root `docker-compose.yml` provisions one; bring your own by editing `packages/db/.env`)
+- PostgreSQL database (the root `docker-compose.yml` provisions one; bring your own by editing `DATABASE_URL` in `.env`)
 
 ## Setup
 
@@ -118,32 +118,27 @@ All internal-only, no auth. `size`/`usedStorage` are decimal strings. `db-api` o
 pnpm install
 ```
 
-### 2. Prepare the database
+### 2. Create the env file
 
-1. Copy and edit the `db-api` env file:
+A single root `.env` configures everything — `db-api`, `proxy/blossom`, `proxy/relay`, and `docker-compose.yml` itself all read from it (see [`.env.example`](.env.example) for the full list with comments):
 
 ```bash
-cp packages/db/.env.example packages/db/.env
+cp .env.example .env
 ```
+
+At minimum, for local (non-Docker) dev you'll want:
 
 ```bash
 DATABASE_URL="postgresql://orchestrator:orchestrator@localhost:5435/orchestrator"
-PORT=4000
-```
-
-2. Copy and edit the blossom proxy env file:
-
-```bash
-cp proxy/blossom/.env.example proxy/blossom/.env
-```
-
-```bash
+DB_API_PORT=4000
 DB_API_URL=http://localhost:4000
-PORT=3001
+BLOSSOM_PORT=3001
 BLOSSOM_SERVERS=http://localhost:3000
+RELAY_PORT=8007
+BACKEND_RELAYS=ws://localhost:7777
 ```
 
-> `BLOSSOM_SERVERS` must list one or more backend blossom URLs separated by commas.
+> `BLOSSOM_SERVERS`/`BACKEND_RELAYS` must each list one or more backend URLs separated by commas.
 
 ### 3. Generate Prisma client
 
@@ -170,31 +165,17 @@ This brings up the local `blossom` backend and the backend relay service.
 
 ### 6. Run everything else with Docker
 
-The root `docker-compose.yml` runs PostgreSQL, `db-api`, `proxy/blossom`, and `proxy/relay` together. `db-api` binds only to the host's loopback (`127.0.0.1:4000`) — never reachable off-box. `proxy/blossom` runs with `network_mode: host` (Linux only) rather than the bridge network, so `BLOSSOM_SERVERS` can point at a hostname only the host's own network namespace can resolve — e.g. a mesh-VPN peer (WireGuard-based tools like [nostr-vpn](https://github.com/mmalmi/nostr-vpn) run a MagicDNS-style resolver bound to the host's loopback via systemd-resolved, which a normal bridge-networked container has no path to). `proxy/relay` stays on the regular bridge network.
+The root `docker-compose.yml` runs PostgreSQL, `db-api`, `proxy/blossom`, and `proxy/relay` together, reading the same `.env` from step 2. `db-api` binds only to the host's loopback (`127.0.0.1:4000`) — never reachable off-box. `proxy/blossom` and `proxy/relay` both run with `network_mode: host` (Linux only) rather than the bridge network, so `BLOSSOM_SERVERS`/`BACKEND_RELAYS` can point at a hostname only the host's own network namespace can resolve — e.g. a mesh-VPN peer (WireGuard-based tools like [nostr-vpn](https://github.com/mmalmi/nostr-vpn) run a MagicDNS-style resolver bound to the host's loopback via systemd-resolved, which a normal bridge-networked container has no path to).
 
-1. Create env files.
+Since `blossom`/`relay` are host-networked, their local-dev and Docker config are identical — `docker-compose.yml` only overrides `DATABASE_URL` on the `db` service (pointed at the compose-managed `postgres` using the `POSTGRES_*` credentials from `.env`); everything else is injected straight from `.env` via `env_file:`.
 
-```bash
-cp .env.example .env
-cp packages/db/.env.example packages/db/.env
-cp proxy/blossom/.env.example proxy/blossom/.env
-cat > proxy/relay/.env <<'EOF'
-DB_API_URL=http://localhost:4000
-PORT=8007
-PUBLIC_URL="ws://localhost:8007"
-BACKEND_RELAYS=ws://localhost:7777
-EOF
-```
-
-> The root `.env` (from `.env.example`) is what `docker-compose.yml` itself reads: Postgres credentials, `BLOSSOM_SERVERS`/`BACKEND_RELAYS`, and each service's port. It always wins inside Docker — `docker-compose.yml` uses it to override `DATABASE_URL` on the `db` service (pointed at the compose-managed `postgres`) and `DB_API_URL`/`BLOSSOM_SERVERS`/`BACKEND_RELAYS`/`PORT` on the proxies. The per-service `.env` files above are for local (non-Docker) dev and anything else those services read.
-
-2. Start the Docker stack:
+1. Start the Docker stack (reuses the `.env` created in step 2 — `env_file: ./.env` will fail if it's missing, so run `cp .env.example .env` first if you skipped that step):
 
 ```bash
 docker compose up --build
 ```
 
-3. Confirm services are running:
+2. Confirm services are running:
 
 - `proxy/blossom` on `http://localhost:3001` (bound directly on the host via `network_mode: host`)
 - `proxy/relay` on `ws://localhost:8007`
@@ -242,7 +223,7 @@ The proxy expects a base64-encoded JSON event object signed with Nostr keys. The
 ./scripts/docker-smoke-test.sh
 ```
 
-It creates missing `.env` files from their `.example` counterparts, waits for `postgres`/`db`/`blossom`/`relay` to become reachable, then checks: blossom auth rejection, storage accounting, upload/download/delete round-trips; and relay's NIP-42 AUTH handshake, unauthenticated-write rejection, event publish, `REQ`/`EOSE`, and kind-5 deletion. By default it tears the root `docker-compose.yml` stack down afterward (`storage-client`'s backends are left running for reuse); set `KEEP_UP=1` to leave the root stack up too for manual poking.
+It creates a missing `.env` from `.env.example`, waits for `postgres`/`db`/`blossom`/`relay` to become reachable, then checks: blossom auth rejection, storage accounting, upload/download/delete round-trips; and relay's NIP-42 AUTH handshake, unauthenticated-write rejection, event publish, `REQ`/`EOSE`, and kind-5 deletion. By default it tears the root `docker-compose.yml` stack down afterward (`storage-client`'s backends are left running for reuse); set `KEEP_UP=1` to leave the root stack up too for manual poking.
 
 ## Workspace commands
 
@@ -262,4 +243,5 @@ pnpm -r run build
 - `BLOSSOM_SERVERS` controls which backend blob servers `proxy/blossom` will use.
 - `BACKEND_RELAYS` controls which downstream relays `proxy/relay` forwards events to.
 - `db-api` (`packages/db`) is the only service with a Postgres/Prisma dependency; both proxies talk to it over HTTP via the dependency-free `packages/db-client`, so their Docker images no longer need Prisma at all.
-- `relay` reaches `storage-client`'s host-published strfry backend via `host.docker.internal` (see `extra_hosts` in `docker-compose.yml`); `blossom` reaches host-published backends directly via `localhost` since it runs with `network_mode: host`. Override `BLOSSOM_SERVERS`/`BACKEND_RELAYS` in `.env` if your backends live elsewhere.
+- `blossom` and `relay` both run with `network_mode: host`, so `BLOSSOM_SERVERS`/`BACKEND_RELAYS` in `.env` are reached directly via `localhost` (or any hostname the host itself can resolve) — no `host.docker.internal`/`extra_hosts` needed.
+- A single root `.env` configures everything: `db-api`, `proxy/blossom`, `proxy/relay` (each resolves it via an explicit `dotenv` path pointing at the repo root, regardless of which package's script you run it from), and `docker-compose.yml` itself. `PORT` reads are namespaced per service (`DB_API_PORT`, `BLOSSOM_PORT`, `RELAY_PORT`) so all three can share the one file without colliding.

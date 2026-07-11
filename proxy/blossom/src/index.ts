@@ -300,7 +300,7 @@ app.delete("/:hashWithExt", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3001;
+const PORT = parseInt(process.env.BLOSSOM_PORT ?? process.env.PORT ?? "3001");
 app.listen(PORT, () => {
     console.log(`Blossom Server is running on port ${PORT}`);
 })
