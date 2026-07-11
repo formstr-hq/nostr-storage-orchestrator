@@ -16,6 +16,7 @@ services:
     container_name: nso_blossom
     env_file:
       - ./proxy/blossom/.env
+      - ./packages/db/.env
     ports:
       - "3001:3001"
     depends_on:
@@ -28,6 +29,7 @@ services:
     container_name: nso_relay
     env_file:
       - ./proxy/relay/.env
+      - ./packages/db/.env
     ports:
       - "8007:8007"
     depends_on:

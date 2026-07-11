@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 
@@ -21,6 +21,7 @@ RUN pnpm --filter @orchestrator/relay run build
 
 ENV NODE_ENV=production
 ENV PORT=8007
+ENV NODE_OPTIONS="--dns-result-order=ipv4first"
 
 EXPOSE 8007
 

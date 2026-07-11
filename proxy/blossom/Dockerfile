@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ RUN pnpm --filter @orchestrator/blossom run build
 
 ENV NODE_ENV=production
 ENV PORT=3001
-
+ENV NODE_OPTIONS="--dns-result-order=ipv4first"
 EXPOSE 3001
 
 CMD ["node", "proxy/blossom/dist/index.js"]
