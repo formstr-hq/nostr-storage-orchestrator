@@ -1,0 +1,34 @@
+# version: "3.9"
+
+services:
+  db:
+    build:
+      context: .
+      dockerfile: ./packages/db/Dockerfile
+    container_name: nso_db
+    env_file:
+      - ./packages/db/.env
+
+  blossom:
+    build:
+      context: .
+      dockerfile: ./proxy/blossom/Dockerfile
+    container_name: nso_blossom
+    env_file:
+      - ./proxy/blossom/.env
+    ports:
+      - "3001:3001"
+    depends_on:
+      - db
+
+  relay:
+    build:
+      context: .
+      dockerfile: ./proxy/relay/Dockerfile
+    container_name: nso_relay
+    env_file:
+      - ./proxy/relay/.env
+    ports:
+      - "8007:8007"
+    depends_on:
+      - db

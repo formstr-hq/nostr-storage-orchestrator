@@ -9,7 +9,7 @@ const app = express();
 
 const NODE_ID = process.env.NODE_ID || 'unknown';
 
-app.use(express.raw({ type: 'application/octet-stream' }));
+app.use(express.raw({ type: 'application/octet-stream' , limit: '1gb'}));
 app.use(cors());
 
 if (!fs.existsSync('uploads')) {
