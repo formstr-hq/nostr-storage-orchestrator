@@ -7,16 +7,17 @@ RUN npm install -g pnpm@10.15.1
 # Copy workspace files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY proxy/blossom/package.json ./proxy/blossom/
-COPY packages/db/package.json ./packages/db/
+COPY packages/db-client/package.json ./packages/db-client/
 
 # Install dependencies
 RUN pnpm install --frozen-lockfile
 
-# Copy source code
-COPY . .
+# Copy source code (only what this image needs — no Prisma/db-api here)
+COPY packages/db-client ./packages/db-client
+COPY proxy/blossom ./proxy/blossom
 
-# Build the db package first
-RUN pnpm --filter @orchestrator/db run build
+# Build the db-client package first
+RUN pnpm --filter @orchestrator/db-client run build
 
 # Then build blossom
 RUN pnpm --filter @orchestrator/blossom run build

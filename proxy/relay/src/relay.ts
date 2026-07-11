@@ -71,9 +71,11 @@ export class RelayPool {
 
         const existing = connection.subscriptions.get(subId);
         if (existing) {
+          const forwardEose = existing.onEose;
           existing.onEose = () => {
             clearTimeout(timeout);
             connection.subscriptions.delete(subId);
+            forwardEose();
             resolve();
           };
         }

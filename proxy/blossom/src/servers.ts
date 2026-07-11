@@ -104,7 +104,7 @@ export async function downloadBlob(hash: string, replicas: string[]) {
   for (const server of replicas) {
     try {
       const response = await axios.get(
-        `${server}/download/${hash}`,
+        `${server}/blob/${hash}`,
         { responseType: "arraybuffer" }
       );
       return Buffer.from(response.data);
@@ -123,7 +123,7 @@ export async function deleteBlob(hash: string, replicas: string[]) {
   for (const server of replicas) {
     try {
       await axios.delete(
-        `${server}/delete/${hash}`
+        `${server}/blob/${hash}`
       );
     } catch (err) {
       console.error(

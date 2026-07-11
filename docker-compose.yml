@@ -1,6 +1,32 @@
 # version: "3.9"
+#
+# Variables below (server locations, credentials, ports) are read from a
+# root .env file — copy .env.example to .env and edit as needed:
+#   cp .env.example .env
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nso_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orchestrator}
+      POSTGRES_DB: ${POSTGRES_DB:-orchestrator}
+    # Not published to the host by default — db-api reaches it over the
+    # internal compose network. Uncomment to inspect it directly (e.g. with
+    # `prisma studio` or `psql`); POSTGRES_PORT is set in .env.
+    # ports:
+    #   - "${POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - nso_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 forces a real TCP check; without it, pg_isready can
+      # report healthy during postgres's transient socket-only init phase.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-orchestrator}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   db:
     build:
       context: .
@@ -8,6 +34,22 @@ services:
     container_name: nso_db
     env_file:
       - ./packages/db/.env
+    environment:
+      # Always talk to the compose-managed postgres service above using the
+      # credentials from .env. Point this at an external database (e.g.
+      # Neon) by editing packages/db/.env instead and removing this override.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-orchestrator}:${POSTGRES_PASSWORD:-orchestrator}@postgres:5432/${POSTGRES_DB:-orchestrator}
+      PORT: ${DB_API_PORT:-4000}
+    expose:
+      - "${DB_API_PORT:-4000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${DB_API_PORT:-4000}/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   blossom:
     build:
@@ -16,11 +58,19 @@ services:
     container_name: nso_blossom
     env_file:
       - ./proxy/blossom/.env
-      - ./packages/db/.env
+    environment:
+      PORT: ${BLOSSOM_PORT:-3001}
+      DB_API_URL: http://db:${DB_API_PORT:-4000}
+      # storage-client's blossom backend runs on the host, outside this
+      # compose network — reach it via the host gateway (see extra_hosts).
+      BLOSSOM_SERVERS: ${BLOSSOM_SERVERS:-http://host.docker.internal:3000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "3001:3001"
+      - "${BLOSSOM_PORT:-3001}:${BLOSSOM_PORT:-3001}"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
   relay:
     build:
@@ -29,8 +79,19 @@ services:
     container_name: nso_relay
     env_file:
       - ./proxy/relay/.env
-      - ./packages/db/.env
+    environment:
+      PORT: ${RELAY_PORT:-8007}
+      DB_API_URL: http://db:${DB_API_PORT:-4000}
+      # storage-client's strfry backend runs on the host, outside this
+      # compose network — reach it via the host gateway (see extra_hosts).
+      BACKEND_RELAYS: ${BACKEND_RELAYS:-ws://host.docker.internal:7777}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "8007:8007"
+      - "${RELAY_PORT:-8007}:${RELAY_PORT:-8007}"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+
+volumes:
+  nso_postgres_data:

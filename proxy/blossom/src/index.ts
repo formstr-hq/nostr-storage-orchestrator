@@ -1,8 +1,8 @@
 import express from 'express';
-import { prisma } from "@orchestrator/db";
+import { DbClient, DbApiError } from "@orchestrator/db-client";
 import { getNpub } from './nostr.js';
 import { uploadBlob } from './servers.js';
-import { PLAN_CONFIG } from './plan.js';
+import { getPlanConfig } from './plan.js';
 import { downloadBlob } from './servers.js';
 import cors from 'cors';
 
@@ -13,8 +13,12 @@ app.use(cors({
 
 app.use(express.raw({
   type: "application/octet-stream",
-  limit: "1gb", 
+  limit: "1gb",
 }));
+
+const db = new DbClient({
+  baseUrl: process.env.DB_API_URL ?? "http://localhost:4000",
+});
 
 app.get("/storage", async (req, res) => {
   try {
@@ -27,34 +31,17 @@ app.get("/storage", async (req, res) => {
     const npub = getNpub(
       req.headers.authorization
     );
-    console.log("Npub", npub)
-    console.log("trying to find user with npub", npub)
-    const user2 = await prisma.user.findUnique({
-      where: { npub },
-    })
-    console.log("User found", user2)
-    const user = await prisma.user.upsert({
-      where: { npub },
-      update: {},
-      create: {
-        npub,
-      },
-      select: {
-        usedStorage: true,
-        plan: true,
-      },
-    });
-    console.log(user);
 
+    const user = await db.upsertUser(npub);
+    const planConfig = await getPlanConfig(db);
+    const limit = planConfig[user.plan].storageLimit;
+    const used = Number(user.usedStorage);
 
-    const limit =
-      PLAN_CONFIG[user.plan as keyof typeof PLAN_CONFIG].storageLimit;
-    console.log(limit);
     res.json({
-      used: Number(user.usedStorage),
+      used,
       total: limit,
       available:
-        limit - Number(user.usedStorage),
+        limit - used,
       plan: user.plan,
     });
 
@@ -80,28 +67,21 @@ app.post("/upload", async (req, res) => {
     const data = req.body as Buffer;
     const size = data.length;
 
-    const user = await prisma.user.upsert({
-      where: { npub },
-      update: {},
-      create: { npub },
-    });
+    const user = await db.upsertUser(npub);
+    const planConfig = await getPlanConfig(db);
+    const limits = planConfig[user.plan];
 
-    const planConfig =
-      PLAN_CONFIG[
-        user.plan as keyof typeof PLAN_CONFIG
-      ];
-    
-    const replicaCount = planConfig.replicaCount;
+    const replicaCount = limits.replicaCount;
     if (
       Number(user.usedStorage) + size >
-      planConfig.storageLimit
+      limits.storageLimit
     ) {
       return res.status(403).json({
         error: "Storage limit exceeding while uploading this file. Please upgrade your plan to upload this file.",
       });
     }
 
-    if (size > planConfig.uploadLimit) {
+    if (size > limits.uploadLimit) {
       return res.status(403).json({
         error: "File exceeds upload limit. Please upgrade your plan to upload this file.",
       });
@@ -109,33 +89,21 @@ app.post("/upload", async (req, res) => {
 
     const result = await uploadBlob(data, authHeader, replicaCount);
 
-    const existing =
-      await prisma.blob.findUnique({
-        where: {
-          hash: result.hash,
-        },
-      });
+    const existing = await db.getBlob(result.hash);
 
     if (!existing) {
-      await prisma.$transaction([
-        prisma.blob.create({
-          data: {
-            hash: result.hash,
-            npub,
-            size,
-            replicas: result.replicas,
-          },
-        }),
-
-        prisma.user.update({
-          where: { npub },
-          data: {
-            usedStorage: {
-              increment: size,
-            },
-          },
-        }),
-      ]);
+      try {
+        await db.createBlob({
+          hash: result.hash,
+          npub,
+          size,
+          replicas: result.replicas,
+        });
+      } catch (error) {
+        if (!(error instanceof DbApiError && error.status === 409)) {
+          throw error;
+        }
+      }
     }
 
     return res.json({
@@ -164,10 +132,8 @@ app.get("/download/:hash", async (req, res) => {
 
     const { hash } = req.params;
 
-    const blob = await prisma.blob.findUnique({
-      where: { hash },
-    });
- 
+    const blob = await db.getBlob(hash!);
+
     if (!blob) {
       return res.status(404).json({
         error: "Blob not found",
@@ -181,7 +147,7 @@ app.get("/download/:hash", async (req, res) => {
     }
 
     const data = await downloadBlob(
-      hash,
+      hash!,
       blob.replicas
     );
 
@@ -216,9 +182,7 @@ app.delete("/delete/:hash", async (req, res) => {
 
     const { hash } = req.params;
 
-    const blob = await prisma.blob.findUnique({
-      where: { hash },
-    });
+    const blob = await db.getBlob(hash!);
 
     if (!blob) {
       return res.status(404).json({
@@ -232,19 +196,7 @@ app.delete("/delete/:hash", async (req, res) => {
       });
     }
 
-    await prisma.$transaction([
-      prisma.blob.delete({
-        where: { hash },
-      }),
-      prisma.user.update({
-        where: { npub },
-        data: {
-          usedStorage: {
-            decrement: Number(blob.size),
-          },
-        },
-      }),
-    ]);
+    await db.deleteBlob(hash!);
 
     return res.json({
       message: "Blob deleted successfully",
