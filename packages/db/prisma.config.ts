@@ -9,9 +9,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 config({ path: path.resolve(__dirname, "../../.env") });
 
 // See src/prisma.ts for why this is derived rather than read directly.
+// Unlike prisma.ts, the Prisma CLI's datasource.url must be a plain
+// string, so user/password are URL-encoded here — arbitrary passwords may
+// contain characters (`/`, `@`, `:`, etc.) that would otherwise corrupt it.
 const databaseUrl =
   process.env["DATABASE_URL"] ??
-  `postgresql://${process.env["POSTGRES_USER"]}:${process.env["POSTGRES_PASSWORD"]}@localhost:${process.env["POSTGRES_PORT"]}/${process.env["POSTGRES_DB"]}`;
+  `postgresql://${encodeURIComponent(process.env["POSTGRES_USER"]!)}:${encodeURIComponent(process.env["POSTGRES_PASSWORD"]!)}@${process.env["POSTGRES_HOST"]}:${process.env["POSTGRES_PORT"]}/${process.env["POSTGRES_DB"]}`;
 
 export default defineConfig({
   schema: "prisma/schema.prisma",

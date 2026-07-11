@@ -39,11 +39,16 @@ services:
     env_file:
       - ./.env
     environment:
-      # Always talk to the compose-managed postgres service above using the
-      # credentials from .env. Point this at an external database (e.g.
-      # Neon) by editing DATABASE_URL in .env instead and removing this
-      # override.
-      DATABASE_URL: postgresql://${POSTGRES_USER:-orchestrator}:${POSTGRES_PASSWORD:-orchestrator}@postgres:5432/${POSTGRES_DB:-orchestrator}
+      # Always talk to the compose-managed postgres service above — only
+      # the host/port need overriding here (plain literals; POSTGRES_USER/
+      # PASSWORD/DB still come from .env via env_file). Compose has no way
+      # to URL-encode a password, so credentials are never built into a
+      # connection string here — see packages/db/src/prisma.ts and
+      # prisma.config.ts, which derive DATABASE_URL themselves and handle
+      # this correctly. Point this at an external database (e.g. Neon) by
+      # setting DATABASE_URL directly in .env instead.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
     # Bound to the host's loopback only (not 0.0.0.0) — reachable from
     # sibling containers on the bridge network via `db:$DB_API_PORT` as
     # before, and from the host-networked `blossom`/`relay` services (see
