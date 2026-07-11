@@ -21,8 +21,12 @@ app.use(express.raw({
   limit: "1gb",
 }));
 
+// db-api always runs on the same host (both are host-networked in Docker,
+// see docker-compose.yml), so this is derived from its port rather than
+// duplicated as its own var — override DB_API_URL directly if that ever
+// stops being true.
 const db = new DbClient({
-  baseUrl: process.env.DB_API_URL ?? "http://localhost:4000",
+  baseUrl: process.env.DB_API_URL ?? `http://localhost:${process.env.DB_API_PORT}`,
 });
 
 // sha256 hex string, optionally followed by a file extension (BUD-01).
@@ -300,7 +304,7 @@ app.delete("/:hashWithExt", async (req, res) => {
   }
 });
 
-const PORT = parseInt(process.env.BLOSSOM_PORT ?? process.env.PORT ?? "3001");
+const PORT = parseInt(process.env.BLOSSOM_PORT!);
 app.listen(PORT, () => {
     console.log(`Blossom Server is running on port ${PORT}`);
 })

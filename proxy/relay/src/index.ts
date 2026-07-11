@@ -21,12 +21,16 @@ app.use(express.json({ limit: "10mb" }));
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 const relayPool = new RelayPool();
-const PORT = process.env.RELAY_PORT ?? process.env.PORT ?? "8007";
+const PORT = process.env.RELAY_PORT!;
 const relayUrl = process.env.PUBLIC_URL ?? `ws://localhost:${PORT}`;
 const authState = new Map<WebSocket, RelaySocketState>();
 
+// db-api always runs on the same host (both are host-networked in Docker,
+// see docker-compose.yml), so this is derived from its port rather than
+// duplicated as its own var — override DB_API_URL directly if that ever
+// stops being true.
 const db = new DbClient({
-    baseUrl: process.env.DB_API_URL ?? "http://localhost:4000",
+    baseUrl: process.env.DB_API_URL ?? `http://localhost:${process.env.DB_API_PORT}`,
 });
 
 function getAuthState(socket: WebSocket): RelaySocketState {

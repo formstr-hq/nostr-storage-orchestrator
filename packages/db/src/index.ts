@@ -197,7 +197,7 @@ app.delete("/relay-events/:eventId", async (req, res) => {
   }
 });
 
-const PORT = parseInt(process.env.DB_API_PORT ?? process.env.PORT ?? "4000", 10);
+const PORT = parseInt(process.env.DB_API_PORT!, 10);
 app.listen(PORT, () => {
   console.log(`db-api listening on port ${PORT}`);
 });

@@ -24,10 +24,14 @@ type RelayConnection = {
 
 type RelayMessage = [string, ...unknown[]];
 
-export const RELAYS = (process.env.BACKEND_RELAYS ?? "ws://localhost:7777")
+export const RELAYS = (process.env.BACKEND_RELAYS ?? "")
   .split(",")
   .map((relay) => relay.trim())
   .filter(Boolean);
+
+if (RELAYS.length === 0) {
+  throw new Error("BACKEND_RELAYS is not configured");
+}
 
 export class RelayPool {
   private readonly relays: string[];

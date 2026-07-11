@@ -126,12 +126,10 @@ A single root `.env` configures everything — `db-api`, `proxy/blossom`, `proxy
 cp .env.example .env
 ```
 
-At minimum, for local (non-Docker) dev you'll want:
+The defaults in `.env.example` already work for local (non-Docker) dev out of the box — `DATABASE_URL` and `DB_API_URL` are derived from `POSTGRES_*`/`DB_API_PORT` respectively rather than needing to be set explicitly (see the comments in `.env.example` if you need to override either). At minimum you'll want:
 
 ```bash
-DATABASE_URL="postgresql://orchestrator:orchestrator@localhost:5435/orchestrator"
 DB_API_PORT=4000
-DB_API_URL=http://localhost:4000
 BLOSSOM_PORT=3001
 BLOSSOM_SERVERS=http://localhost:3000
 RELAY_PORT=8007
