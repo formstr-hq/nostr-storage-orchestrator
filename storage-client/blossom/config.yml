@@ -1,0 +1,43 @@
+port: 3000
+host: 0.0.0.0
+
+database:
+  path: data/sqlite.db
+
+storage:
+  backend: local
+  local:
+    dir: ./data/blobs
+  rules:
+    - type: "*"
+      expiration: 30 days
+  removeWhenNoOwners: true
+
+# This server is an internal storage node behind the orchestrator proxy.
+# The proxy is the auth gate; disable auth here so the proxy can upload
+# and delete without needing to forward user tokens.
+upload:
+  enabled: true
+  requireAuth: false
+
+mirror:
+  enabled: false
+  requireAuth: false
+
+delete:
+  requireAuth: false
+
+list:
+  enabled: false
+
+media:
+  enabled: false
+
+landing:
+  enabled: false
+
+report:
+  enabled: false
+
+dashboard:
+  enabled: false

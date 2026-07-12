@@ -15,26 +15,20 @@ if (BLOSSOM_SERVERS.length === 0) {
   throw new Error("BLOSSOM_SERVERS is not configured");
 }
 
-export async function getServerStatus(url : string) {
+export async function getServerStatus(url: string) {
   try {
-    console.log("Checking", url);
-    const [health, storage] = await Promise.all([
-      axios.get(`${url}/health`, { timeout: 3000 }),
-      axios.get(`${url}/storage`, { timeout: 3000 })
-    ]);
-    console.log("Health:", health.status);
-    console.log("Storage:", storage.data);
+    const health = await axios.get(`${url}/health`, { timeout: 3000 });
     return {
       url,
       healthy: health.status === 200,
-      available: storage.data.freeBytes ?? 0
+      available: Number.MAX_SAFE_INTEGER,
     };
   } catch (e) {
     console.error("Server check failed:", url, e);
     return {
       url,
       healthy: false,
-      available: 0
+      available: 0,
     };
   }
 }
@@ -61,7 +55,7 @@ export async function uploadBlob(blob: Buffer, hash: string, authHeader: string,
 
   for (const server of servers) {
     try {
-      await axios.post(
+      await axios.put(
         `${server.url}/upload`,
         blob,
         {
@@ -98,7 +92,7 @@ export async function downloadBlob(hash: string, replicas: string[]) {
   for (const server of replicas) {
     try {
       const response = await axios.get(
-        `${server}/blob/${hash}`,
+        `${server}/${hash}`,
         { responseType: "arraybuffer" }
       );
       return Buffer.from(response.data);
@@ -117,7 +111,7 @@ export async function deleteBlob(hash: string, replicas: string[]) {
   for (const server of replicas) {
     try {
       await axios.delete(
-        `${server}/blob/${hash}`
+        `${server}/${hash}`
       );
     } catch (err) {
       console.error(

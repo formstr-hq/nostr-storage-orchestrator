@@ -64,8 +64,8 @@ if wait_for_tcp localhost 3000 1 && wait_for_tcp localhost 7777 1; then
 else
   log "starting storage-client backends..."
   (cd storage-client && docker compose up --build -d)
-  log "waiting for storage-client backends to accept connections..."
-  wait_for_tcp localhost 3000 60 || { log "storage-client blossom backend (:3000) did not come up"; exit 1; }
+  log "waiting for storage-client blossom backend to become healthy (Deno startup can take ~30s)..."
+  wait_for_healthy blossom 120 || { log "storage-client blossom backend (:3000) did not become healthy"; (cd storage-client && docker compose logs blossom); exit 1; }
   wait_for_tcp localhost 7777 60 || { log "storage-client strfry backend (:7777) did not come up"; exit 1; }
   log "storage-client backends are up and left running for reuse;"
   log "stop them manually with: (cd storage-client && docker compose down)"
