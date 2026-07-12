@@ -52,20 +52,27 @@ wait_for_healthy() {
   return 0
 }
 
-log "step 1/5: ensuring .env exists"
+log "step 1/5: ensuring .env files exist"
 if [ ! -f .env ]; then
   log "creating .env from .env.example"
   cp .env.example .env
 fi
+if [ ! -f storage-client/.env ]; then
+  log "creating storage-client/.env from storage-client/.env.example"
+  cp storage-client/.env.example storage-client/.env
+fi
 
-log "step 2/5: ensuring storage-client backends are reachable (blossom :3000, strfry :7777)"
-if wait_for_tcp localhost 3000 1 && wait_for_tcp localhost 7777 1; then
+# Read BLOSSOM_PORT from storage-client/.env for log messages below.
+BLOSSOM_STORAGE_PORT="$(grep -m1 '^BLOSSOM_PORT=' storage-client/.env | cut -d= -f2 || echo 3000)"
+
+log "step 2/5: ensuring storage-client backends are reachable (blossom :${BLOSSOM_STORAGE_PORT}, strfry :7777)"
+if wait_for_tcp localhost "${BLOSSOM_STORAGE_PORT}" 1 && wait_for_tcp localhost 7777 1; then
   log "storage-client backends already running"
 else
   log "starting storage-client backends..."
   (cd storage-client && docker compose up --build -d)
   log "waiting for storage-client blossom backend to become healthy (Deno startup can take ~30s)..."
-  wait_for_healthy blossom 120 || { log "storage-client blossom backend (:3000) did not become healthy"; (cd storage-client && docker compose logs blossom); exit 1; }
+  wait_for_healthy blossom 120 || { log "storage-client blossom backend (:${BLOSSOM_STORAGE_PORT}) did not become healthy"; (cd storage-client && docker compose logs blossom); exit 1; }
   wait_for_tcp localhost 7777 60 || { log "storage-client strfry backend (:7777) did not come up"; exit 1; }
   log "storage-client backends are up and left running for reuse;"
   log "stop them manually with: (cd storage-client && docker compose down)"
