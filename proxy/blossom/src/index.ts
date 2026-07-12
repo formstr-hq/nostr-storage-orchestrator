@@ -280,17 +280,17 @@ async function handleGetBlob(
     }
     const hash = match[1]!;
 
-    const npub = verifyAuthToken(req.headers.authorization, "get", { hash });
+    // const npub = verifyAuthToken(req.headers.authorization, "get", { hash });
 
     const blob = await db.getBlob(hash);
     if (!blob) {
       return res.status(404).json({ error: "Blob not found" });
     }
-    if (blob.npub !== npub) {
-      return res
-        .status(403)
-        .json({ error: "You do not have access to this blob" });
-    }
+    // if (blob.npub !== npub) {
+    //   return res
+    //     .status(403)
+    //     .json({ error: "You do not have access to this blob" });
+    // }
 
     // The proxy does not persist the original MIME type, so per BUD-01 it
     // MUST default to application/octet-stream here.
