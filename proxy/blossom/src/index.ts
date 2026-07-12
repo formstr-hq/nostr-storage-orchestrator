@@ -7,6 +7,8 @@ import { getPlanConfig } from "./plan.js";
 import { downloadBlob, deleteBlob } from "./servers.js";
 import cors from "cors";
 
+const ALLOWED_NPUBS: string[] | null = process.env.ALLOWED_NPUBS ? process.env.ALLOWED_NPUBS.split(",") : null
+
 const app = express();
 app.use(
   cors({
@@ -189,6 +191,14 @@ app.put("/upload", async (req, res) => {
       hash,
       requireHashScope: true,
     });
+
+    if(ALLOWED_NPUBS && ALLOWED_NPUBS.length > 0) {
+      if(!ALLOWED_NPUBS.includes(npub)) {
+        return res.status(403).json({
+          error: "NPUB not allowed"
+        })
+      }
+    }
 
     const user = await db.upsertUser(npub);
     const planConfig = await getPlanConfig(db);
