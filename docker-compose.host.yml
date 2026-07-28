@@ -1,0 +1,68 @@
+# Linux-only host-networking stack for mesh-VPN / MagicDNS backends.
+# Prefer docker-compose.yml on macOS (and for normal local storage-client).
+#
+#   docker compose -f docker-compose.host.yml up --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nso_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orchestrator}
+      POSTGRES_DB: ${POSTGRES_DB:-orchestrator}
+    volumes:
+      - nso_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-orchestrator}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  db:
+    build:
+      context: .
+      dockerfile: ./packages/db/Dockerfile
+    container_name: nso_db
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    ports:
+      - "127.0.0.1:${DB_API_PORT:-4000}:${DB_API_PORT:-4000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${DB_API_PORT:-4000}/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  blossom:
+    build:
+      context: .
+      dockerfile: ./proxy/blossom/Dockerfile
+    container_name: nso_blossom
+    network_mode: host
+    env_file:
+      - ./.env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  relay:
+    build:
+      context: .
+      dockerfile: ./proxy/relay/Dockerfile
+    container_name: nso_relay
+    network_mode: host
+    env_file:
+      - ./.env
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  nso_postgres_data:

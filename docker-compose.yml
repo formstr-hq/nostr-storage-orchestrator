@@ -7,6 +7,11 @@
 # (needed for e.g. `ports:` mappings, resolved at `docker compose` parse
 # time), and injected into each container's runtime environment via
 # `env_file:`.
+#
+# Bridge networking + published ports so this works on macOS Docker Desktop
+# as well as Linux. Host-published backends (storage-client) are reached via
+# host.docker.internal. For Linux mesh-VPN / MagicDNS host networking, use:
+#   docker compose -f docker-compose.host.yml up --build
 
 services:
   postgres:
@@ -50,9 +55,8 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
     # Bound to the host's loopback only (not 0.0.0.0) — reachable from
-    # sibling containers on the bridge network via `db:$DB_API_PORT` as
-    # before, and from the host-networked `blossom`/`relay` services (see
-    # below) via `localhost:$DB_API_PORT`. Never reachable off this machine.
+    # sibling containers on the bridge network via `db:$DB_API_PORT`, and
+    # from the host via localhost. Never reachable off this machine.
     ports:
       - "127.0.0.1:${DB_API_PORT:-4000}:${DB_API_PORT:-4000}"
     depends_on:
@@ -69,17 +73,19 @@ services:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
     container_name: nso_blossom
-    # Host networking (Linux-only) instead of the bridge network: BLOSSOM_SERVERS
-    # can point at a mesh-VPN hostname (e.g. nostr-vpn's MagicDNS, resolved via
-    # systemd-resolved on loopback) that only the host's own network namespace
-    # can see — a bridge-networked container has no path to that resolver.
-    # No `ports:` here; host networking binds BLOSSOM_PORT directly on the
-    # host. DB_API_URL/BLOSSOM_SERVERS come straight from .env with no
-    # override needed — host networking means the local-dev and Docker
-    # values are identical.
-    network_mode: host
+    # Bridge network + published port (works on macOS and Linux). Reach
+    # storage-client on the host via host.docker.internal; talk to db-api
+    # over the compose network. .env localhost URLs are overridden below
+    # so the same .env still works for non-Docker local runs.
+    ports:
+      - "${BLOSSOM_PORT:-3001}:${BLOSSOM_PORT:-3001}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - ./.env
+    environment:
+      DB_API_URL: http://db:${DB_API_PORT:-4000}
+      BLOSSOM_SERVERS: http://host.docker.internal:3000
     depends_on:
       db:
         condition: service_healthy
@@ -89,10 +95,17 @@ services:
       context: .
       dockerfile: ./proxy/relay/Dockerfile
     container_name: nso_relay
-    # Host networking (Linux-only), same reasoning as `blossom` above.
-    network_mode: host
+    ports:
+      - "${RELAY_PORT:-8007}:${RELAY_PORT:-8007}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - ./.env
+    environment:
+      DB_API_URL: http://db:${DB_API_PORT:-4000}
+      BACKEND_RELAYS: ws://host.docker.internal:7777
+      # Must match the URL clients use in NIP-42 AUTH relay tags.
+      PUBLIC_URL: ${PUBLIC_URL:-ws://localhost:8007}
     depends_on:
       db:
         condition: service_healthy
