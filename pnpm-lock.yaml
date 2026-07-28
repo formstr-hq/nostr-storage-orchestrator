@@ -19,25 +19,65 @@ importers:
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
+      express:
+        specifier: ^5.2.1
+        version: 5.2.1
       pg:
         specifier: ^8.21.0
         version: 8.21.0
     devDependencies:
+      '@types/express':
+        specifier: ^5.0.6
+        version: 5.0.6
       '@types/node':
         specifier: ^26.1.1
         version: 26.1.1
       prisma:
         specifier: ^7.8.0
         version: 7.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
+  packages/db-client:
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
+  packages/smoke-test:
+    dependencies:
+      nostr-tools:
+        specifier: ^2.23.5
+        version: 2.23.5(typescript@6.0.3)
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
 
   proxy/blossom:
     dependencies:
-      '@orchestrator/db':
+      '@orchestrator/db-client':
         specifier: workspace:*
-        version: link:../../packages/db
+        version: link:../../packages/db-client
       '@types/cors':
         specifier: ^2.8.19
         version: 2.8.19
@@ -75,9 +115,9 @@ importers:
 
   proxy/relay:
     dependencies:
-      '@orchestrator/db':
+      '@orchestrator/db-client':
         specifier: workspace:*
-        version: link:../../packages/db
+        version: link:../../packages/db-client
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1

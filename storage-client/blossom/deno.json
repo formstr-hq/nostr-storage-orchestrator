@@ -1,0 +1,40 @@
+{
+  "name": "@hzrd149/blossom-server",
+  "version": "6.2.0",
+  "exports": "./main.ts",
+  "license": "MIT",
+  "compilerOptions": {
+    "jsx": "precompile",
+    "jsxImportSource": "@hono/hono/jsx",
+    "lib": ["dom", "dom.iterable", "esnext", "deno.ns"]
+  },
+  "tasks": {
+    "dev": "deno run --env-file=.env --watch --allow-net --allow-read --allow-write --allow-env --allow-ffi --allow-sys --allow-run main.ts",
+    "start": "deno run --env-file=.env --allow-net --allow-read --allow-write --allow-env --allow-ffi --allow-sys --allow-run main.ts",
+    "test": "deno test --env-file=.env --allow-net --allow-read --allow-write --allow-env --allow-ffi --allow-sys tests/unit/ tests/e2e/",
+    "build": "deno bundle --config src/landing/client/deno.json --minify --platform browser -o public/client.js src/landing/client/index.tsx"
+  },
+  "imports": {
+    "@bradenmacdonald/s3-lite-client": "jsr:@bradenmacdonald/s3-lite-client@^0.9.5",
+    "@hono/hono": "jsr:@hono/hono@^4.12.7",
+    "@libsql/client": "npm:@libsql/client@^0.17.0",
+    "@std/assert": "jsr:@std/assert@1",
+    "@std/media-types": "jsr:@std/media-types@^1.1.0",
+    "@std/crypto": "jsr:@std/crypto@^1.0.5",
+    "@std/encoding": "jsr:@std/encoding@^1.0.10",
+    "@std/path": "jsr:@std/path@^1.1.4",
+    "@std/ulid": "jsr:@std/ulid@^1.0.0",
+    "@std/yaml": "jsr:@std/yaml@^1.0.12",
+    "applesauce-common": "npm:applesauce-common@^6",
+    "applesauce-core": "npm:applesauce-core@^6",
+    "applesauce-loaders": "npm:applesauce-loaders@^6",
+    "applesauce-relay": "npm:applesauce-relay@^6",
+    "rxjs": "npm:rxjs@^7.8.0",
+    "nostr-tools": "npm:nostr-tools@^2.23.3",
+    "sharp": "npm:sharp@^0.34.5",
+    "file-type": "npm:file-type@^19.6.0",
+    "zod": "npm:zod@^4.3.6"
+  },
+  "allowScripts": ["npm:sharp@0.34.5"],
+  "exclude": ["src/landing/client"]
+}

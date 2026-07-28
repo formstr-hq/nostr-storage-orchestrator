@@ -1,36 +1,101 @@
 # version: "3.9"
+#
+# All config (server locations, credentials, ports) lives in a single root
+# .env file — copy .env.example to .env and edit as needed:
+#   cp .env.example .env
+# It's read two ways: interpolated directly into this file via ${VAR}
+# (needed for e.g. `ports:` mappings, resolved at `docker compose` parse
+# time), and injected into each container's runtime environment via
+# `env_file:`.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nso_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orchestrator}
+      POSTGRES_DB: ${POSTGRES_DB:-orchestrator}
+    # Not published to the host by default — db-api reaches it over the
+    # internal compose network. Uncomment to inspect it directly (e.g. with
+    # `prisma studio` or `psql`); POSTGRES_PORT is set in .env.
+    # ports:
+    #   - "${POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - nso_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 forces a real TCP check; without it, pg_isready can
+      # report healthy during postgres's transient socket-only init phase.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-orchestrator}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   db:
     build:
       context: .
       dockerfile: ./packages/db/Dockerfile
     container_name: nso_db
     env_file:
-      - ./packages/db/.env
+      - ./.env
+    environment:
+      # Always talk to the compose-managed postgres service above — only
+      # the host/port need overriding here (plain literals; POSTGRES_USER/
+      # PASSWORD/DB still come from .env via env_file). Compose has no way
+      # to URL-encode a password, so credentials are never built into a
+      # connection string here — see packages/db/src/prisma.ts and
+      # prisma.config.ts, which derive DATABASE_URL themselves and handle
+      # this correctly. Point this at an external database (e.g. Neon) by
+      # setting DATABASE_URL directly in .env instead.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    # Bound to the host's loopback only (not 0.0.0.0) — reachable from
+    # sibling containers on the bridge network via `db:$DB_API_PORT` as
+    # before, and from the host-networked `blossom`/`relay` services (see
+    # below) via `localhost:$DB_API_PORT`. Never reachable off this machine.
+    ports:
+      - "127.0.0.1:${DB_API_PORT:-4000}:${DB_API_PORT:-4000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${DB_API_PORT:-4000}/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   blossom:
     build:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
     container_name: nso_blossom
+    # Host networking (Linux-only) instead of the bridge network: BLOSSOM_SERVERS
+    # can point at a mesh-VPN hostname (e.g. nostr-vpn's MagicDNS, resolved via
+    # systemd-resolved on loopback) that only the host's own network namespace
+    # can see — a bridge-networked container has no path to that resolver.
+    # No `ports:` here; host networking binds BLOSSOM_PORT directly on the
+    # host. DB_API_URL/BLOSSOM_SERVERS come straight from .env with no
+    # override needed — host networking means the local-dev and Docker
+    # values are identical.
+    network_mode: host
     env_file:
-      - ./proxy/blossom/.env
-      - ./packages/db/.env
-    ports:
-      - "3001:3001"
+      - ./.env
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
   relay:
     build:
       context: .
       dockerfile: ./proxy/relay/Dockerfile
     container_name: nso_relay
+    # Host networking (Linux-only), same reasoning as `blossom` above.
+    network_mode: host
     env_file:
-      - ./proxy/relay/.env
-      - ./packages/db/.env
-    ports:
-      - "8007:8007"
+      - ./.env
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+
+volumes:
+  nso_postgres_data:

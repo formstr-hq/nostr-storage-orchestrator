@@ -1,8 +1,8 @@
 import express from "express";
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { prisma } from "@orchestrator/db";
-import { PLAN_CONFIG } from "./plan.js";
+import { DbClient, DbApiError } from "@orchestrator/db-client";
+import { getPlanConfig } from "./plan.js";
 import { getNpubFromPubkey, verifyNip42AuthEvent } from "./nostr.js";
 import { RelayPool } from "./relay.js";
 import { verifyEvent, type NostrEvent } from "nostr-tools";
@@ -21,8 +21,17 @@ app.use(express.json({ limit: "10mb" }));
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 const relayPool = new RelayPool();
-const relayUrl = process.env.PUBLIC_URL ?? `ws://localhost:${process.env.PORT ?? 8007}`;
+const PORT = process.env.RELAY_PORT!;
+const relayUrl = process.env.PUBLIC_URL ?? `ws://localhost:${PORT}`;
 const authState = new Map<WebSocket, RelaySocketState>();
+
+// db-api always runs on the same host (both are host-networked in Docker,
+// see docker-compose.yml), so this is derived from its port rather than
+// duplicated as its own var — override DB_API_URL directly if that ever
+// stops being true.
+const db = new DbClient({
+    baseUrl: process.env.DB_API_URL ?? `http://localhost:${process.env.DB_API_PORT}`,
+});
 
 function getAuthState(socket: WebSocket): RelaySocketState {
     let state = authState.get(socket);
@@ -39,49 +48,39 @@ function rejectEvent(event: NostrEvent, reason: string): ["OK", string, false, s
 
 async function reserveStorage(event: NostrEvent, npub: string, size: number): Promise<boolean> {
     try {
-        await prisma.$transaction(async (tx) => {
-            const existing = await tx.relayEvent.findUnique({ where: { eventId: event.id } });
-            if (existing) {
-                return;
-            }
+        const existing = await db.getRelayEvent(event.id);
+        if (existing) {
+            return true;
+        }
 
-            const user = await tx.user.findUniqueOrThrow({ where: { npub } });
-            if (Number(user.usedStorage) + size > PLAN_CONFIG[user.plan].storageLimit) {
-                throw new Error("Storage limit exceeded");
-            }
+        const user = await db.getUser(npub);
+        if (!user) {
+            return false;
+        }
 
-            await tx.relayEvent.create({
-                data: {
-                    eventId: event.id,
-                    npub,
-                    kind: event.kind,
-                    size,
-                    replicas: [],
-                },
-            });
-            await tx.user.update({
-                where: { npub },
-                data: { usedStorage: { increment: size } },
-            });
+        const planConfig = await getPlanConfig(db);
+        if (Number(user.usedStorage) + size > planConfig[user.plan].storageLimit) {
+            return false;
+        }
+
+        await db.createRelayEvent({
+            eventId: event.id,
+            npub,
+            kind: event.kind,
+            size,
         });
         return true;
-    } catch {
+    } catch (error) {
+        if (error instanceof DbApiError && error.status === 409) {
+            // raced with another reserve for the same event id
+            return true;
+        }
         return false;
     }
 }
 
-async function rollbackStorage(eventId: string, npub: string, size: number): Promise<void> {
-    await prisma.$transaction(async (tx) => {
-        const existing = await tx.relayEvent.findUnique({ where: { eventId } });
-        if (!existing) {
-            return;
-        }
-        await tx.relayEvent.delete({ where: { eventId } });
-        await tx.user.update({
-            where: { npub },
-            data: { usedStorage: { decrement: size } },
-        });
-    });
+async function rollbackStorage(eventId: string): Promise<void> {
+    await db.rollbackRelayEvent(eventId);
 }
 
 function validateEvent(event: NostrEvent): void {
@@ -140,7 +139,7 @@ wss.on("connection", (socket) => {
                         return;
                     }
 
-                    const existing = await prisma.relayEvent.findUnique({ where: { eventId: deletionTarget } });
+                    const existing = await db.getRelayEvent(deletionTarget);
                     if (!existing || existing.npub !== state.npub) {
                         socket.send(JSON.stringify(rejectEvent(event, "Deletion not authorized")));
                         return;
@@ -148,19 +147,15 @@ wss.on("connection", (socket) => {
 
                     const deletionEvent = { ...event, kind: 5 } as NostrEvent;
                     await relayPool.delete(deletionEvent, existing.replicas);
-                    await prisma.relayEvent.delete({ where: { eventId: existing.eventId } });
+                    await db.deleteRelayEvent(existing.eventId);
                     socket.send(JSON.stringify(["OK", event.id, true, ""]));
                     return;
                 }
 
                 const npub = getNpubFromPubkey(event.pubkey);
-                const user = await prisma.user.upsert({
-                    where: { npub },
-                    update: {},
-                    create: { npub: state.npub },
-                });
+                const user = await db.upsertUser(npub);
 
-                const planConfig = PLAN_CONFIG[user.plan];
+                const planConfig = (await getPlanConfig(db))[user.plan];
                 const size = Buffer.byteLength(JSON.stringify(event), "utf8");
                 if (size > planConfig.uploadLimit) {
                     socket.send(JSON.stringify(rejectEvent(event, "File exceeds upload limit")));
@@ -176,17 +171,14 @@ wss.on("connection", (socket) => {
                 const healthyRelaysPromise = (async () => {
                     const healthyRelays = await relayPool.selectHealthyRelays(planConfig.replicaCount);
                     await relayPool.publish(event, healthyRelays);
-                    await prisma.relayEvent.update({
-                        where: { eventId: event.id },
-                        data: { replicas: healthyRelays },
-                    });
+                    await db.setRelayEventReplicas(event.id, healthyRelays);
                 })();
 
                 try {
                     await healthyRelaysPromise;
                     socket.send(JSON.stringify(["OK", event.id, true, ""]));
                 } catch (publishError) {
-                    await rollbackStorage(event.id, npub, size);
+                    await rollbackStorage(event.id);
                     const reason = publishError instanceof Error ? publishError.message : "Failed to publish to relays";
                     socket.send(JSON.stringify(rejectEvent(event, reason)));
                 }
@@ -245,7 +237,6 @@ wss.on("connection", (socket) => {
 });
 
 
-const port = Number(process.env.PORT ?? 8007);
-server.listen(port, () => {
-    console.log(`Nostr relay listening on port ${port}`);
+server.listen(Number(PORT), () => {
+    console.log(`Nostr relay listening on port ${PORT}`);
 });

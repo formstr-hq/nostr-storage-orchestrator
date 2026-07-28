@@ -17,9 +17,14 @@ services:
     build: ./blossom
     container_name: blossom
     ports:
-      - "3000:3000"
+      - "${BLOSSOM_PORT:-3000}:3000"
     restart: unless-stopped
     volumes:
-      - ./data/blossom:/app/uploads
-    environment:
-      NODE_ID : node-1
+      - ./data/blossom:/app/data
+      - ./blossom/config.yml:/app/config.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s

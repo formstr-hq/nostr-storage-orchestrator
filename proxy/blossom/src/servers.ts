@@ -1,5 +1,10 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import axios from "axios";
-import "dotenv/config";
+import { config } from "dotenv";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+config({ path: path.resolve(__dirname, "../../../.env") });
 
 export const BLOSSOM_SERVERS =
   process.env.BLOSSOM_SERVERS?.split(",")
@@ -10,26 +15,20 @@ if (BLOSSOM_SERVERS.length === 0) {
   throw new Error("BLOSSOM_SERVERS is not configured");
 }
 
-export async function getServerStatus(url : string) {
+export async function getServerStatus(url: string) {
   try {
-    console.log("Checking", url);
-    const [health, storage] = await Promise.all([
-      axios.get(`${url}/health`, { timeout: 3000 }),
-      axios.get(`${url}/storage`, { timeout: 3000 })
-    ]);
-    console.log("Health:", health.status);
-    console.log("Storage:", storage.data);
+    const health = await axios.get(`${url}/health`, { timeout: 3000 });
     return {
       url,
       healthy: health.status === 200,
-      available: storage.data.freeBytes ?? 0
+      available: Number.MAX_SAFE_INTEGER,
     };
   } catch (e) {
     console.error("Server check failed:", url, e);
     return {
       url,
       healthy: false,
-      available: 0
+      available: 0,
     };
   }
 }
@@ -45,36 +44,25 @@ export async function getBestServers(replicaCount: number) {
     .slice(0, replicaCount);
 }
 
-export async function uploadBlob(blob: Buffer, authHeader: string, replicaCount: number) {
+export async function uploadBlob(blob: Buffer, hash: string, authHeader: string, replicaCount: number) {
   const servers = await getBestServers(replicaCount);
   console.log("Selected servers for upload:", servers);
   if (servers.length === 0) {
     throw new Error("No healthy servers available");
   }
-  const hashBuffer = await crypto.subtle.digest(
-    "SHA-256",
-    blob.buffer.slice(
-      blob.byteOffset,
-      blob.byteOffset + blob.byteLength,
-    ) as ArrayBuffer,
-  );
-
-  const hexHash = Array.from(new Uint8Array(hashBuffer))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 
   const successfulReplicas: string[] = [];
 
   for (const server of servers) {
     try {
-      await axios.post(
+      await axios.put(
         `${server.url}/upload`,
         blob,
         {
           headers: {
             Authorization: authHeader,
             "Content-Type": "application/octet-stream",
-            "X-SHA-256": hexHash,
+            "X-SHA-256": hash,
           },
         }
       );
@@ -95,7 +83,7 @@ export async function uploadBlob(blob: Buffer, authHeader: string, replicaCount:
   }
 
   return {
-    hash: hexHash,
+    hash,
     replicas: successfulReplicas,
   };
 }
@@ -104,7 +92,7 @@ export async function downloadBlob(hash: string, replicas: string[]) {
   for (const server of replicas) {
     try {
       const response = await axios.get(
-        `${server}/download/${hash}`,
+        `${server}/${hash}`,
         { responseType: "arraybuffer" }
       );
       return Buffer.from(response.data);
@@ -123,7 +111,7 @@ export async function deleteBlob(hash: string, replicas: string[]) {
   for (const server of replicas) {
     try {
       await axios.delete(
-        `${server}/delete/${hash}`
+        `${server}/${hash}`
       );
     } catch (err) {
       console.error(
