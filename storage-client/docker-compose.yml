@@ -1,11 +1,48 @@
+# NVPN mesh topology for a storage-client backend. blossom/strfry are only
+# reachable over the NVPN mesh (or loopback) — no host-published ports — and
+# no `container_name:` so multiple storage-client stacks can run on one
+# Docker host with distinct Compose project names. See
+# ../docs/NVPN_SIDECAR_PLAN.md section 4. For local dev/smoke-testing without
+# a mesh, use docker-compose.dev.yml instead.
+#
+# Direct client UDP (optional, off by default — see compose.direct-udp.yml):
+#   docker compose -f docker-compose.yml -f compose.direct-udp.yml up -d --build
 services:
-  relay:
-    image: ghcr.io/hoytech/strfry:latest
-    container_name: strfry
-    restart: unless-stopped
+  nvpn:
+    extends:
+      file: ../nvpn/compose.yml
+      service: nvpn
+    environment:
+      NVPN_ROLE: client
+      NVPN_MESH_INPUT_PORTS: "3000,7777"
+    volumes:
+      - nvpn_data:/data
 
-    ports:
-      - "7777:7777"
+  # strfry runs as uid 1000, but ./data/strfry is created root-owned — by
+  # Docker on a fresh machine, or by an earlier `sudo docker compose` run —
+  # which makes strfry die with `mdb_env_open: Permission denied`. This
+  # one-shot root container fixes the ownership before the relay starts,
+  # rather than overriding the image's non-root user.
+  relay-init:
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    user: "0:0"
+    volumes:
+      - ./data/strfry:/db
+    command: ["chown", "-R", "1000:1000", "/db"]
+
+  relay:
+    # Pinned by digest: upstream publishes only a `latest` tag and retags it,
+    # and one such retag switched the runtime user from root to uid 1000 —
+    # exactly the silent break `latest` invites.
+    image: ghcr.io/hoytech/strfry:latest@sha256:9dd7646202dc494a351957505ab3accd9045b8626eff99fafc0a0075d7d9b322
+    restart: unless-stopped
+    network_mode: "service:nvpn"
+    depends_on:
+      nvpn:
+        condition: service_healthy
+        restart: true
+      relay-init:
+        condition: service_completed_successfully
 
     volumes:
       - ./data/strfry:/app/db
@@ -15,16 +52,25 @@ services:
 
   blossom:
     build: ./blossom
-    container_name: blossom
-    ports:
-      - "${BLOSSOM_PORT:-3000}:3000"
     restart: unless-stopped
+    network_mode: "service:nvpn"
+    depends_on:
+      nvpn:
+        condition: service_healthy
+        restart: true
     volumes:
       - ./data/blossom:/app/data
       - ./blossom/config.yml:/app/config.yml:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health >/dev/null 2>&1 || exit 1"]
+      # The Deno image ships neither wget nor curl, so probing with either
+      # can never succeed — the container would sit "unhealthy" forever and
+      # any `condition: service_healthy` on it would block. `deno eval` has
+      # implicit permissions and exits non-zero on a failed fetch.
+      test: ["CMD", "deno", "eval", "const r = await fetch('http://localhost:3000/health'); if (!r.ok) Deno.exit(1);"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 10
-      start_period: 15s
+      start_period: 30s
+
+volumes:
+  nvpn_data:

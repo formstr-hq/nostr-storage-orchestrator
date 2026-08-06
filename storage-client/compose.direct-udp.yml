@@ -1,0 +1,16 @@
+# Optional overlay: publish this client's NVPN UDP listener directly on the
+# host for a direct-path (non-FIPS-relayed) mesh connection. Off by default —
+# apply explicitly alongside docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f compose.direct-udp.yml up -d --build
+#
+# Publishing the same host and internal port avoids a known-bad remap, but
+# does not guarantee direct-path connectivity through every NAT/router
+# combination — FIPS relay fallback is required regardless. Running multiple
+# client stacks on one host with this overlay needs distinct
+# NVPN_LISTEN_PORT values and Compose project names per stack.
+# See ../docs/NVPN_SIDECAR_PLAN.md section 4.
+services:
+  nvpn:
+    ports:
+      - "${NVPN_LISTEN_PORT:-51820}:${NVPN_LISTEN_PORT:-51820}/udp"

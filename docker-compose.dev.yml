@@ -1,10 +1,10 @@
-# version: "3.9"
+# Meshless development/smoke-test topology — no NVPN sidecar. Preserves the
+# stack's previous host-networking behavior for local dev where a mesh isn't
+# needed. Production uses docker-compose.yml (NVPN mesh) instead; see
+# docs/NVPN_SIDECAR_PLAN.md section 6.
 #
-# NVPN mesh production topology — blossom/relay reach storage-client backends
-# over a private NVPN mesh confined to the `nvpn` sidecar's network namespace;
-# the host itself never joins the mesh. See docs/NVPN_SIDECAR_PLAN.md and
-# nvpn/README.md. For local dev/smoke-testing without a mesh, use
-# docker-compose.dev.yml instead.
+# Usage: docker compose -f docker-compose.dev.yml up --build
+# (scripts/docker-smoke-test.sh selects this file explicitly.)
 #
 # All config (server locations, credentials, ports) lives in a single root
 # .env file — copy .env.example to .env and edit as needed:
@@ -70,68 +70,38 @@ services:
       timeout: 5s
       retries: 10
 
-  nvpn:
-    extends:
-      file: ./nvpn/compose.yml
-      service: nvpn
-    environment:
-      NVPN_ROLE: proxy
-      NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${RELAY_PORT:-8007}"
-    volumes:
-      - nvpn_data:/data
-    ports:
-      - "${BLOSSOM_PORT:-3001}:${BLOSSOM_PORT:-3001}"
-      - "${RELAY_PORT:-8007}:${RELAY_PORT:-8007}"
-      - "${NVPN_LISTEN_PORT:-51820}:${NVPN_LISTEN_PORT:-51820}/udp"
-
   blossom:
     build:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
     container_name: nso_blossom
-    # Shares the nvpn sidecar's network namespace instead of the bridge
-    # network: BLOSSOM_SERVERS can point at a storage-client's mesh tunnel IP
-    # (10.44.x.y), reachable only from inside that namespace — the host
-    # itself never joins the mesh. No `ports:` here; the nvpn service above
-    # publishes BLOSSOM_PORT for the whole shared namespace. db-api stays
-    # reachable at db:$DB_API_PORT via the sidecar's own bridge attachment.
-    network_mode: "service:nvpn"
+    # Host networking (Linux-only) instead of the bridge network: BLOSSOM_SERVERS
+    # can point at a mesh-VPN hostname (e.g. nostr-vpn's MagicDNS, resolved via
+    # systemd-resolved on loopback) that only the host's own network namespace
+    # can see — a bridge-networked container has no path to that resolver.
+    # No `ports:` here; host networking binds BLOSSOM_PORT directly on the
+    # host. DB_API_URL/BLOSSOM_SERVERS come straight from .env with no
+    # override needed — host networking means the local-dev and Docker
+    # values are identical.
+    network_mode: host
     env_file:
       - ./.env
-    environment:
-      # In the nvpn sidecar's namespace `localhost` is the sidecar, not the
-      # host — db-api's 127.0.0.1-bound published port is unreachable from
-      # here. Reach it by service name over the sidecar's bridge attachment
-      # instead (the code's default is localhost:$DB_API_PORT, which is only
-      # right for local dev and docker-compose.dev.yml).
-      DB_API_URL: http://db:${DB_API_PORT:-4000}
     depends_on:
       db:
         condition: service_healthy
-      nvpn:
-        condition: service_healthy
-        restart: true
 
   relay:
     build:
       context: .
       dockerfile: ./proxy/relay/Dockerfile
     container_name: nso_relay
-    # Shares the nvpn sidecar's network namespace, same reasoning as
-    # `blossom` above.
-    network_mode: "service:nvpn"
+    # Host networking (Linux-only), same reasoning as `blossom` above.
+    network_mode: host
     env_file:
       - ./.env
-    environment:
-      # Same reasoning as `blossom` above.
-      DB_API_URL: http://db:${DB_API_PORT:-4000}
     depends_on:
       db:
         condition: service_healthy
-      nvpn:
-        condition: service_healthy
-        restart: true
 
 volumes:
   nso_postgres_data:
-  nvpn_data:

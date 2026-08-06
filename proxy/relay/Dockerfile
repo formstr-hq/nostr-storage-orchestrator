@@ -1,4 +1,6 @@
-FROM node:20-bookworm-slim
+# Pinned by digest so rebuilds are reproducible and an upstream retag
+# cannot silently change the runtime (see README.md "Pinned images").
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 WORKDIR /app
 

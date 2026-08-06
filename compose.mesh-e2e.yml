@@ -1,0 +1,13 @@
+# Overlay used by scripts/nvpn-mesh-e2e.sh to point the proxies at a peer's
+# mesh tunnel IP without editing .env. The tunnel IP is only known after the
+# client has joined and been approved, so it cannot live in a static file.
+#
+#   docker compose -f docker-compose.yml -f compose.mesh-e2e.yml up -d blossom relay
+services:
+  blossom:
+    environment:
+      BLOSSOM_SERVERS: ${MESH_BLOSSOM_SERVERS:?set MESH_BLOSSOM_SERVERS to the peer's http://10.44.x.y:3000}
+
+  relay:
+    environment:
+      BACKEND_RELAYS: ${MESH_BACKEND_RELAYS:?set MESH_BACKEND_RELAYS to the peer's ws://10.44.x.y:7777}
