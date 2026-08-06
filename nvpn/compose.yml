@@ -35,6 +35,13 @@ services:
       # Name we pass to `nvpn start --iface`; firewall.sh and healthcheck.sh
       # read the same value rather than trying to discover the interface.
       NVPN_TUN_IFACE: ${NVPN_TUN_IFACE:-nvpn0}
+      # entrypoint.sh's apply_endpoint_if_set() reads this to advertise a
+      # reachable <host>:<port> instead of whatever local address `nvpn init`
+      # saw (the Docker bridge IP, 172.x, unreachable from outside the
+      # container). Empty is a valid default — only a role with a real public
+      # address (typically the proxy) needs to set it. See nvpn-host-setup.sh
+      # and README.md "Proxy (this repo, root)".
+      NVPN_ENDPOINT: ${NVPN_ENDPOINT:-}
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 10s
