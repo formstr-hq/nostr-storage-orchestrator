@@ -18,7 +18,7 @@ services:
     volumes:
       - nvpn_data:/data
 
-  # strfry runs as uid 1000, but ./data/strfry is created root-owned — by
+  # strfry runs as uid 1000, but RELAY_DATA_PATH is created root-owned — by
   # Docker on a fresh machine, or by an earlier `sudo docker compose` run —
   # which makes strfry die with `mdb_env_open: Permission denied`. This
   # one-shot root container fixes the ownership before the relay starts,
@@ -27,7 +27,7 @@ services:
     image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
     user: "0:0"
     volumes:
-      - ./data/strfry:/db
+      - ${RELAY_DATA_PATH}:/db
     command: ["chown", "-R", "1000:1000", "/db"]
 
   relay:
@@ -45,7 +45,7 @@ services:
         condition: service_completed_successfully
 
     volumes:
-      - ./data/strfry:/app/db
+      - ${RELAY_DATA_PATH}:/app/db
       - ./strfry/strfry.conf:/etc/strfry.conf
 
     command: ["relay"]
@@ -59,7 +59,7 @@ services:
         condition: service_healthy
         restart: true
     volumes:
-      - ./data/blossom:/app/data
+      - ${BLOSSOM_DATA_PATH}:/app/data
       - ./blossom/config.yml:/app/config.yml:ro
     healthcheck:
       # The Deno image ships neither wget nor curl, so probing with either
