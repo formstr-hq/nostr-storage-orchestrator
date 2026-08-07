@@ -31,7 +31,11 @@ use nostr::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Mutex, time::timeout};
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
+use tracing::{debug, error, info, warn};
 use url::Url;
 
 const DEFAULT_PORT: u16 = 3002;
@@ -109,6 +113,13 @@ impl Config {
     }
 
     pub fn into_state(self) -> AppState {
+        info!(
+            public_base = %self.public_base,
+            nvpn_bin = %self.nvpn_bin.display(),
+            nvpn_config = %self.nvpn_config.display(),
+            allowed_pubkeys = self.allowed_pubkeys.len(),
+            "admin-backend configured"
+        );
         AppState {
             allowed_pubkeys: Arc::new(self.allowed_pubkeys),
             public_base: self.public_base.into(),
@@ -131,6 +142,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/devices", post(add_device))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(cors())
+        // Outermost: logs every request/response, including ones CORS or the
+        // body limit reject, with method, path, status, and latency.
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
@@ -303,12 +317,22 @@ fn authorize(
     let auth_header = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .ok_or(ApiError::Unauthorized)?;
+        .ok_or_else(|| {
+            warn!(path, "request had no Authorization header");
+            ApiError::Unauthorized
+        })?;
     let url =
         Url::parse(&format!("{}{path}", state.public_base)).map_err(|_| ApiError::Internal)?;
     let pubkey = verify_auth_header(auth_header, &url, method, Timestamp::now(), body)
-        .map_err(|_| ApiError::Unauthorized)?;
+        .map_err(|error| {
+            warn!(path, %error, "NIP-98 authorization did not verify");
+            ApiError::Unauthorized
+        })?;
     if !state.allowed_pubkeys.contains(&pubkey) {
+        // The signature was valid but the key is unknown to this host — almost
+        // always an operator forgetting to add the npub to
+        // ADMIN_ALLOWED_PUBKEYS, so it is worth the pubkey being visible here.
+        warn!(path, %pubkey, "pubkey verified but is not in ADMIN_ALLOWED_PUBKEYS");
         return Err(ApiError::Forbidden);
     }
     if consume {
@@ -384,27 +408,64 @@ impl Nvpn {
         ])
         .await?;
         self.run_locked(&["reload", "--config", &config]).await?;
+        info!(npub, "device added and mesh reloaded");
         Ok(())
     }
 
     async fn run_locked(&self, args: &[&str]) -> Result<Vec<u8>, ApiError> {
+        let bin = self.bin.display();
+        debug!(%bin, ?args, "running nvpn command");
+
         let mut command = Command::new(self.bin.as_ref());
         command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Captured (not discarded) so a failure can be logged with the
+            // reason nvpn itself gave, instead of only a generic error surfacing
+            // to the client.
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let child = command.spawn().map_err(|_| ApiError::NvpnUnavailable)?;
+
+        let child = command.spawn().map_err(|error| {
+            error!(%bin, ?args, %error, "failed to spawn nvpn");
+            ApiError::NvpnUnavailable
+        })?;
+
         let output = timeout(self.command_timeout, child.wait_with_output())
             .await
-            .map_err(|_| ApiError::NvpnTimeout)?
-            .map_err(|_| ApiError::NvpnUnavailable)?;
+            .map_err(|_| {
+                warn!(?args, timeout = ?self.command_timeout, "nvpn command timed out");
+                ApiError::NvpnTimeout
+            })?
+            .map_err(|error| {
+                error!(?args, %error, "failed to read nvpn command output");
+                ApiError::NvpnUnavailable
+            })?;
+
         if !output.status.success() {
+            error!(
+                ?args,
+                code = ?output.status.code(),
+                stderr = %truncated(&String::from_utf8_lossy(&output.stderr)),
+                "nvpn command exited with a failure status"
+            );
             return Err(ApiError::NvpnUnavailable);
         }
+
         Ok(output.stdout)
     }
+}
+
+/// Bound how much of an untrusted command's output ever reaches the log.
+fn truncated(input: &str) -> String {
+    const MAX_CHARS: usize = 2000;
+    if input.chars().count() <= MAX_CHARS {
+        return input.to_string();
+    }
+    let mut clipped: String = input.chars().take(MAX_CHARS).collect();
+    clipped.push('…');
+    clipped
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,9 +499,22 @@ struct StatusResponse {
 }
 
 fn parse_status(output: &[u8]) -> Result<StatusResponse, ApiError> {
-    let status: NvpnStatus =
-        serde_json::from_slice(output).map_err(|_| ApiError::NvpnUnavailable)?;
-    let peers = status.daemon.state.ok_or(ApiError::NvpnUnavailable)?.peers;
+    let status: NvpnStatus = serde_json::from_slice(output).map_err(|error| {
+        error!(
+            %error,
+            output = %truncated(&String::from_utf8_lossy(output)),
+            "nvpn status output was not the expected JSON shape"
+        );
+        ApiError::NvpnUnavailable
+    })?;
+    let peers = status
+        .daemon
+        .state
+        .ok_or_else(|| {
+            error!("nvpn status output had no daemon.state; is the nvpn daemon running?");
+            ApiError::NvpnUnavailable
+        })?
+        .peers;
     Ok(StatusResponse {
         known_clients: peers.len(),
         connected_clients: peers.iter().filter(|peer| peer.reachable).count(),
@@ -454,12 +528,21 @@ struct InviteResponse {
 }
 
 fn extract_invite(output: &[u8]) -> Result<String, ApiError> {
-    let output = std::str::from_utf8(output).map_err(|_| ApiError::NvpnUnavailable)?;
+    let output = std::str::from_utf8(output).map_err(|error| {
+        error!(%error, "nvpn create-invite output was not valid UTF-8");
+        ApiError::NvpnUnavailable
+    })?;
     output
         .split_ascii_whitespace()
         .find(|part| part.starts_with("nvpn://invite/") && part.len() > "nvpn://invite/".len())
         .map(ToOwned::to_owned)
-        .ok_or(ApiError::NvpnUnavailable)
+        .ok_or_else(|| {
+            error!(
+                output = %truncated(output),
+                "nvpn create-invite output had no invite token"
+            );
+            ApiError::NvpnUnavailable
+        })
 }
 
 #[derive(Debug, Deserialize)]
