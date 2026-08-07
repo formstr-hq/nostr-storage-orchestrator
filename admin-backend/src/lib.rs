@@ -891,6 +891,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remove_device_requires_authorization() {
+        let response = router(test_state())
+            .oneshot(
+                Request::post("/v1/devices/remove")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "npub": "npub1invalid" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Unauthorized, not BadRequest: the npub is never even parsed before
+        // authorize() rejects the missing signature, same ordering as add_device.
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn request_body_is_bounded() {
         let response = router(test_state())
             .oneshot(

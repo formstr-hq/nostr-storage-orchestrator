@@ -12,9 +12,14 @@ to the pinned `nostr = 0.45.0` crate.
 | `GET` | `/v1/status` | NIP-98 | `known_clients`, `connected_clients`, and sanitized `peers` |
 | `POST` | `/v1/invites` | NIP-98 with payload | `{"invite":"nvpn://invite/..."}` |
 | `POST` | `/v1/devices` | NIP-98 with payload | `{"npub":"...","added":true}` |
+| `POST` | `/v1/devices/remove` | NIP-98 with payload | `{"npub":"...","removed":true}` |
 
-`POST /v1/invites` accepts an empty body or `{}`. `POST /v1/devices` accepts exactly
-`{"npub":"<full canonical npub>"}`. Request bodies are limited to 4 KiB.
+`POST /v1/invites` accepts an empty body or `{}`. `POST /v1/devices` and
+`POST /v1/devices/remove` accept exactly `{"npub":"<full canonical npub>"}`. Request bodies are
+limited to 4 KiB.
+
+Removal is `POST /v1/devices/remove`, not `DELETE /v1/devices`: `nostr::nips::nip98::HttpMethod`
+only covers GET/POST/PUT/PATCH, so every mutation here stays POST to keep one signing path.
 
 nVPN's host invite is a reusable bearer credential, not a single-use token. Operators should
 share it only over a secure channel and rotate the host invite secret after suspected exposure.

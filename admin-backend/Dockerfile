@@ -41,7 +41,13 @@ COPY admin-backend/src ./src
 RUN cargo build --locked --release
 
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+# procps (for `ps`) is required at runtime: `nvpn status` shells out to `ps`
+# to confirm the daemon PID it reads from daemon.pid is actually alive
+# (nvpn's daemon_runtime::process_scan::is_process_running). Without it the
+# spawn fails, nvpn silently treats the daemon as not running, and status
+# falls back to `status_source: "config"` with `daemon.running: false` even
+# though the daemon (in the shared-PID `nvpn` sidecar) is up.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates procps \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /build/target/release/admin-backend /usr/local/bin/admin-backend
