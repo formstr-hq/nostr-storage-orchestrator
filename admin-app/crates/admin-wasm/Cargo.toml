@@ -1,0 +1,29 @@
+[package]
+name = "admin-wasm"
+description = "WebAssembly binding for the storage admin client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+admin-core.workspace = true
+js-sys = "0.3"
+serde.workspace = true
+serde-wasm-bindgen = "0.6"
+# Same version `nostr` uses; on wasm it has no clock of its own, so this crate
+# supplies one (see `src/time.rs`).
+universal-time = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+# Not used directly: these select a browser entropy source for the transitive
+# `getrandom` versions pulled in by `nostr`/`secp256k1`. Without them a wasm
+# build fails to link with "the wasm*-unknown-unknown targets are not supported".
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

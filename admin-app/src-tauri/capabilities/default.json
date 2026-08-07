@@ -3,6 +3,6 @@
   "identifier": "default",
   "description": "Allow the main window to invoke registered core commands only",
   "windows": ["main"],
-  "platforms": ["linux", "android"],
+  "platforms": ["linux", "android", "windows", "macOS"],
   "permissions": ["core:default"]
 }

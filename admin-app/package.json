@@ -4,21 +4,32 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "wasm:build": "wasm-pack build crates/admin-wasm --target web --out-dir ../../src/wasm/pkg --out-name admin_wasm --no-pack",
+    "dev": "pnpm run wasm:build && vite",
+    "build": "pnpm run wasm:build && pnpm run typecheck && vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "android:init": "tauri android init",
-    "android:dev": "tauri android dev",
-    "android:build": "tauri android build"
+    "typecheck": "tsc -b",
+    "dev:tauri": "vite",
+    "build:tauri": "pnpm run typecheck && vite build",
+    "tauri:dev": "cross-env VITE_TARGET=tauri tauri dev",
+    "tauri:build": "cross-env VITE_TARGET=tauri tauri build",
+    "android:init": "cross-env VITE_TARGET=tauri tauri android init",
+    "android:dev": "cross-env VITE_TARGET=tauri tauri android dev",
+    "android:build": "cross-env VITE_TARGET=tauri tauri android build",
+    "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.11.1"
+    "@tauri-apps/api": "2.11.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "cross-env": "^10.0.0",
     "typescript": "5.9.3",
     "vite": "7.3.6"
   }

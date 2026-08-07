@@ -1,0 +1,28 @@
+.shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.footer {
+  margin-top: auto;
+  min-height: 56px;
+  padding: 14px max(20px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+  display: flex;
+  justify-content: center;
+  gap: 30px;
+  border-top: 1px solid rgba(112, 225, 178, .11);
+  color: #647975;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+}
+
+@media (max-width: 720px) {
+  .footer { flex-wrap: wrap; gap: 9px 16px; }
+}
+
+@media (max-width: 440px) {
+  .footer span:last-child { display: none; }
+}
