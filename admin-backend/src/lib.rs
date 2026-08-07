@@ -140,6 +140,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/invites", post(create_invite))
         .route("/v1/devices", post(add_device))
+        // No DELETE: nostr::nips::nip98::HttpMethod only covers GET/POST/PUT/
+        // PATCH, so every mutation here is POST to keep one signing path.
+        .route("/v1/devices/remove", post(remove_device))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(cors())
         // Outermost: logs every request/response, including ones CORS or the
@@ -306,6 +309,27 @@ async fn add_device(
     Ok(Json(DeviceResponse { npub, added: true }))
 }
 
+async fn remove_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<DeviceRemovalResponse>, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        "/v1/devices/remove",
+        HttpMethod::POST,
+        Some(&body),
+        true,
+    )?;
+
+    let request: DeviceRequest =
+        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("invalid JSON body"))?;
+    let npub = parse_device_npub(&request.npub)?;
+    state.nvpn.remove_device_and_reload(&npub).await?;
+    Ok(Json(DeviceRemovalResponse { npub, removed: true }))
+}
+
 fn authorize(
     state: &AppState,
     headers: &HeaderMap,
@@ -409,6 +433,23 @@ impl Nvpn {
         .await?;
         self.run_locked(&["reload", "--config", &config]).await?;
         info!(npub, "device added and mesh reloaded");
+        Ok(())
+    }
+
+    async fn remove_device_and_reload(&self, npub: &str) -> Result<(), ApiError> {
+        let _guard = self.command_lock.lock().await;
+        let config = self.config.to_string_lossy();
+        self.run_locked(&[
+            "remove-device",
+            "--config",
+            &config,
+            "--device",
+            npub,
+            "--publish",
+        ])
+        .await?;
+        self.run_locked(&["reload", "--config", &config]).await?;
+        info!(npub, "device removed and mesh reloaded");
         Ok(())
     }
 
@@ -555,6 +596,12 @@ struct DeviceRequest {
 struct DeviceResponse {
     npub: String,
     added: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceRemovalResponse {
+    npub: String,
+    removed: bool,
 }
 
 #[derive(Debug)]
@@ -709,7 +756,11 @@ mod tests {
     async fn nip98_requests_are_preflighted_for_any_origin() {
         let app = router(test_state());
 
-        for (path, method) in [("/v1/status", "GET"), ("/v1/devices", "POST")] {
+        for (path, method) in [
+            ("/v1/status", "GET"),
+            ("/v1/devices", "POST"),
+            ("/v1/devices/remove", "POST"),
+        ] {
             let preflight = app
                 .clone()
                 .oneshot(

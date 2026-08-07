@@ -82,6 +82,7 @@ services:
     extends:
       file: ./nvpn/compose.yml
       service: nvpn
+    container_name: nso_nvpn
     environment:
       NVPN_ROLE: proxy
       NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${RELAY_PORT:-8007},${ADMIN_API_PORT:-3002}"
@@ -100,6 +101,15 @@ services:
       dockerfile: ./admin-backend/Dockerfile
     container_name: nso_admin
     network_mode: "service:nvpn"
+    # `nvpn status --json` reports live daemon state (connected peers,
+    # handshake/traffic counters) only when it can see the daemon's PID as
+    # alive — config-only operations like create-invite don't need this and
+    # work without it. network_mode above shares the network namespace but
+    # not PID, so from here the daemon's pid_file (readable, since /data is
+    # shared) points at a PID with no matching process in this container's
+    # own PID namespace, and status silently reports no `state`. Sharing PID
+    # here mirrors the network trust boundary already established above.
+    pid: "service:nvpn"
     cap_drop:
       - ALL
     security_opt:
