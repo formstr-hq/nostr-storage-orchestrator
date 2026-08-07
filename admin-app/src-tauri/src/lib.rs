@@ -11,7 +11,7 @@ use admin_core::{
     self as core, CoreError, GeneratedKey, HostStatus, Method, Session, SignedRequest, UnlockResult,
 };
 use reqwest::redirect::Policy;
-use tauri::State;
+use tauri::{image::Image, Manager, State};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -180,6 +180,19 @@ pub fn run() {
         .expect("reqwest client configuration is valid");
 
     tauri::Builder::default()
+        .setup(|app| {
+            // Linux window managers read the taskbar icon from the running
+            // window, not the bundle icon, so dev/unpackaged builds show no
+            // icon unless we set it explicitly here.
+            #[cfg(target_os = "linux")]
+            {
+                let icon = Image::from_bytes(include_bytes!("../icons/128x128.png"))?;
+                app.get_webview_window("main")
+                    .expect("main window exists")
+                    .set_icon(icon)?;
+            }
+            Ok(())
+        })
         .manage(AppState {
             active: Mutex::new(None),
             client,

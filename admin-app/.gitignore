@@ -8,3 +8,4 @@ src/wasm/pkg/
 *.log
 .idea/
 .vscode/
+.tauri-linux-shim/

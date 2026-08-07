@@ -123,6 +123,18 @@ Bundles are written below `target/release/bundle/`. Windows and macOS need no
 extra system packages beyond the standard Tauri prerequisites; the app capability
 already lists all four desktop platforms.
 
+`tauri:build` runs through `scripts/tauri-build.mjs` rather than calling `tauri`
+directly. On Linux it works around two linuxdeploy AppImage-bundling issues that
+show up with newer toolchains (Arch in particular): the cached linuxdeploy
+AppImage's bundled `strip` can't parse the `.relr.dyn` section modern
+glibc/binutils emit and aborts the whole bundle, and Arch's `gdk-pixbuf2`
+package no longer ships the `loaders/` directory its `.pc` file still
+advertises, which crashes linuxdeploy-plugin-gtk's copy step. The wrapper sets
+`NO_STRIP=1` and, only when the advertised gdk-pixbuf loaders directory is
+actually missing, points `PKG_CONFIG_PATH` at a local empty-directory shim so
+the copy is a no-op. Neither workaround changes the built app; it just lets the
+AppImage/deb/rpm bundling finish.
+
 ## Android
 
 Install Android Studio with the SDK Platform, Build-Tools, Platform-Tools,
