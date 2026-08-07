@@ -8,6 +8,7 @@ type MessageHandlerCallbacks = {
   failConnection: (reason: string) => void;
   onAuthChallenge: () => void;
   onAuthReady: () => void;
+  onSubscriptionClosed: (backendSubId: string) => void;
 };
 
 export class BackendMessageHandler {
@@ -51,7 +52,7 @@ export class BackendMessageHandler {
       return;
     }
     if (messageType === "CLOSED") {
-      this.handleClosed(connection, rest[0], rest[1]);
+      this.handleClosed(connection, rest[0], rest[1], callbacks.onSubscriptionClosed);
       return;
     }
     if (messageType === "EVENT") {
@@ -127,7 +128,12 @@ export class BackendMessageHandler {
     }
   }
 
-  private handleClosed(connection: RelayConnection, subId: unknown, rawReason: unknown): void {
+  private handleClosed(
+    connection: RelayConnection,
+    subId: unknown,
+    rawReason: unknown,
+    onSubscriptionClosed: (backendSubId: string) => void,
+  ): void {
     if (typeof subId !== "string") {
       return;
     }
@@ -147,6 +153,7 @@ export class BackendMessageHandler {
       subscription.onInitialSettled("closed", reason);
     }
     subscription.onBackendClosed(reason);
+    onSubscriptionClosed(subId);
   }
 
   private handleEvent(connection: RelayConnection, subId: unknown, event: unknown): void {

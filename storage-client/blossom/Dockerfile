@@ -11,7 +11,7 @@
 # build so the runtime container serves a known-good bundle instead of relying
 # on startup-time bundling.
 # ─────────────────────────────────────────────────────────────────────────────
-FROM denoland/deno:debian
+FROM denoland/deno:debian@sha256:c777b4b225501a61074837e90a826a58f99124837824023cd60334b1e2374498
 
 WORKDIR /app
 

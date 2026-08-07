@@ -1,0 +1,20 @@
+[package]
+name = "nostr-storage-admin"
+description = "Nostr Storage Orchestrator administration client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lib]
+name = "nostr_storage_admin_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+admin-core.workspace = true
+reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
+serde.workspace = true
+tauri = { version = "2.10.3", features = ["image-png"] }

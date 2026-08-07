@@ -1,0 +1,50 @@
+# Shared NVPN sidecar fragment. Consuming stacks `extends` this and add their
+# own state volume, published ports, and NVPN_ROLE/NVPN_*_INPUT_PORTS —
+# nothing project-specific belongs here so it can't accidentally leak
+# between the root proxy stack and a storage-client stack.
+#
+# NVPN_ROLE is deliberately NOT interpolated here (no `${NVPN_ROLE:?...}`):
+# `extends` resolves `${VAR}` in this file against the host/.env environment
+# at parse time, before merging with the consuming file, so a `:?required`
+# guard here would fail even when the consumer sets NVPN_ROLE as a literal
+# in its own `environment:` block (as both docker-compose.yml and
+# storage-client/docker-compose.yml do). entrypoint.sh enforces the
+# proxy/client requirement at container runtime instead.
+# See ../docs/NVPN_SIDECAR_PLAN.md sections 1, 3, 4.
+services:
+  nvpn:
+    # No `image:` — nothing is published anywhere to pull, so this is
+    # build-from-source only; Compose auto-names the built image per project
+    # (e.g. nostr-storage-orchestrator-nvpn / storage-client-nvpn). If this
+    # ever does get published for real under a registry tag, add `image:`
+    # back with that tag so Compose can pull a pre-built image instead of
+    # building from source on every machine.
+    build:
+      context: .
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      HOME: /data/home
+      XDG_CONFIG_HOME: /data/config
+      NVPN_LISTEN_PORT: ${NVPN_LISTEN_PORT:-51820}
+      NVPN_PRIVATE_CIDR: ${NVPN_PRIVATE_CIDR:-10.44.0.0/16}
+      # Name we pass to `nvpn start --iface`; firewall.sh and healthcheck.sh
+      # read the same value rather than trying to discover the interface.
+      NVPN_TUN_IFACE: ${NVPN_TUN_IFACE:-nvpn0}
+      # entrypoint.sh's apply_endpoint_if_set() reads this to advertise a
+      # reachable <host>:<port> instead of whatever local address `nvpn init`
+      # saw (the Docker bridge IP, 172.x, unreachable from outside the
+      # container). Empty is a valid default — only a role with a real public
+      # address (typically the proxy) needs to set it. See nvpn-host-setup.sh
+      # and README.md "Proxy (this repo, root)".
+      NVPN_ENDPOINT: ${NVPN_ENDPOINT:-}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5

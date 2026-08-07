@@ -1,5 +1,11 @@
 # version: "3.9"
 #
+# NVPN mesh production topology — blossom/relay reach storage-client backends
+# over a private NVPN mesh confined to the `nvpn` sidecar's network namespace;
+# the host itself never joins the mesh. See docs/NVPN_SIDECAR_PLAN.md and
+# nvpn/README.md. For local dev/smoke-testing without a mesh, use
+# docker-compose.dev.yml instead.
+#
 # All config (server locations, credentials, ports) lives in a single root
 # .env file — copy .env.example to .env and edit as needed:
 #   cp .env.example .env
@@ -15,7 +21,7 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     container_name: nso_postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
@@ -31,7 +37,11 @@ services:
     healthcheck:
       # -h 127.0.0.1 forces a real TCP check; without it, pg_isready can
       # report healthy during postgres's transient socket-only init phase.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-orchestrator}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-orchestrator}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -63,52 +73,119 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:${DB_API_PORT:-4000}/health || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:${DB_API_PORT:-4000}/health || exit 1",
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  nvpn:
+    extends:
+      file: ./nvpn/compose.yml
+      service: nvpn
+    container_name: nso_nvpn
+    environment:
+      NVPN_ROLE: proxy
+      NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${RELAY_PORT:-8007},${ADMIN_API_PORT:-3002}"
+    volumes:
+      - nvpn_data:/data
+    ports:
+      - "${BLOSSOM_PORT:-3001}:${BLOSSOM_PORT:-3001}"
+      - "${RELAY_PORT:-8007}:${RELAY_PORT:-8007}"
+      # The admin API is reachable off-container only through local nginx.
+      - "127.0.0.1:${ADMIN_API_PORT:-3002}:${ADMIN_API_PORT:-3002}"
+      - "${NVPN_LISTEN_PORT:-51820}:${NVPN_LISTEN_PORT:-51820}/udp"
+
+  admin:
+    build:
+      context: .
+      dockerfile: ./admin-backend/Dockerfile
+    container_name: nso_admin
+    network_mode: "service:nvpn"
+    # `nvpn status --json` reports live daemon state (connected peers,
+    # handshake/traffic counters) only when it can see the daemon's PID as
+    # alive — config-only operations like create-invite don't need this and
+    # work without it. network_mode above shares the network namespace but
+    # not PID, so from here the daemon's pid_file (readable, since /data is
+    # shared) points at a PID with no matching process in this container's
+    # own PID namespace, and status silently reports no `state`. Sharing PID
+    # here mirrors the network trust boundary already established above.
+    pid: "service:nvpn"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    environment:
+      # nVPN resolves identity files relative to the same homes used by the
+      # sidecar. Both services access the shared state through nvpn_data.
+      ADMIN_ALLOWED_PUBKEYS: "${ADMIN_ALLOWED_PUBKEYS:-}"
+      ADMIN_API_PORT: "${ADMIN_API_PORT:-3002}"
+      ADMIN_PUBLIC_URL: "${ADMIN_PUBLIC_URL:-}"
+      HOME: /data/home
+      XDG_CONFIG_HOME: /data/config
+      NVPN_CONFIG: /data/config/nvpn/config.toml
+    volumes:
+      - nvpn_data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    depends_on:
+      nvpn:
+        condition: service_healthy
+        restart: true
+    restart: unless-stopped
 
   blossom:
     build:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
     container_name: nso_blossom
-    # Bridge network + published port (works on macOS and Linux). Reach
-    # storage-client on the host via host.docker.internal; talk to db-api
-    # over the compose network. .env localhost URLs are overridden below
-    # so the same .env still works for non-Docker local runs.
-    ports:
-      - "${BLOSSOM_PORT:-3001}:${BLOSSOM_PORT:-3001}"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    # Shares the nvpn sidecar's network namespace instead of the bridge
+    # network: BLOSSOM_SERVERS can point at a storage-client's mesh tunnel IP
+    # (10.44.x.y), reachable only from inside that namespace — the host
+    # itself never joins the mesh. No `ports:` here; the nvpn service above
+    # publishes BLOSSOM_PORT for the whole shared namespace. db-api stays
+    # reachable at db:$DB_API_PORT via the sidecar's own bridge attachment.
+    network_mode: "service:nvpn"
     env_file:
       - ./.env
     environment:
+      # In the nvpn sidecar's namespace `localhost` is the sidecar, not the
+      # host — db-api's 127.0.0.1-bound published port is unreachable from
+      # here. Reach it by service name over the sidecar's bridge attachment
+      # instead (the code's default is localhost:$DB_API_PORT, which is only
+      # right for local dev and docker-compose.dev.yml).
       DB_API_URL: http://db:${DB_API_PORT:-4000}
-      BLOSSOM_SERVERS: http://host.docker.internal:3000
     depends_on:
       db:
         condition: service_healthy
+      nvpn:
+        condition: service_healthy
+        restart: true
 
   relay:
     build:
       context: .
       dockerfile: ./proxy/relay/Dockerfile
     container_name: nso_relay
-    ports:
-      - "${RELAY_PORT:-8007}:${RELAY_PORT:-8007}"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    # Shares the nvpn sidecar's network namespace, same reasoning as
+    # `blossom` above.
+    network_mode: "service:nvpn"
     env_file:
       - ./.env
     environment:
+      # Same reasoning as `blossom` above.
       DB_API_URL: http://db:${DB_API_PORT:-4000}
-      BACKEND_RELAYS: ws://host.docker.internal:7777
-      # Must match the URL clients use in NIP-42 AUTH relay tags.
-      PUBLIC_URL: ${PUBLIC_URL:-ws://localhost:8007}
     depends_on:
       db:
         condition: service_healthy
+      nvpn:
+        condition: service_healthy
+        restart: true
 
 volumes:
   nso_postgres_data:
+  nvpn_data:

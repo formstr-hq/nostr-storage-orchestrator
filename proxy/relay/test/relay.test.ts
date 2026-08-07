@@ -17,6 +17,16 @@ function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+async function waitForCondition(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("timed out waiting for condition");
+    }
+    await wait(10);
+  }
+}
+
 describe("RelayPool subscriptions", () => {
   let backends: FakeBackend[] = [];
   let pools: RelayPool[] = [];
@@ -273,6 +283,9 @@ describe("RelayPool subscriptions", () => {
       relays: [backend.url],
       publishAckTimeoutMs: 200,
       connectTimeoutMs: 1000,
+      reconnectInitialDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+      reconnectJitterRatio: 0,
     }));
     const sk = generateSecretKey();
     const note = sign(sk, { kind: 1, created_at: nowSeconds(), tags: [], content: "pending" });
@@ -282,6 +295,63 @@ describe("RelayPool subscriptions", () => {
     backend.closeSocket();
     const results = await publishPromise;
     assert.equal(results[0]?.accepted, false);
+    await waitForCondition(() => backend.connectionCount === 2);
+  });
+
+  it("reconnects and restores an active subscription after the backend socket drops", async () => {
+    const backend = await startFakeBackend({
+      authChallenge: true,
+      requireAuth: true,
+      autoEose: false,
+    });
+    backends.push(backend);
+    const pool = trackPool(new RelayPool({
+      relays: [backend.url],
+      backendAuthSecretKey: generateSecretKey(),
+      initialEoseTimeoutMs: 1000,
+      connectTimeoutMs: 1000,
+      reconnectInitialDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+      reconnectJitterRatio: 0,
+    }));
+    const sk = generateSecretKey();
+    const pubkey = getPublicKey(sk);
+    const note = sign(sk, {
+      kind: 1,
+      created_at: nowSeconds(),
+      tags: [],
+      content: "after-reconnect",
+    });
+    const events: NostrEvent[] = [];
+    let backendClosedCount = 0;
+    const handle = pool.subscribe(
+      [{ kinds: [1], authors: [pubkey] }],
+      {
+        onEvent: (event) => events.push(event),
+        onBackendInitialSettled: () => undefined,
+        onBackendClosed: () => {
+          backendClosedCount += 1;
+        },
+      },
+      { targetRelays: [backend.url] },
+    );
+
+    await handle.initialSync;
+    await waitForCondition(() => backend.subscriptions.size === 1);
+    const backendSubId = [...backend.subscriptions.keys()][0]!;
+    backend.sendEose(backendSubId);
+    await wait(20);
+
+    backend.closeSocket();
+    await waitForCondition(
+      () => backend.connectionCount === 2 && backend.subscriptions.has(backendSubId),
+    );
+    backend.sendEvent(backendSubId, note);
+    await waitForCondition(() => events.length === 1);
+
+    assert.equal(events[0]?.id, note.id);
+    assert.equal(backendClosedCount, 0);
+    handle.close();
   });
 });
 

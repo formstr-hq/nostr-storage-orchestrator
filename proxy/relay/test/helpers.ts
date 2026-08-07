@@ -16,6 +16,7 @@ export type FakeBackend = {
   server: Server;
   wss: WebSocketServer;
   subscriptions: Map<string, { filters: Record<string, unknown>[] }>;
+  readonly connectionCount: number;
   sent: unknown[][];
   okResponses: Record<string, { accepted: boolean; reason?: string }>;
   close: () => Promise<void>;
@@ -27,6 +28,8 @@ export type FakeBackend = {
 
 export async function startFakeBackend(options: FakeBackendOptions = {}): Promise<FakeBackend> {
   const subscriptions = new Map<string, { filters: Record<string, unknown>[] }>();
+  const subscriptionOwners = new Map<string, WebSocket>();
+  let connectionCount = 0;
   const sent: unknown[][] = [];
   const okResponses: Record<string, { accepted: boolean; reason?: string }> = {
     ...(options.okResponses ?? {}),
@@ -35,6 +38,7 @@ export async function startFakeBackend(options: FakeBackendOptions = {}): Promis
   const wss = new WebSocketServer({ server });
 
   wss.on("connection", (socket) => {
+    connectionCount += 1;
     let authenticated = !options.requireAuth;
     if (options.authChallenge) {
       socket.send(JSON.stringify(["AUTH", "backend-challenge"]));
@@ -42,6 +46,7 @@ export async function startFakeBackend(options: FakeBackendOptions = {}): Promis
 
     socket.on("message", (raw) => {
       const payload = JSON.parse(raw.toString()) as unknown[];
+      sent.push(payload);
       const [type, ...rest] = payload;
       if (type === "AUTH") {
         const event = rest[0] as NostrEvent;
@@ -56,6 +61,7 @@ export async function startFakeBackend(options: FakeBackendOptions = {}): Promis
           return;
         }
         subscriptions.set(subId, { filters });
+        subscriptionOwners.set(subId, socket);
         if (options.autoEose !== false) {
           const delay = options.eoseDelayMs ?? 0;
           setTimeout(() => {
@@ -88,6 +94,16 @@ export async function startFakeBackend(options: FakeBackendOptions = {}): Promis
       if (type === "CLOSE") {
         const [subId] = rest as [string];
         subscriptions.delete(subId);
+        subscriptionOwners.delete(subId);
+      }
+    });
+
+    socket.on("close", () => {
+      for (const [subId, owner] of subscriptionOwners) {
+        if (owner === socket) {
+          subscriptionOwners.delete(subId);
+          subscriptions.delete(subId);
+        }
       }
     });
   });
@@ -116,6 +132,9 @@ export async function startFakeBackend(options: FakeBackendOptions = {}): Promis
     server,
     wss,
     subscriptions,
+    get connectionCount() {
+      return connectionCount;
+    },
     sent,
     okResponses,
     close: () =>

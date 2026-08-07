@@ -1,0 +1,8 @@
+# Anchors this app as its own pnpm workspace root.
+#
+# Without this file pnpm walks up, finds the orchestrator's pnpm-workspace.yaml
+# (which covers only `packages/*` and `proxy/*`), and installs that workspace
+# instead — leaving admin-app with no dependencies at all. The admin client is
+# deliberately standalone: it ships to operator devices, not to the server-side
+# compose stack.
+packages: []

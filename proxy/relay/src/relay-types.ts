@@ -28,6 +28,9 @@ export type RelayPoolOptions = {
   publishAckTimeoutMs?: number;
   connectTimeoutMs?: number;
   backendAuthProbeMs?: number;
+  reconnectInitialDelayMs?: number;
+  reconnectMaxDelayMs?: number;
+  reconnectJitterRatio?: number;
   wsFactory?: (url: string) => WebSocket;
   logger?: RelayLogger;
   backendAuthSecretKey?: Uint8Array;
@@ -37,6 +40,7 @@ export type BackendSubscription = {
   backendSubId: string;
   relay: string;
   generation: number;
+  filters: Record<string, unknown>[];
   initialStatus: BackendSubStatus;
   initialReason?: string;
   initialSettled: boolean;

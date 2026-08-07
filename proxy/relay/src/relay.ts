@@ -126,38 +126,32 @@ export class RelayPool {
           return;
         }
 
-        try {
-          const connection = await this.connectionManager.get(relay);
-          if (connection.authUnavailable) {
-            const reason =
-              connection.authUnavailableReason ?? "auth-required: backend relay requires authentication";
-            ref.status = "failed";
-            ref.reason = reason;
-            callbacks.onBackendInitialSettled(relay, backendSubId, "failed", reason);
-            return;
+        const subscription = this.createBackendSubscription({
+          backendSubId,
+          relay,
+          generation,
+          filters,
+          ref,
+          callbacks,
+          isInactive: () => suppressed || closed,
+        });
+        subscription.eoseTimer = setTimeout(() => {
+          if (!subscription.initialSettled) {
+            subscription.initialStatus = "timed-out";
+            subscription.onInitialSettled("timed-out", "error: initial query timed out");
           }
+        }, this.initialEoseTimeoutMs);
 
-          const subscription = this.createBackendSubscription({
-            backendSubId,
-            relay,
-            generation,
-            ref,
-            callbacks,
-            isInactive: () => suppressed || closed,
-          });
-          subscription.eoseTimer = setTimeout(() => {
-            if (!subscription.initialSettled) {
-              subscription.initialStatus = "timed-out";
-              subscription.onInitialSettled("timed-out", "error: initial query timed out");
-            }
-          }, this.initialEoseTimeoutMs);
-
-          connection.subscriptions.set(backendSubId, subscription);
-          connection.socket.send(JSON.stringify(["REQ", backendSubId, ...filters]));
+        try {
+          await this.connectionManager.openSubscription(subscription);
         } catch (error) {
-          ref.status = "failed";
-          ref.reason = normalizeReason(error instanceof Error ? error.message : "connection failed");
-          callbacks.onBackendInitialSettled(relay, backendSubId, "failed", ref.reason);
+          const reason = normalizeReason(error instanceof Error ? error.message : "connection failed");
+          if (reason.startsWith("auth-required:")) {
+            if (!subscription.initialSettled) {
+              subscription.onInitialSettled("failed", reason);
+            }
+            this.connectionManager.closeSubscription(relay, backendSubId);
+          }
         }
       }),
     ).then(() => undefined);
@@ -208,6 +202,7 @@ export class RelayPool {
     backendSubId,
     relay,
     generation,
+    filters,
     ref,
     callbacks,
     isInactive,
@@ -215,6 +210,7 @@ export class RelayPool {
     backendSubId: string;
     relay: string;
     generation: number;
+    filters: Record<string, unknown>[];
     ref: BackendSubscriptionRef;
     callbacks: SubscriptionCallbacks;
     isInactive: () => boolean;
@@ -223,6 +219,7 @@ export class RelayPool {
       backendSubId,
       relay,
       generation,
+      filters,
       initialStatus: "pending",
       initialSettled: false,
       closed: false,
