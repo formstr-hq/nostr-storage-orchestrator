@@ -1,0 +1,56 @@
+.panel {
+  width: min(520px, calc(100% - 40px));
+  margin: auto;
+  padding: 55px 42px;
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: linear-gradient(150deg, rgba(20, 39, 39, .96), rgba(11, 24, 24, .98));
+  box-shadow: 0 30px 100px rgba(0, 0, 0, .22);
+}
+
+.mark {
+  width: 70px;
+  height: 64px;
+  margin: 0 auto 30px;
+  position: relative;
+  border: 2px solid var(--green);
+  border-radius: 12px;
+}
+.mark:before {
+  content: "";
+  position: absolute;
+  width: 32px;
+  height: 29px;
+  left: 17px;
+  top: -25px;
+  border: 2px solid var(--green);
+  border-bottom: 0;
+  border-radius: 20px 20px 0 0;
+}
+.mark span {
+  position: absolute;
+  width: 8px;
+  height: 17px;
+  left: 29px;
+  top: 21px;
+  border-radius: 5px;
+  background: var(--warm);
+}
+
+.panel h1 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 400;
+  font-size: clamp(38px, 8vw, 56px);
+  line-height: 1;
+  letter-spacing: -.045em;
+}
+
+.lede { color: var(--muted); line-height: 1.6; font-size: 13px; }
+
+.form { margin-top: 28px; display: grid; gap: 14px; text-align: left; }
+
+@media (max-width: 720px) {
+  .panel { width: min(100% - 24px, 520px); padding: 46px 24px 30px; }
+}

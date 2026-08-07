@@ -1,0 +1,72 @@
+/* Controls shared by more than one component. */
+
+.eyebrow {
+  margin: 0 0 10px;
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .19em;
+  text-transform: uppercase;
+}
+
+.primary, .secondary {
+  min-height: 52px;
+  padding: 0 20px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 750;
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+}
+.primary { color: #092019; background: var(--green); }
+.primary.warm { background: var(--warm); color: #2b1a06; }
+.secondary { color: var(--ink); border-color: #3c5a56; background: #19302f; }
+
+.textButton {
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+.textButton.danger { color: var(--danger); }
+
+.spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid currentColor;
+  border-left-color: transparent;
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+
+.statusDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #6a7977;
+  box-shadow: 0 0 0 4px rgba(106, 121, 119, .11);
+}
+.statusDot.online {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(112, 225, 178, .11);
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

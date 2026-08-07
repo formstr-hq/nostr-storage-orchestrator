@@ -1,0 +1,18 @@
+[package]
+name = "admin-core"
+description = "Crypto, NIP-98 request signing, and response parsing for the storage admin client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+bitcoin_hashes.workspace = true
+nostr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

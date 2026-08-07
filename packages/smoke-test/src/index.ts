@@ -163,10 +163,27 @@ async function runBlossomSuite(): Promise<void> {
     assert(body.used === payload.length, `expected used=${payload.length}, got ${body.used}`);
   });
 
-  await step('rejects GET /<sha256> when the token\'s "x" tag names a different hash', async () => {
+  // Blob reads are deliberately public — see handleGetBlob in
+  // proxy/blossom/src/index.ts, where the auth and ownership checks are
+  // commented out. These two steps pin that decision down so re-tightening
+  // GET is a conscious change that fails here first, rather than a silent
+  // break for every unauthenticated reader.
+  await step("GET /<sha256> is public — no Authorization header needed", async () => {
+    const res = await fetch(`${BLOSSOM_URL}/${payloadHash}`);
+    assert(res.ok, `expected 2xx, got ${res.status}`);
+    const bytes = Buffer.from(await res.arrayBuffer());
+    assert(bytes.equals(payload), "downloaded bytes do not match uploaded bytes");
+  });
+
+  await step('GET /<sha256> ignores a token whose "x" tag names a different hash', async () => {
     const auth = blossomAuthToken(sk, "get", { hash: "0".repeat(64) });
     const res = await fetch(`${BLOSSOM_URL}/${payloadHash}`, { headers: { authorization: auth } });
-    assert(res.status === 401, `expected 401, got ${res.status}`);
+    assert(res.ok, `expected 2xx, got ${res.status}`);
+  });
+
+  await step("GET /<sha256> 404s for a blob that was never uploaded", async () => {
+    const res = await fetch(`${BLOSSOM_URL}/${"1".repeat(64)}`);
+    assert(res.status === 404, `expected 404, got ${res.status}`);
   });
 
   await step("HEAD /<sha256> returns metadata headers without a body", async () => {
