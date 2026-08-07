@@ -18,6 +18,11 @@ Client
   ▼
 proxy/relay  ──► backend relays (configured via BACKEND_RELAYS)
   └──► db-api (HTTP, internal-only) ──► PostgreSQL
+
+Storage Control (Android/Linux)
+  │  NIP-98 HTTP auth
+  ▼
+admin-backend ──► NVPN CLI + shared sidecar state
 ```
 
 `db-api` is a thin data layer: it performs CRUD reads/writes and keeps two-table writes atomic (e.g. creating a blob and bumping a user's `usedStorage` in one transaction), but it holds **no business logic**. Quota enforcement, duplicate-handling, and ownership checks all live in the proxies, exactly as before — only the Prisma calls moved behind HTTP. `db-api` is never exposed publicly (compose-internal network only) and has no auth layer.
@@ -65,17 +70,23 @@ Dockerised backend services used for local testing:
 - `blossom` — raw blob server with upload, health, and storage endpoints (routes: `/upload`, `/blob/:hash` for both download and delete, `/health`, `/storage`)
 - `strfry` — deployed via Docker Compose as a backend relay
 
+### `admin-backend` and `admin-app`
+
+- `admin-backend` — Rust/Axum control-plane API for nVPN peer status, invite generation, and device approval. Every `/v1` route verifies NIP-98 with the standard `nostr` crate and restricts callers to `ADMIN_ALLOWED_PUBKEYS`.
+- `admin-app` — mobile-first Tauri 2 client for Android and Linux. It supports multiple storage hosts, persists only NIP-49 `ncryptsec` credentials, never persists passphrases, and keeps decrypted keys in Rust process memory only.
+- The production Compose stack shares the nVPN sidecar's network namespace and state volume with the backend. Port `ADMIN_API_PORT` is published on host loopback only for nginx; the backend has no Docker socket and no extra capabilities.
+
 ### `packages/smoke-test`
 
 Protocol-level checks driven over real HTTP/WebSocket connections — signs Nostr events with `nostr-tools`, exercises the full `proxy/blossom` REST API and `proxy/relay` WebSocket protocol (AUTH, EVENT, REQ, kind-5 delete) against a live stack. The same 24 checks are driven by both topology harnesses: `scripts/docker-smoke-test.sh` (meshless) and `scripts/nvpn-mesh-e2e.sh` (NVPN mesh, host + client). See [Smoke testing](#smoke-testing) below.
 
 ## Plan rules
 
-| Plan | Storage limit | Max upload size | Replica count |
-|---|---|---|---|
-| `FREE` | 15 GB | 50 MB | 1 |
-| `BASIC` | 50 GB | 500 MB | 3 |
-| `PRO` | 100 GB | 2 GB | 5 |
+| Plan    | Storage limit | Max upload size | Replica count |
+| ------- | ------------- | --------------- | ------------- |
+| `FREE`  | 15 GB         | 50 MB           | 1             |
+| `BASIC` | 50 GB         | 500 MB          | 3             |
+| `PRO`   | 100 GB        | 2 GB            | 5             |
 
 ## Database schema
 
@@ -89,19 +100,19 @@ Protocol-level checks driven over real HTTP/WebSocket connections — signs Nost
 
 All internal-only, no auth. `size`/`usedStorage` are decimal strings. `db-api` only ever returns data-integrity errors (`404` missing row, `409` duplicate id) — it never rejects for quota reasons; that decision belongs to the proxies.
 
-| Method | Path | Notes |
-|---|---|---|
-| GET | `/health` | compose healthcheck |
-| GET | `/plans` | static `PLAN_CONFIG` data |
-| GET / PUT | `/users/:npub` | read / upsert |
-| GET | `/blobs/:hash` | read |
-| POST | `/blobs` | atomically creates the blob row and increments `usedStorage` |
-| DELETE | `/blobs/:hash` | atomically deletes and decrements `usedStorage` |
-| GET | `/relay-events/:eventId` | read |
-| POST | `/relay-events` | atomically creates the row and increments `usedStorage` |
-| POST | `/relay-events/:eventId/rollback` | idempotent delete + decrement |
-| PATCH | `/relay-events/:eventId` | sets `replicas` |
-| DELETE | `/relay-events/:eventId` | plain delete, **no** decrement (matches relay's kind-5 semantics) |
+| Method    | Path                              | Notes                                                             |
+| --------- | --------------------------------- | ----------------------------------------------------------------- |
+| GET       | `/health`                         | compose healthcheck                                               |
+| GET       | `/plans`                          | static `PLAN_CONFIG` data                                         |
+| GET / PUT | `/users/:npub`                    | read / upsert                                                     |
+| GET       | `/blobs/:hash`                    | read                                                              |
+| POST      | `/blobs`                          | atomically creates the blob row and increments `usedStorage`      |
+| DELETE    | `/blobs/:hash`                    | atomically deletes and decrements `usedStorage`                   |
+| GET       | `/relay-events/:eventId`          | read                                                              |
+| POST      | `/relay-events`                   | atomically creates the row and increments `usedStorage`           |
+| POST      | `/relay-events/:eventId/rollback` | idempotent delete + decrement                                     |
+| PATCH     | `/relay-events/:eventId`          | sets `replicas`                                                   |
+| DELETE    | `/relay-events/:eventId`          | plain delete, **no** decrement (matches relay's kind-5 semantics) |
 
 ## Prerequisites
 
@@ -152,7 +163,7 @@ Both scripts create a missing `.env` from `.env.example`, are safe to re-run, an
 already-initialized mesh identity rather than re-bootstrapping it. Set `PEER_TIMEOUT` to change
 how long either side waits for the other.
 
-Onboarding a *second* client this way needs someone on the host again. If you don't want server
+Onboarding a _second_ client this way needs someone on the host again. If you don't want server
 access to be a prerequisite for adding storage clients, promote a co-admin once
 (`./scripts/nvpn-add-admin.sh <npub>`) — they can then invite and approve clients entirely from
 their own machine. See [Delegated admins](#delegated-admins).
@@ -408,9 +419,35 @@ roster — even though its invite came from the co-admin rather than the proxy. 
 - Roster propagation needs the proxy's sidecar daemon running (its normal state) and depends on
   public Nostr relays, so it is eventually-consistent rather than instant. `published_recipients=0`
   in the CLI output is not a failure signal — propagation succeeded in every case despite it.
-- The mesh identity that signs is just a Nostr key, so a mobile admin app is possible, but it has
-  to speak NVPN's signed-roster event format — either by using an NVPN mobile client or by
-  implementing that format. Nothing in this repo provides it today.
+- The mesh identity that signs is just a Nostr key. The `admin-app` avoids putting that protocol
+  and the host mesh identity on the phone: it signs short-lived NIP-98 requests, and the
+  allowlisted `admin-backend` performs roster operations through the host's existing nVPN CLI.
+
+### Admin API and app
+
+Set the public URL and one or more operator pubkeys before starting production Compose:
+
+```bash
+# .env
+ADMIN_PUBLIC_URL=https://storage.formstr.app
+ADMIN_API_PORT=3002
+ADMIN_ALLOWED_PUBKEYS=npub1...
+```
+
+`docker compose up -d --build` starts `admin-backend` as the `admin` service. It exposes
+`127.0.0.1:${ADMIN_API_PORT}` for the reverse proxy and provides these endpoints:
+
+| Method | Path          | Purpose                                              |
+| ------ | ------------- | ---------------------------------------------------- |
+| `GET`  | `/health`     | Unauthenticated container/reverse-proxy health check |
+| `GET`  | `/v1/status`  | Connected count and sanitized nVPN peers             |
+| `POST` | `/v1/invites` | Generate an nVPN client invite                       |
+| `POST` | `/v1/devices` | Add a canonical client npub and reload nVPN          |
+
+All `/v1` endpoints require an exact URL/method NIP-98 event. POST signatures also bind the
+request body. See [`admin-backend/README.md`](admin-backend/README.md) for the wire contract and
+[`admin-app/README.md`](admin-app/README.md) for Android/Linux build instructions. The app starts
+with `https://storage.formstr.app` prefilled and can retain multiple host profiles.
 
 ### Recovery
 
@@ -444,12 +481,12 @@ before you depend on them:
 
 All endpoints expect `Authorization: Nostr <base64-encoded-signed-nostr-event>`.
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/storage` | Returns storage usage, available bytes, and current plan |
-| POST | `/upload` | Uploads raw blob bytes (`Content-Type: application/octet-stream`) |
-| GET | `/download/:hash` | Downloads blob contents by SHA-256 hash |
-| DELETE | `/delete/:hash` | Deletes a blob and decrements user storage |
+| Method | Path              | Description                                                       |
+| ------ | ----------------- | ----------------------------------------------------------------- |
+| GET    | `/storage`        | Returns storage usage, available bytes, and current plan          |
+| POST   | `/upload`         | Uploads raw blob bytes (`Content-Type: application/octet-stream`) |
+| GET    | `/download/:hash` | Downloads blob contents by SHA-256 hash                           |
+| DELETE | `/delete/:hash`   | Deletes a blob and decrements user storage                        |
 
 ### Example auth header
 

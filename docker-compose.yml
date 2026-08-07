@@ -32,7 +32,11 @@ services:
     healthcheck:
       # -h 127.0.0.1 forces a real TCP check; without it, pg_isready can
       # report healthy during postgres's transient socket-only init phase.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-orchestrator}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-orchestrator}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -65,7 +69,11 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:${DB_API_PORT:-4000}/health || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:${DB_API_PORT:-4000}/health || exit 1",
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -76,13 +84,45 @@ services:
       service: nvpn
     environment:
       NVPN_ROLE: proxy
-      NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${RELAY_PORT:-8007}"
+      NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${RELAY_PORT:-8007},${ADMIN_API_PORT:-3002}"
     volumes:
       - nvpn_data:/data
     ports:
       - "${BLOSSOM_PORT:-3001}:${BLOSSOM_PORT:-3001}"
       - "${RELAY_PORT:-8007}:${RELAY_PORT:-8007}"
+      # The admin API is reachable off-container only through local nginx.
+      - "127.0.0.1:${ADMIN_API_PORT:-3002}:${ADMIN_API_PORT:-3002}"
       - "${NVPN_LISTEN_PORT:-51820}:${NVPN_LISTEN_PORT:-51820}/udp"
+
+  admin:
+    build:
+      context: .
+      dockerfile: ./admin-backend/Dockerfile
+    container_name: nso_admin
+    network_mode: "service:nvpn"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    environment:
+      # nVPN resolves identity files relative to the same homes used by the
+      # sidecar. Both services access the shared state through nvpn_data.
+      ADMIN_ALLOWED_PUBKEYS: "${ADMIN_ALLOWED_PUBKEYS:-}"
+      ADMIN_API_PORT: "${ADMIN_API_PORT:-3002}"
+      ADMIN_PUBLIC_URL: "${ADMIN_PUBLIC_URL:-}"
+      HOME: /data/home
+      XDG_CONFIG_HOME: /data/config
+      NVPN_CONFIG: /data/config/nvpn/config.toml
+    volumes:
+      - nvpn_data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    depends_on:
+      nvpn:
+        condition: service_healthy
+        restart: true
+    restart: unless-stopped
 
   blossom:
     build:
