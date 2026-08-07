@@ -12,7 +12,10 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::{
+        HeaderMap, Method, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE},
+    },
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -28,6 +31,7 @@ use nostr::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Mutex, time::timeout};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use url::Url;
 
 const DEFAULT_PORT: u16 = 3002;
@@ -126,7 +130,27 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/invites", post(create_invite))
         .route("/v1/devices", post(add_device))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(cors())
         .with_state(state)
+}
+
+/// Permit browser clients from any origin.
+///
+/// The admin client ships as a web build as well as a native one, and an
+/// operator may serve it from anywhere, so there is no origin list to keep.
+/// This is safe because authority here comes from a NIP-98 `Authorization`
+/// header the caller must sign with an allowlisted key — never from an ambient
+/// cookie. Credentials are therefore left off (and must be, alongside
+/// `AllowOrigin::any`), so a hostile page can reach these routes but cannot
+/// authenticate to them: `authorize` still checks the signature, the URL, the
+/// timestamp, replay, and `ADMIN_ALLOWED_PUBKEYS`.
+fn cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods([Method::GET, Method::POST])
+        // NIP-98 makes every request non-simple, so each one is preflighted.
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE])
+        .max_age(Duration::from_secs(600))
 }
 
 fn parse_allowlist(raw: &str) -> Result<HashSet<PublicKey>, String> {
@@ -593,6 +617,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The web build of the admin client sends a NIP-98 `Authorization` header,
+    /// which makes every request non-simple. Without a preflight answer the
+    /// browser never issues the real request at all.
+    #[tokio::test]
+    async fn nip98_requests_are_preflighted_for_any_origin() {
+        let app = router(test_state());
+
+        for (path, method) in [("/v1/status", "GET"), ("/v1/devices", "POST")] {
+            let preflight = app
+                .clone()
+                .oneshot(
+                    Request::options(path)
+                        .header("origin", "https://operator.example")
+                        .header("access-control-request-method", method)
+                        .header("access-control-request-headers", "authorization")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(preflight.status(), StatusCode::OK, "preflight for {path}");
+            let headers = preflight.headers();
+            assert_eq!(
+                headers.get("access-control-allow-origin").unwrap(),
+                "*",
+                "any origin may reach {path}"
+            );
+            assert!(
+                headers
+                    .get("access-control-allow-headers")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("authorization")
+            );
+            // `allow_credentials` is incompatible with a wildcard origin, and
+            // unnecessary: authority comes from the signed header, not a cookie.
+            assert!(headers.get("access-control-allow-credentials").is_none());
+        }
+
+        // CORS opens the door; it does not unlock it.
+        let unauthenticated = app
+            .oneshot(
+                Request::get("/v1/status")
+                    .header("origin", "https://operator.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthenticated
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "*"
+        );
     }
 
     #[tokio::test]

@@ -31,6 +31,20 @@ once, preventing replay during NIP-98's timestamp-validity window.
 `GET /v1/status` reads `.daemon.state.peers` from `nvpn status --json`. A client is connected
 only when its peer has `reachable=true`; raw nVPN status fields are not forwarded.
 
+## CORS
+
+The admin client ships a browser build alongside its native ones, so all routes answer CORS
+preflights from **any origin**, permitting `GET`/`POST` with the `authorization` and
+`content-type` request headers. There is nothing to configure.
+
+`Access-Control-Allow-Credentials` is deliberately off — it is incompatible with a wildcard
+origin, and unnecessary here because authority comes from a NIP-98 `Authorization` header the
+caller must sign with an allowlisted key, never from an ambient cookie. A hostile page can
+therefore reach these routes but cannot authenticate to them: every request still passes the
+signature, URL, timestamp, replay, and `ADMIN_ALLOWED_PUBKEYS` checks described above. The
+trade being accepted is that the endpoints become browser-reachable for unauthenticated
+probing from any page.
+
 ## Configuration
 
 | Variable | Required/default | Meaning |
