@@ -32,9 +32,3 @@ export function getRelayServer(): RelayServer {
   }
   return relayServer;
 }
-
-export const app = relayServer?.app;
-export const server = relayServer?.server;
-export const wss = relayServer?.wss;
-export const relayPool = relayServer?.relayPool;
-export const relayConfig = relayServer?.relayConfig;
