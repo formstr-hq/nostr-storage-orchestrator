@@ -56,12 +56,35 @@ TypeScript/Express service that:
 
 TypeScript/Express + WebSocket Nostr relay proxy that:
 
-- accepts NIP-42-style `AUTH` handshake messages
-- validates relay auth events against a challenge and `PUBLIC_URL`
-- tracks client subscriptions and forwards `REQ` queries
+- accepts NIP-42-style `AUTH` handshake messages for writes (reads are open without authentication)
+- validates relay auth events against a challenge and normalized `PUBLIC_URL`
+- aggregates `REQ` subscriptions across multiple `BACKEND_RELAYS` and emits exactly one `EOSE` per frontend subscription
+- keeps backend subscriptions active after `EOSE` for live event delivery
 - accepts signed `EVENT` writes and enforces plan upload constraints
-- publishes events to healthy backend relays
+- publishes events to healthy backend relays with required-replica policy
 - records relay events and storage reservations via `db-api`
+- serves NIP-11 relay information at the same HTTP URI as the WebSocket endpoint (`Accept: application/nostr+json`)
+
+Supported NIPs (verified by tests): **NIP-01**, **NIP-11**, **NIP-42**.
+
+#### Multi-backend EOSE aggregation
+
+Each frontend `REQ` opens one backend subscription per configured relay. The proxy tracks each backend independently (`pending`, `eose`, `timed-out`, `failed`, `closed`) and sends a single frontend `["EOSE", subId]` only after every backend reaches an initial terminal state. Healthy backend subscriptions remain open for live events.
+
+#### Publication replication policy
+
+For writes and kind-5 deletions, the proxy selects `replicaCount` healthy backends from the user's plan and requires acceptance from **every** selected backend. `OK true` is sent only when all required replicas accept. Partial success returns `OK false` with an `error:` reason, persists accepted replica URLs when any backend accepted, and rolls back storage reservation only when zero backends accepted.
+
+#### Optional backend service authentication
+
+If a backend relay sends NIP-42 `AUTH`, the proxy can authenticate using `BACKEND_AUTH_SECRET_KEY` (service identity). Without it, backend operations fail fast with `auth-required: backend relay requires authentication`. Service identity cannot satisfy backend ACLs that require the original frontend user's pubkey.
+
+#### Timeout configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RELAY_INITIAL_EOSE_TIMEOUT_MS` | `5000` | Per-backend initial query timeout before counting as `timed-out` |
+| `RELAY_PUBLISH_ACK_TIMEOUT_MS` | `5000` | Backend `OK` acknowledgement timeout for publishes |
 
 ### `storage-client`
 
@@ -498,6 +521,15 @@ The proxy expects a base64-encoded JSON event object signed with Nostr keys. The
 - Sends an initial `AUTH` challenge to clients.
 - Accepts `AUTH`, `EVENT`, `REQ`, and `CLOSE` messages.
 - Validates event signatures and publishes approved writes to backend relays.
+- Unauthenticated reads are allowed; writes require NIP-42 authentication.
+- Serves NIP-11 metadata on the same URI when `Accept: application/nostr+json` is set.
+- Aggregates `EOSE` across multiple `BACKEND_RELAYS` and continues live forwarding after `EOSE`.
+
+Run relay unit/integration tests (fake local backends, no Docker required):
+
+```bash
+pnpm --filter @orchestrator/relay test
+```
 
 ## Smoke testing
 
@@ -552,6 +584,7 @@ docker inspect postgres:16-alpine --format '{{index .RepoDigests 0}}'
 pnpm --filter @orchestrator/db-api run dev
 pnpm --filter @orchestrator/blossom run dev
 pnpm --filter @orchestrator/relay run dev
+pnpm --filter @orchestrator/relay test
 pnpm --filter @orchestrator/db-api run studio
 pnpm --filter @orchestrator/db-api run migrate:deploy
 pnpm --filter @orchestrator/smoke-test run smoke   # requires BLOSSOM_URL/RELAY_URL already up

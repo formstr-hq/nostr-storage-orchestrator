@@ -13,6 +13,11 @@
 # (needed for e.g. `ports:` mappings, resolved at `docker compose` parse
 # time), and injected into each container's runtime environment via
 # `env_file:`.
+#
+# Bridge networking + published ports so this works on macOS Docker Desktop
+# as well as Linux. Host-published backends (storage-client) are reached via
+# host.docker.internal. For Linux mesh-VPN / MagicDNS host networking, use:
+#   docker compose -f docker-compose.host.yml up --build
 
 services:
   postgres:
@@ -60,9 +65,8 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
     # Bound to the host's loopback only (not 0.0.0.0) — reachable from
-    # sibling containers on the bridge network via `db:$DB_API_PORT` as
-    # before, and from the host-networked `blossom`/`relay` services (see
-    # below) via `localhost:$DB_API_PORT`. Never reachable off this machine.
+    # sibling containers on the bridge network via `db:$DB_API_PORT`, and
+    # from the host via localhost. Never reachable off this machine.
     ports:
       - "127.0.0.1:${DB_API_PORT:-4000}:${DB_API_PORT:-4000}"
     depends_on:

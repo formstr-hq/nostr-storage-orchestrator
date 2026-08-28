@@ -357,15 +357,49 @@ async function runRelaySuite(): Promise<void> {
       publishedEventId = note.id;
     });
 
-    await step("REQ returns the published event, then EOSE", async () => {
-      assert(publishedEventId, "no published event id from previous step");
-      const subId = "smoke-sub";
-      client.send(["REQ", subId, { kinds: [1], authors: [pubkey], ids: [publishedEventId] }]);
-      const [, , event] = await client.waitFor((m) => m[0] === "EVENT" && m[1] === subId);
-      assert((event as { id: string }).id === publishedEventId, "returned event id does not match published event");
+    await step("live subscription receives events after EOSE", async () => {
+      const subId = `smoke-live-${Date.now()}`;
+      client.send(["REQ", subId, { kinds: [1], authors: [pubkey] }]);
       await client.waitFor((m) => m[0] === "EOSE" && m[1] === subId);
+
+      const liveNote = sign(sk, {
+        kind: 1,
+        created_at: nowSeconds(),
+        tags: [],
+        content: `smoke-live-${Date.now()}`,
+      });
+      client.send(["EVENT", liveNote]);
+      const [, , ok, reason] = await client.waitFor((m) => m[0] === "OK" && m[1] === liveNote.id);
+      assert(
+        ok === true,
+        `expected live publish to succeed, got rejection: ${reason}. ` +
+          "Is the storage-client backend relay (strfry) running and reachable?",
+      );
+
+      const [, , event] = await client.waitFor((m) => m[0] === "EVENT" && m[1] === subId);
+      assert((event as { id: string }).id === liveNote.id, "live subscription did not receive published event");
+
       client.send(["CLOSE", subId]);
-      await client.waitFor((m) => m[0] === "NOTICE");
+    });
+
+    await step("NIP-11 relay information document is available", async () => {
+      const httpUrl = RELAY_URL.replace(/^ws/, "http");
+      const response = await fetch(httpUrl, {
+        headers: { Accept: "application/nostr+json" },
+      });
+      assert(response.ok, `expected HTTP success, got ${response.status}`);
+      assert(
+        (response.headers.get("content-type") ?? "").includes("application/nostr+json"),
+        "expected application/nostr+json content type",
+      );
+      const body = (await response.json()) as {
+        supported_nips: number[];
+        limitation: { restricted_writes: boolean };
+      };
+      assert(body.supported_nips.includes(1), "expected NIP-01 in supported_nips");
+      assert(body.supported_nips.includes(11), "expected NIP-11 in supported_nips");
+      assert(body.supported_nips.includes(42), "expected NIP-42 in supported_nips");
+      assert(body.limitation.restricted_writes === true, "expected restricted_writes=true");
     });
 
     await step("kind-5 deletion removes the event for its owner", async () => {

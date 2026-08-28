@@ -1,5 +1,6 @@
 # dependencies
 node_modules
+.pnpm-store/
 
 # builds
 dist
@@ -19,3 +20,9 @@ dist
 .vscode/settings.json
 
 data
+
+# generated test output
+proxy/relay/test/*.js
+proxy/relay/test/*.js.map
+proxy/relay/test/*.d.ts
+proxy/relay/test/*.d.ts.map
