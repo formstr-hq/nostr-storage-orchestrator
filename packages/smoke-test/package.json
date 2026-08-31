@@ -5,7 +5,8 @@
   "type": "module",
   "packageManager": "pnpm@10.15.1",
   "scripts": {
-    "smoke": "tsx src/index.ts"
+    "smoke": "tsx src/index.ts",
+    "control-plane": "tsx src/control-plane.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

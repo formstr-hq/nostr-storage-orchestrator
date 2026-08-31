@@ -12,13 +12,18 @@
  * separate concern the main thread could get wrong.
  */
 import init, {
+  canonicalNpub,
   Session,
-  deviceResponse,
   generateHostKey,
   importNsec,
   inviteResponse,
+  meResponse,
+  membersResponse,
+  mutationResponse,
   normalizeHostUrl,
+  rosterResponse,
   statusResponse,
+  storagesResponse,
   transportError,
   type SignedRequest,
 } from "../wasm/pkg/admin_wasm.js";
@@ -95,6 +100,9 @@ async function handle(message: WorkerRequest): Promise<unknown> {
     case "normalizeHostUrl":
       return normalizeHostUrl(...message.args);
 
+    case "canonicalNpub":
+      return canonicalNpub(...message.args);
+
     case "generateHostKey":
       return generateHostKey(...message.args);
 
@@ -120,23 +128,65 @@ async function handle(message: WorkerRequest): Promise<unknown> {
       return statusResponse(code, body);
     }
 
+    case "me": {
+      const [code, body] = await exchange((active) => active.meRequest());
+      return meResponse(code, body);
+    }
+
+    case "roster": {
+      const [code, body] = await exchange((active) => active.rosterRequest());
+      return rosterResponse(code, body);
+    }
+
+    case "members": {
+      const [code, body] = await exchange((active) => active.membersRequest());
+      return membersResponse(code, body);
+    }
+
+    case "storages": {
+      const [code, body] = await exchange((active) => active.storagesRequest());
+      return storagesResponse(code, body);
+    }
+
     case "generateInvite": {
       const [code, body] = await exchange((active) => active.inviteRequest());
       return inviteResponse(code, body);
     }
 
-    case "addDevice": {
-      const [npub] = message.args;
-      const [code, body] = await exchange((active) => active.deviceRequest(npub));
-      return deviceResponse(code, body);
+    case "authorizeMember": {
+      const [npub, role] = message.args;
+      const [code, body] = await exchange((active) => active.memberRequest(npub, role));
+      return mutationResponse(code, body);
     }
 
-    case "removeDevice": {
+    case "revokeMember": {
       const [npub] = message.args;
       const [code, body] = await exchange((active) =>
-        active.deviceRemovalRequest(npub),
+        active.memberRemovalRequest(npub),
       );
-      return deviceResponse(code, body);
+      return mutationResponse(code, body);
+    }
+
+    case "linkStorage": {
+      const [npub] = message.args;
+      const [code, body] = await exchange((active) => active.storageRequest(npub));
+      return mutationResponse(code, body);
+    }
+
+    case "setStorageCapacity": {
+      const [npub, declaredCapacityBytes] = message.args;
+      const [code, body] = await exchange((active) =>
+        active.storageCapacityRequest(npub, declaredCapacityBytes),
+      );
+      return mutationResponse(code, body);
+    }
+
+    case "removeStorage": {
+      const [npub] = message.args;
+      const [code, body] = await exchange((active) =>
+        active.storageRemovalRequest(npub),
+      );
+      return mutationResponse(code, body);
     }
   }
 }

@@ -8,7 +8,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use admin_core::{
-    self as core, CoreError, GeneratedKey, HostStatus, Method, Session, SignedRequest, UnlockResult,
+    self as core, CoreError, GeneratedKey, HostStatus, Me, Member, MemberRole, Method, Roster,
+    Session, SignedRequest, Storage, UnlockResult,
 };
 use reqwest::redirect::Policy;
 use tauri::{image::Image, Manager, State};
@@ -77,6 +78,11 @@ fn normalize_host_url(url: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn canonical_npub(npub: String) -> Result<String, String> {
+    core::canonical_npub(&npub).map_err(CoreError::into_message)
+}
+
+#[tauri::command]
 async fn generate_host_key(passphrase: String) -> Result<GeneratedKey, String> {
     blocking(move || core::generate_key(&passphrase)).await
 }
@@ -131,6 +137,54 @@ async fn status(state: State<'_, AppState>) -> Result<HostStatus, String> {
 }
 
 #[tauri::command]
+async fn me(state: State<'_, AppState>) -> Result<Me, String> {
+    let session = state.session()?;
+    let request = session
+        .me_request()
+        .await
+        .map_err(CoreError::into_message)?;
+    drop(session);
+    let (code, body) = state.send(request).await?;
+    core::me_response(code, &body).map_err(CoreError::into_message)
+}
+
+#[tauri::command]
+async fn roster(state: State<'_, AppState>) -> Result<Roster, String> {
+    let session = state.session()?;
+    let request = session
+        .roster_request()
+        .await
+        .map_err(CoreError::into_message)?;
+    drop(session);
+    let (code, body) = state.send(request).await?;
+    core::roster_response(code, &body).map_err(CoreError::into_message)
+}
+
+#[tauri::command]
+async fn members(state: State<'_, AppState>) -> Result<Vec<Member>, String> {
+    let session = state.session()?;
+    let request = session
+        .members_request()
+        .await
+        .map_err(CoreError::into_message)?;
+    drop(session);
+    let (code, body) = state.send(request).await?;
+    core::members_response(code, &body).map_err(CoreError::into_message)
+}
+
+#[tauri::command]
+async fn storages(state: State<'_, AppState>) -> Result<Vec<Storage>, String> {
+    let session = state.session()?;
+    let request = session
+        .storages_request()
+        .await
+        .map_err(CoreError::into_message)?;
+    drop(session);
+    let (code, body) = state.send(request).await?;
+    core::storages_response(code, &body).map_err(CoreError::into_message)
+}
+
+#[tauri::command]
 async fn generate_invite(state: State<'_, AppState>) -> Result<String, String> {
     let session = state.session()?;
     let request = session
@@ -144,29 +198,73 @@ async fn generate_invite(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn add_device(npub: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn authorize_member(
+    npub: String,
+    role: MemberRole,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let session = state.session()?;
     let request = session
-        .device_request(&npub)
+        .member_request(&npub, role)
         .await
         .map_err(CoreError::into_message)?;
     drop(session);
 
     let (code, body) = state.send(request).await?;
-    core::device_response(code, &body).map_err(CoreError::into_message)
+    core::mutation_response(code, &body).map_err(CoreError::into_message)
 }
 
 #[tauri::command]
-async fn remove_device(npub: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn revoke_member(npub: String, state: State<'_, AppState>) -> Result<(), String> {
     let session = state.session()?;
     let request = session
-        .device_removal_request(&npub)
+        .member_removal_request(&npub)
         .await
         .map_err(CoreError::into_message)?;
     drop(session);
 
     let (code, body) = state.send(request).await?;
-    core::device_response(code, &body).map_err(CoreError::into_message)
+    core::mutation_response(code, &body).map_err(CoreError::into_message)
+}
+
+#[tauri::command]
+async fn link_storage(npub: String, state: State<'_, AppState>) -> Result<(), String> {
+    let session = state.session()?;
+    let request = session
+        .storage_request(&npub)
+        .await
+        .map_err(CoreError::into_message)?;
+    drop(session);
+    let (code, body) = state.send(request).await?;
+    core::mutation_response(code, &body).map_err(CoreError::into_message)
+}
+
+#[tauri::command]
+async fn set_storage_capacity(
+    npub: String,
+    declared_capacity_bytes: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let session = state.session()?;
+    let request = session
+        .storage_capacity_request(&npub, &declared_capacity_bytes)
+        .await
+        .map_err(CoreError::into_message)?;
+    drop(session);
+    let (code, body) = state.send(request).await?;
+    core::mutation_response(code, &body).map_err(CoreError::into_message)
+}
+
+#[tauri::command]
+async fn remove_storage(npub: String, state: State<'_, AppState>) -> Result<(), String> {
+    let session = state.session()?;
+    let request = session
+        .storage_removal_request(&npub)
+        .await
+        .map_err(CoreError::into_message)?;
+    drop(session);
+    let (code, body) = state.send(request).await?;
+    core::mutation_response(code, &body).map_err(CoreError::into_message)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -199,14 +297,22 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             normalize_host_url,
+            canonical_npub,
             generate_host_key,
             import_nsec,
             unlock_host,
             lock_host,
             status,
+            me,
+            roster,
+            members,
+            storages,
             generate_invite,
-            add_device,
-            remove_device
+            authorize_member,
+            revoke_member,
+            link_storage,
+            set_storage_capacity,
+            remove_storage
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");

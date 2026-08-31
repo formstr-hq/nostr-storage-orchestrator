@@ -56,4 +56,14 @@ export class ReconnectScheduler {
     this.timers.clear();
     this.attempts.clear();
   }
+
+  evictStale(activeUrls: Set<string>): void {
+    for (const [relay, timer] of this.timers) {
+      if (!activeUrls.has(relay)) {
+        clearTimeout(timer);
+        this.timers.delete(relay);
+        this.attempts.delete(relay);
+      }
+    }
+  }
 }

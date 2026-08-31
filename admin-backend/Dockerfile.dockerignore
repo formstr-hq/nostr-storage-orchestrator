@@ -1,6 +1,0 @@
-**
-!admin-backend/
-!admin-backend/Cargo.toml
-!admin-backend/Cargo.lock
-!admin-backend/src/
-!admin-backend/src/**

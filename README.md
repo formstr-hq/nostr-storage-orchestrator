@@ -10,19 +10,19 @@ Client
   ▼
 proxy/blossom  ──► db-api (HTTP, internal-only) ──► PostgreSQL
   │
-  ├──► blossom blob backends (configured via BLOSSOM_SERVERS)
+  ├──► active blossom backends (DB roster, refreshed every 15s)
   └──► ...
 
 Client
   │  WebSocket Nostr relay protocol
   ▼
-proxy/relay  ──► backend relays (configured via BACKEND_RELAYS)
+proxy/relay  ──► active backend relays (DB roster, refreshed every 15s)
   └──► db-api (HTTP, internal-only) ──► PostgreSQL
 
 Storage Control (Android/Linux)
   │  NIP-98 HTTP auth
   ▼
-admin-backend ──► NVPN CLI + shared sidecar state
+control-plane-backend ──► db-api + NVPN CLI/shared sidecar state
 ```
 
 `db-api` is a thin data layer: it performs CRUD reads/writes and keeps two-table writes atomic (e.g. creating a blob and bumping a user's `usedStorage` in one transaction), but it holds **no business logic**. Quota enforcement, duplicate-handling, and ownership checks all live in the proxies, exactly as before — only the Prisma calls moved behind HTTP. `db-api` is never exposed publicly (compose-internal network only) and has no auth layer.
@@ -32,7 +32,7 @@ admin-backend ──► NVPN CLI + shared sidecar state
 ### `packages/db` (`@orchestrator/db-api`)
 
 - Prisma schema, migrations, and generated client — the only service that touches Postgres directly
-- Express HTTP server exposing plain CRUD endpoints for `User`, `Blob`, `RelayEvent`, plus `GET /plans` for the static `PLAN_CONFIG` data
+- Express HTTP server exposing CRUD for `User`, `Blob`, `RelayEvent`, `Member`, and `Storage`, plus `GET /plans`
 - No quota checks, no auth — see [`proxy/blossom` API](#proxyblossom-api) / [`proxy/relay`](#proxyrelay-behavior) for where those decisions actually happen
 
 ### `packages/db-client` (`@orchestrator/db-client`)
@@ -92,11 +92,12 @@ Dockerised backend services used for local testing:
 
 - `blossom` — raw blob server with upload, health, and storage endpoints (routes: `/upload`, `/blob/:hash` for both download and delete, `/health`, `/storage`)
 - `strfry` — deployed via Docker Compose as a backend relay
+- `storage-agent` — opt-in (`docker compose --profile agent up -d`) capacity and liveness reporting, signed by the storage machine's nVPN identity
 
-### `admin-backend` and `admin-app`
+### `control-plane-backend` and `admin-app`
 
-- `admin-backend` — Rust/Axum control-plane API for nVPN peer status, invite generation, and device approval. Every `/v1` route verifies NIP-98 with the standard `nostr` crate and restricts callers to `ADMIN_ALLOWED_PUBKEYS`.
-- `admin-app` — mobile-first Tauri 2 client for Android and Linux. It supports multiple storage hosts, persists only NIP-49 `ncryptsec` credentials, never persists passphrases, and keeps decrypted keys in Rust process memory only.
+- `control-plane-backend` — Rust/Axum API with DB-backed Admin and Client roles, self-service storage enrollment, capacity reporting, and nVPN roster operations. Every `/v1` route verifies NIP-98.
+- `admin-app` — role-aware web/Tauri client. It supports multiple storage hosts, persists only NIP-49 `ncryptsec` credentials, never persists passphrases, and keeps decrypted keys in Rust process memory only.
 - The production Compose stack shares the nVPN sidecar's network namespace and state volume with the backend. Port `ADMIN_API_PORT` is published on host loopback only for nginx; the backend has no Docker socket and no extra capabilities.
 
 ### `packages/smoke-test`
@@ -116,6 +117,8 @@ Protocol-level checks driven over real HTTP/WebSocket connections — signs Nost
 - `User` — `npub` (PK), `plan`, `usedStorage`, `createdAt`
 - `Blob` — `hash` (PK), `npub`, `size`, `replicas`, `createdAt`
 - `RelayEvent` — `eventId` (PK), `npub`, `kind`, `size`, `replicas`, `createdAt`
+- `Member` — donor/operator npub, role, authorization status, and audit metadata
+- `Storage` — storage-machine npub, owner, tunnel address, reported capacity, lifecycle, and last ping
 
 `usedStorage` and `size` are `BigInt` in Postgres; `db-api` serializes them as decimal **strings** over HTTP (JSON can't carry `BigInt`). `packages/db-client` types these fields as `string`; proxies convert with `Number(...)` where needed, same as before.
 
@@ -136,6 +139,9 @@ All internal-only, no auth. `size`/`usedStorage` are decimal strings. `db-api` o
 | POST      | `/relay-events/:eventId/rollback` | idempotent delete + decrement                                     |
 | PATCH     | `/relay-events/:eventId`          | sets `replicas`                                                   |
 | DELETE    | `/relay-events/:eventId`          | plain delete, **no** decrement (matches relay's kind-5 semantics) |
+| GET / PUT / DELETE | `/members`, `/members/:npub` | donor roster CRUD and soft revocation                         |
+| GET / POST / PATCH / DELETE | `/storages`, `/storages/:npub` | storage roster CRUD and liveness inputs              |
+| GET       | `/storages/active`                | fresh linked backends polled by both proxies                     |
 
 ## Prerequisites
 
@@ -151,61 +157,63 @@ All internal-only, no auth. `size`/`usedStorage` are decimal strings. `db-api` o
 
 ## Quick start (fresh machines)
 
-The mesh has two roles, and they live on **different machines**: the **host** runs the public
-proxies, the **client** holds the actual blob and relay storage. Each has its own guided setup
-script — both are Docker-only; you do **not** need `pnpm install` to bring either stack up (every
-Dockerfile runs its own `pnpm install`/`prisma generate`/build, and `db-api`'s image runs
-`migrate:deploy` itself on container start). `nvpn-host-setup.sh` does run `pnpm install` for you
-as its very last step, but only because it finishes by driving `packages/smoke-test` — a
-host-run verification script, not a Dockerized service — against the stack it just brought up.
+The host runs the public proxies and control plane; authorized clients operate one or more
+storage machines. The normal path is self-service after an admin grants membership.
 
 **On the host machine** (public-facing proxies):
 
 ```bash
-./scripts/nvpn-host-setup.sh
+cp .env.example .env
+# Set ADMIN_PUBLIC_URL and an initial ADMIN_ALLOWED_PUBKEYS bootstrap npub.
+docker compose up -d --build
 ```
 
-It brings up the proxy stack, prints an invite, and then waits. Send that invite to the client
-operator over a private channel.
+Open `admin-app`, unlock the bootstrap-admin profile, and authorize the client's operator npub.
+The environment seed is ignored after the Member table contains its first row.
+
+**As the authorized client** (in `admin-app`):
+
+1. Select **Request invite**. The nVPN invite is self-contained and remains a bearer credential.
+2. Take it to the storage machine and bootstrap that machine's separate identity:
 
 **On the client machine** (storage backends):
 
 ```bash
 cd storage-client
-./scripts/nvpn-client-setup.sh
+./scripts/nvpn-join.sh
 ```
 
-It asks for the invite (not echoed), joins the mesh, and prints an **npub**. Send that back to
-the host operator — it's a public identifier, so any channel is fine.
+The script asks for the invite without echoing it and prints only the storage machine's npub.
+Paste that npub into **Link a storage** in the same client session. This explicit second action
+approves the device and records the authenticated client as its owner.
 
-**Back on the host**, paste the npub at the prompt. The script approves the client, waits for
-the tunnel to come up, points `BLOSSOM_SERVERS`/`BACKEND_RELAYS` at the peer's `10.44.x.y`
-address (backing your `.env` up to `.env.bak` first), and restarts just the proxy services.
+Then start the storage stack and reporting agent:
 
-Both scripts create a missing `.env` from `.env.example`, are safe to re-run, and keep an
-already-initialized mesh identity rather than re-bootstrapping it. Set `PEER_TIMEOUT` to change
-how long either side waits for the other.
+```bash
+docker compose --profile agent up -d --build
+```
 
-Onboarding a _second_ client this way needs someone on the host again. If you don't want server
-access to be a prerequisite for adding storage clients, promote a co-admin once
-(`./scripts/nvpn-add-admin.sh <npub>`) — they can then invite and approve clients entirely from
-their own machine. See [Delegated admins](#delegated-admins).
+The agent derives the host identity and tunnel route from the imported invite, signs each report
+with the storage machine's persisted nVPN key, and never copies that secret into `.env`.
+`nvpn-host-setup.sh`, `nvpn-client-setup.sh`, and `nvpn-approve.sh` remain available as manual
+mesh/legacy overrides; they are not the normal DB-backed enrollment path.
 
 ### Verifying on one machine
 
-Two scripts exercise the full stack without any of the above cross-machine handoff — useful in
+Three scripts exercise the stack without a cross-machine handoff — useful in
 CI, or to confirm a new machine is capable of running this at all:
 
 ```bash
 ./scripts/docker-smoke-test.sh   # meshless dev topology + 24 protocol checks
 ./scripts/nvpn-mesh-e2e.sh       # NVPN mesh: host and client on one host, same 24 checks
+./scripts/control-plane-e2e.sh   # DB roles, self-service enrollment, agent ping, dynamic proxies
 ```
 
 `KEEP_UP=1` leaves the stacks running afterward.
 
-> `nvpn-mesh-e2e.sh` is a **test harness, not a setup tool** — it wipes both `nvpn_data` volumes
-> so each run starts from fresh mesh identities. Never run it against a real deployment: it
-> invalidates every invite you have handed out. Use the two role scripts above for that.
+> The two `*-e2e.sh` scripts are **test harnesses, not setup tools**. They wipe both `nvpn_data`
+> volumes; `control-plane-e2e.sh` also wipes the Compose Postgres volume. Never run either against
+> a real deployment.
 
 ## Setup
 
@@ -444,11 +452,11 @@ roster — even though its invite came from the co-admin rather than the proxy. 
   in the CLI output is not a failure signal — propagation succeeded in every case despite it.
 - The mesh identity that signs is just a Nostr key. The `admin-app` avoids putting that protocol
   and the host mesh identity on the phone: it signs short-lived NIP-98 requests, and the
-  allowlisted `admin-backend` performs roster operations through the host's existing nVPN CLI.
+  control plane performs roster operations through the host's existing nVPN CLI.
 
 ### Admin API and app
 
-Set the public URL and one or more operator pubkeys before starting production Compose:
+Set the public URL and at least one bootstrap admin before the first production start:
 
 ```bash
 # .env
@@ -457,18 +465,23 @@ ADMIN_API_PORT=3002
 ADMIN_ALLOWED_PUBKEYS=npub1...
 ```
 
-`docker compose up -d --build` starts `admin-backend` as the `admin` service. It exposes
+`docker compose up -d --build` starts `control-plane-backend` as the `admin` service. It exposes
 `127.0.0.1:${ADMIN_API_PORT}` for the reverse proxy and provides these endpoints:
 
-| Method | Path          | Purpose                                              |
-| ------ | ------------- | ---------------------------------------------------- |
-| `GET`  | `/health`     | Unauthenticated container/reverse-proxy health check |
-| `GET`  | `/v1/status`  | Connected count and sanitized nVPN peers             |
-| `POST` | `/v1/invites` | Generate an nVPN client invite                       |
-| `POST` | `/v1/devices` | Add a canonical client npub and reload nVPN          |
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/health` | Unauthenticated health check |
+| `GET` | `/v1/me` | Resolve the caller's host role |
+| `GET` | `/v1/status`, `/v1/roster`, `/v1/members` | Admin observability and roster reads |
+| `POST` | `/v1/members`, `/v1/members/remove` | Authorize, promote, or revoke members |
+| `POST` | `/v1/invites` | Active-member self-service nVPN invite |
+| `GET` | `/v1/storages` | Own storage for clients; all storage for admins |
+| `POST` | `/v1/storage` | Link and mesh-approve the caller's storage npub |
+| `POST` | `/v1/storage/ping` | Storage-agent liveness/capacity report over the mesh |
+| `POST` | `/v1/storage/:npub/capacity`, `/remove` | Edit declared capacity or remove storage |
 
 All `/v1` endpoints require an exact URL/method NIP-98 event. POST signatures also bind the
-request body. See [`admin-backend/README.md`](admin-backend/README.md) for the wire contract and
+request body. See [`control-plane-backend/README.md`](control-plane-backend/README.md) for the wire contract and
 [`admin-app/README.md`](admin-app/README.md) for Android/Linux build instructions. The app starts
 with `https://storage.formstr.app` prefilled and can retain multiple host profiles.
 

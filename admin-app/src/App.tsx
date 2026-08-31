@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { client } from "#platform";
 import { Dashboard } from "./components/Dashboard";
+import { ClientStorage } from "./components/ClientStorage";
 import { LockedPanel } from "./components/LockedPanel";
 import {
   ProfileDialog,
@@ -10,6 +11,7 @@ import {
 import { SecretDialog, type SecretKind } from "./components/SecretDialog";
 import { Toast } from "./components/Toast";
 import { TopBar } from "./components/TopBar";
+import { Unauthorized } from "./components/Unauthorized";
 import { messageOf, useSession } from "./hooks/useSession";
 import { useProfiles, type HostProfile } from "./hooks/useProfiles";
 import { useToast } from "./hooks/useToast";
@@ -27,8 +29,13 @@ export function App() {
   const [dialog, setDialog] = useState<DialogState>(
     profiles.profiles.length ? null : { kind: "profile" },
   );
+  const [view, setView] = useState<"admin" | "storage">("admin");
 
   const selected = profiles.selected;
+
+  useEffect(() => {
+    setView("admin");
+  }, [selected?.id]);
 
   async function unlockSelected(passphrase: string) {
     if (!selected) return;
@@ -37,13 +44,14 @@ export function App() {
       ncryptsec: selected.ncryptsec,
       passphrase,
     });
-    // Record the npub the host will actually see, so the backup dialog can
-    // show which key to add to the allowlist.
+    // Record the npub the host will actually see so it can be authorized by
+    // an existing admin if this is a new operator identity.
     if (npub) profiles.update(selected.id, { npub });
   }
 
   async function lock() {
     await session.lock();
+    setView("admin");
     setDialog(null);
   }
 
@@ -110,14 +118,6 @@ export function App() {
     if (invite) setDialog({ kind: "invite", secret: invite });
   }
 
-  async function removeDevice(npub: string) {
-    const confirmed = window.confirm(
-      `Remove this storage client from the mesh?\n\n${npub}\n\nIt will lose access until re-invited.`,
-    );
-    if (!confirmed) return;
-    await session.removeDevice(npub);
-  }
-
   async function copy(value: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -133,20 +133,42 @@ export function App() {
         <TopBar
           profile={selected}
           unlocked={session.unlocked}
+          role={session.me?.role ?? null}
+          view={view}
+          onViewChange={setView}
+          refreshing={session.busy === "refresh"}
+          refreshDisabled={session.busy !== null}
+          onRefresh={() => void session.refresh()}
           onOpenProfiles={() => setDialog({ kind: "profile" })}
           onLock={() => void lock()}
         />
 
-        {session.unlocked ? (
+        {session.unlocked ? session.me?.role === "none" ? (
+          <Unauthorized profile={selected} />
+        ) : session.me?.role === "admin" && view === "admin" ? (
           <Dashboard
+            selfNpub={session.me.npub}
+            roster={session.roster}
+            members={session.members}
+            storages={session.storages}
             status={session.status}
             busy={session.busy}
-            onRefresh={() => void session.refresh()}
-            onGenerateInvite={() => void createInvite()}
-            onApproveDevice={session.approveDevice}
-            onRemoveDevice={(npub) => void removeDevice(npub)}
-            onCopy={(value) => void copy(value)}
+            onAuthorize={session.authorizeMember}
+            onRevoke={session.revokeMember}
+            onRemoveStorage={session.removeStorage}
+            onValidationError={(message) => toast.show("error", message)}
           />
+        ) : session.me ? (
+          <ClientStorage
+            storages={session.storages.filter((storage) => storage.ownerNpub === session.me?.npub)}
+            busy={session.busy}
+            onRequestInvite={() => void createInvite()}
+            onLink={session.linkStorage}
+            onCapacity={session.setStorageCapacity}
+            onRemove={session.removeStorage}
+          />
+        ) : (
+          <section aria-live="polite" className={styles.loading}>Checking host access...</section>
         ) : (
           <LockedPanel
             hasProfile={selected !== null}

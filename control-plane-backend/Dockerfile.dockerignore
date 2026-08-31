@@ -1,0 +1,6 @@
+**
+!control-plane-backend/
+!control-plane-backend/Cargo.toml
+!control-plane-backend/Cargo.lock
+!control-plane-backend/src/
+!control-plane-backend/src/**

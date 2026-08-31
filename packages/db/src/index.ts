@@ -2,6 +2,8 @@ import express from "express";
 import { prisma } from "./prisma.js";
 import { PLAN_CONFIG } from "./plan.js";
 import { blobToJson, relayEventToJson, userToJson } from "./serialize.js";
+import { membersRouter } from "./routes/members.js";
+import { storagesRouter } from "./routes/storages.js";
 
 const app = express();
 app.use(express.json());
@@ -20,6 +22,9 @@ app.get("/health", (_req, res) => {
 app.get("/plans", (_req, res) => {
   res.json(PLAN_CONFIG);
 });
+
+app.use("/members", membersRouter);
+app.use("/storages", storagesRouter);
 
 app.get("/users/:npub", async (req, res) => {
   const user = await prisma.user.findUnique({ where: { npub: req.params.npub! } });

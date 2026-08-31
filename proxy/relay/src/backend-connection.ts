@@ -112,6 +112,23 @@ export class BackendConnectionManager {
     }
   }
 
+  /**
+   * Drop connections (and any in-flight connection attempts) for relays that
+   * are no longer present in the active URL set.
+   */
+  evictStale(activeUrls: Set<string>): void {
+    for (const [url, connection] of this.connections) {
+      if (!activeUrls.has(url)) {
+        this.connections.delete(url);
+        this.rejectPendingPublications(connection, "error: relay retired");
+        connection.subscriptions.clear();
+        connection.socket.terminate();
+        this.sockets.delete(url);
+      }
+    }
+    this.reconnectScheduler.evictStale(activeUrls);
+  }
+
   closeAll(): void {
     if (this.stopped) {
       return;

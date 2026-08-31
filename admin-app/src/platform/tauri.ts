@@ -12,6 +12,10 @@ import type {
   AdminClient,
   GeneratedKey,
   HostStatus,
+  Me,
+  Member,
+  Roster,
+  Storage,
   UnlockInput,
   UnlockResult,
 } from "./types";
@@ -27,6 +31,7 @@ function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
 
 export const client: AdminClient = {
   normalizeHostUrl: (url) => call<string>("normalize_host_url", { url }),
+  canonicalNpub: (npub) => call<string>("canonical_npub", { npub }),
   generateHostKey: (passphrase) =>
     call<GeneratedKey>("generate_host_key", { passphrase }),
   importNsec: (nsec, passphrase) =>
@@ -34,7 +39,16 @@ export const client: AdminClient = {
   unlockHost: (input: UnlockInput) => call<UnlockResult>("unlock_host", { ...input }),
   lockHost: () => call<void>("lock_host"),
   status: () => call<HostStatus>("status"),
+  me: () => call<Me>("me"),
+  roster: () => call<Roster>("roster"),
+  members: () => call<Member[]>("members"),
+  storages: () => call<Storage[]>("storages"),
   generateInvite: () => call<string>("generate_invite"),
-  addDevice: (npub) => call<void>("add_device", { npub }),
-  removeDevice: (npub) => call<void>("remove_device", { npub }),
+  authorizeMember: (npub, role) =>
+    call<void>("authorize_member", { npub, role }),
+  revokeMember: (npub) => call<void>("revoke_member", { npub }),
+  linkStorage: (npub) => call<void>("link_storage", { npub }),
+  setStorageCapacity: (npub, declaredCapacityBytes) =>
+    call<void>("set_storage_capacity", { npub, declaredCapacityBytes }),
+  removeStorage: (npub) => call<void>("remove_storage", { npub }),
 };

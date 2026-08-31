@@ -21,10 +21,17 @@
   align-items: center;
   justify-content: center;
   gap: 9px;
+  white-space: nowrap;
 }
-.primary { color: #092019; background: var(--green); }
-.primary.warm { background: var(--warm); color: #2b1a06; }
+.primary { color: #fff; background: var(--green-fill); }
+.primary.warm { background: var(--warm-fill); color: #fff; }
 .secondary { color: var(--ink); border-color: #3c5a56; background: #19302f; }
+.primary.small, .secondary.small {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 11px;
+}
 
 .textButton {
   min-height: 44px;
@@ -36,6 +43,12 @@
   font-size: 11px;
 }
 .textButton.danger { color: var(--danger); }
+.textButton.edit {
+  min-height: unset;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 
 .spinner {
   width: 15px;
@@ -57,6 +70,48 @@
 .statusDot.online {
   background: var(--green);
   box-shadow: 0 0 0 4px rgba(112, 225, 178, .11);
+}
+.statusDot.warn {
+  background: var(--warm);
+  box-shadow: 0 0 0 4px rgba(245, 184, 103, .14);
+}
+.statusDot.off {
+  background: #63716f;
+  box-shadow: 0 0 0 4px rgba(106, 121, 119, .11);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.chip.active {
+  color: var(--green);
+  background: rgba(112, 225, 178, .1);
+  border-color: rgba(112, 225, 178, .28);
+}
+.chip.pending {
+  color: var(--warm);
+  background: rgba(245, 184, 103, .1);
+  border-color: rgba(245, 184, 103, .28);
+}
+.chip.unreachable {
+  color: var(--danger);
+  background: rgba(255, 135, 127, .1);
+  border-color: rgba(255, 135, 127, .28);
+}
+.chip.role {
+  color: var(--ink);
+  background: rgba(236, 243, 239, .06);
+  border-color: var(--line);
 }
 
 .srOnly {

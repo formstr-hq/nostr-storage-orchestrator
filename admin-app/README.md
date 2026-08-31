@@ -61,13 +61,18 @@ XSS on the serving origin is a real risk that the Tauri builds do not have. Serv
 the web build from a dedicated origin, or prefer a native build for
 high-value hosts.
 
-The admin API contract:
+The control-plane API contract:
 
 | Method | Path | Body |
 |---|---|---|
-| `GET` | `/v1/status` | none |
+| `GET` | `/v1/me`, `/v1/storages` | none |
+| `GET` | `/v1/status`, `/v1/roster`, `/v1/members` | none; admin only |
 | `POST` | `/v1/invites` | `{}` |
-| `POST` | `/v1/devices` | `{"npub":"npub1..."}` |
+| `POST` | `/v1/members` | `{"npub":"npub1...","role":"client"}` |
+| `POST` | `/v1/members/remove` | `{"npub":"npub1..."}` |
+| `POST` | `/v1/storage` | `{"npub":"npub1..."}` |
+| `POST` | `/v1/storage/:npub/capacity` | `{"declaredCapacityBytes":"..."}` |
+| `POST` | `/v1/storage/:npub/remove` | `{}` |
 
 Every endpoint requires a strict `Authorization: Nostr ...` NIP-98 header. Status
 reads the backend's sanitized top-level `peers` array and `connected_clients`;
@@ -89,7 +94,7 @@ Serve `dist-web/` as static files. The build injects a CSP allowing
 `'wasm-unsafe-eval'` and `connect-src https:`.
 
 The host must be reachable over **HTTPS** and must answer CORS preflights —
-`admin-backend` does so for any origin (see its README). A plain
+`control-plane-backend` does so for any origin (see its README). A plain
 `http://localhost` backend will be rejected by `normalize_url`, so front a local
 backend with TLS when testing the web build against one.
 
@@ -174,7 +179,7 @@ cargo test -p admin-core      # crypto, signing, parsing — no system deps need
 
 `admin-core`'s tests are the ones that matter: they check a NIP-49 round trip, an
 `nsec` import producing a credential for the same key, and — via `nostr`'s own
-`verify_auth_header`, the same verifier `admin-backend` uses — that each signed
+`verify_auth_header`, the same verifier `control-plane-backend` uses — that each signed
 request validates against its exact URL and body and fails against any other.
 
 Checking the Tauri crate needs that platform's system libraries. On Linux without

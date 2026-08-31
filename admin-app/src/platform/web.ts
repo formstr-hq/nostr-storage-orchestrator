@@ -10,6 +10,10 @@ import type {
   AdminClient,
   GeneratedKey,
   HostStatus,
+  Me,
+  Member,
+  Roster,
+  Storage,
   UnlockInput,
   UnlockResult,
 } from "./types";
@@ -80,6 +84,7 @@ async function rpc<T>(
 
 export const client: AdminClient = {
   normalizeHostUrl: (url) => rpc<string>("normalizeHostUrl", [url]),
+  canonicalNpub: (npub) => rpc<string>("canonicalNpub", [npub]),
   generateHostKey: (passphrase) =>
     rpc<GeneratedKey>("generateHostKey", [passphrase]),
   importNsec: (nsec, passphrase) =>
@@ -87,7 +92,16 @@ export const client: AdminClient = {
   unlockHost: (input: UnlockInput) => rpc<UnlockResult>("unlockHost", [input]),
   lockHost: () => rpc<void>("lockHost", []),
   status: () => rpc<HostStatus>("status", []),
+  me: () => rpc<Me>("me", []),
+  roster: () => rpc<Roster>("roster", []),
+  members: () => rpc<Member[]>("members", []),
+  storages: () => rpc<Storage[]>("storages", []),
   generateInvite: () => rpc<string>("generateInvite", []),
-  addDevice: (npub) => rpc<void>("addDevice", [npub]),
-  removeDevice: (npub) => rpc<void>("removeDevice", [npub]),
+  authorizeMember: (npub, role) =>
+    rpc<void>("authorizeMember", [npub, role]),
+  revokeMember: (npub) => rpc<void>("revokeMember", [npub]),
+  linkStorage: (npub) => rpc<void>("linkStorage", [npub]),
+  setStorageCapacity: (npub, declaredCapacityBytes) =>
+    rpc<void>("setStorageCapacity", [npub, declaredCapacityBytes]),
+  removeStorage: (npub) => rpc<void>("removeStorage", [npub]),
 };

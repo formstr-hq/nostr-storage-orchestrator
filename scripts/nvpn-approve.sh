@@ -28,6 +28,6 @@ docker compose exec nvpn sh -c \
 docker compose exec nvpn sh -c \
   'nvpn reload --config "$XDG_CONFIG_HOME/nvpn/config.toml"'
 
-echo "Approved ${CLIENT_NPUB}. Once the roster syncs, look up its tunnel IP with:" >&2
+echo "Approved raw mesh peer ${CLIENT_NPUB}. Once the roster syncs, inspect it with:" >&2
 echo '  docker compose exec nvpn sh -c '"'"'nvpn status --config "$XDG_CONFIG_HOME/nvpn/config.toml" --json'"'"'' >&2
-echo "...then point BLOSSOM_SERVERS/BACKEND_RELAYS at it and restart the proxy services (not the nvpn sidecar)." >&2
+echo "For storage enrollment, use the app's Link a storage action instead; it creates the DB row and performs this approval itself." >&2

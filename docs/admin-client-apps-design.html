@@ -1,0 +1,1030 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Control plane — Admin &amp; Client views</title>
+<!--
+  Standalone copy of the design mockup accompanying docs/admin-client-apps-plan.md.
+  Open it directly in a browser — no build step, no network access, nothing external.
+
+  PROVENANCE: generated from the published-artifact source, which must stay a
+  fragment (the artifact host injects its own <!doctype>/<head>/<body>). The only
+  differences here are this <head> wrapper and the <title> moving into it; the
+  <style>, markup and <script> below are byte-identical. If you edit one, mirror
+  the other, or the mockup and the artifact will drift apart.
+-->
+<style>
+/* ============================================================
+   Tokens taken from admin-app/src/styles/theme.css,
+   controls.module.css and Dashboard.module.css.
+
+   Everything marked (NEW) below does NOT exist in the app today
+   and has to be added deliberately. An earlier pass of this mockup
+   claimed to be "lifted verbatim" while quietly changing the
+   primary-button colours; the change is now a stated proposal with
+   its contrast maths shown, which is the difference between a spec
+   and a surprise. Additions:
+     (NEW) --green-fill / --warm-fill + white primary label —
+           replaces dark-ink-on-bright-fill. See the note at
+           .primary for why the fill has to move with the text.
+     (NEW) --serif / --mono tokens  — today Georgia and
+           ui-monospace are repeated inline per rule in
+           Dashboard.module.css:37,113,133,156
+     (NEW) .chip                    — status pill, built only from
+           the 3 semantic colours already in use
+     (NEW) .statusDot.warn / .off   — controls.module.css ships the
+           base dot + .online only; .offline lives privately in
+           Dashboard.module.css:185
+     (NEW) .viewTabs / .roleSwitch  — segmented controls
+     (NEW) .dashboard is single-column here with an explicit .row2;
+           the real .dashboard is a 2-col grid with
+           .summary { grid-column: 1/-1 }. Restructuring it is a
+           real change to shipped CSS, not a copy.
+   Breakpoints below match the app's own 720px/440px, not a
+   third value invented here.
+
+   The real app is intentionally single-theme (dark only, no
+   prefers-color-scheme/data-theme handling anywhere in its
+   source) — this mockup deliberately matches that rather than
+   inventing light-mode support the product doesn't have.
+   ============================================================ */
+:root {
+  /* Dark-only by design, matching the app. Declared so native widgets — the
+     scrollbar, the capacity number input — render dark too; the artifact host
+     skeleton otherwise declares `color-scheme: light`. */
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #ecf3ef;
+  background: #0b1515;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --ink: #ecf3ef;
+  --muted: #8da09c;
+  --panel: #102020;
+  --panel-2: #142727;
+  --line: #29403e;
+  --green: #70e1b2;
+  --green-dark: #153d32;
+  --warm: #f5b867;
+  --danger: #ff877f;
+  /* (NEW) not in theme.css today */
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: Georgia, "Times New Roman", serif;
+}
+
+* { box-sizing: border-box; }
+html { background: #0b1515; }
+/* color and font-family are repeated here, not only on :root, on purpose.
+   The page is served inside a host skeleton whose reset declares
+   `body { font: 14px -apple-system,…; color: #141413 }`. Both are
+   single-element selectors, so :root (which targets <html>) loses the
+   inheritance battle to that body rule, and every element that does NOT set
+   its own colour renders near-black — the serif headings, the mono npubs, the
+   stat numerals, the dialog titles, the capacity figures. It looks correct
+   when the file is opened directly, and wrong once published, which is a
+   trap worth stating rather than rediscovering. Declaring both on `body`
+   here wins on source order. */
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: radial-gradient(circle at 72% -12%, #193331 0, transparent 37%), #0b1515;
+}
+button, input, textarea, select { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; cursor: pointer; }
+button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+input {
+  width: 100%;
+  min-height: 52px;
+  border: 1px solid #304947;
+  border-radius: 10px;
+  background: #0b1919;
+  color: var(--ink);
+  padding: 12px 14px;
+}
+input::placeholder { color: #61726f; }
+input:focus { border-color: var(--green); }
+label {
+  display: grid;
+  gap: 8px;
+  color: #b7c5c1;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .04em;
+}
+
+/* ---- shared control primitives (controls.module.css) ---- */
+.eyebrow {
+  margin: 0 0 10px;
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .19em;
+  text-transform: uppercase;
+}
+.primary, .secondary {
+  min-height: 52px;
+  padding: 0 20px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 750;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  white-space: nowrap;
+}
+/* (NEW) Primary buttons are white-on-deep-fill here, NOT the app's current
+   dark-ink-on-bright-fill (controls.module.css:25-26 ships
+   `color:#092019; background:var(--green)`). This is a deliberate proposed
+   change, called out rather than smuggled in.
+
+   Why the fill changes too: white cannot sit on --green (#70e1b2 is a light
+   mint — white on it is ~1.4:1, illegible). Keeping white text means taking
+   the fill down to a deep green of the same hue. --green-fill below is that
+   colour and clears WCAG AA for white body text (~5.2:1); --warm-fill does
+   the same for the "generate/request" call-to-action (~4.6:1). Both are new
+   tokens the app would need to add alongside --green/--warm, which stay as
+   they are for chips, dots, eyebrows and the mesh glyph. */
+:root {
+  --green-fill: #1a7c55;
+  --warm-fill: #a86520;
+}
+.primary { color: #fff; background: var(--green-fill); }
+.primary.warm { background: var(--warm-fill); color: #fff; }
+.secondary { color: var(--ink); border-color: #3c5a56; background: #19302f; }
+.secondary.small, .primary.small {
+  min-height: 34px; padding: 0 12px; border-radius: 8px; font-size: 11px;
+}
+button:disabled { cursor: wait; opacity: .58; }
+/* controls.module.css:40-47 — every existing action button renders this
+   plus a present-tense label while in flight. These calls shell out to
+   `nvpn` behind a 45s COMMAND_TIMEOUT (admin-backend/src/lib.rs:45), so
+   the busy state is not decorative. */
+.spinner {
+  width: 15px; height: 15px; border: 2px solid currentColor;
+  border-left-color: transparent; border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  *, *:before, *:after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
+.textButton {
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11px;
+}
+.textButton.danger { color: var(--danger); }
+.textButton.edit { min-height: unset; padding: 0; text-decoration: underline; text-underline-offset: 2px; }
+.statusDot {
+  width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%;
+  background: #6a7977; box-shadow: 0 0 0 4px rgba(106,121,119,.11);
+}
+.statusDot.on { background: var(--green); box-shadow: 0 0 0 4px rgba(112,225,178,.11); }
+.statusDot.warn { background: var(--warm); box-shadow: 0 0 0 4px rgba(245,184,103,.14); }
+.statusDot.off { background: #63716f; box-shadow: 0 0 0 4px rgba(106,121,119,.11); }
+
+/* status chip — built from the same 3 semantic colors the app already
+   uses (green = good, warm = pending/attention, danger = destructive/
+   offline), not a new accent */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+  font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.chip.active { color: var(--green); background: rgba(112,225,178,.1); border-color: rgba(112,225,178,.28); }
+.chip.pending { color: var(--warm); background: rgba(245,184,103,.1); border-color: rgba(245,184,103,.28); }
+.chip.unreachable { color: var(--danger); background: rgba(255,135,127,.1); border-color: rgba(255,135,127,.28); }
+.chip.role { color: var(--ink); background: rgba(236,243,239,.06); border-color: var(--line); }
+
+/* ---- top bar (TopBar.module.css) ---- */
+.topbar {
+  min-height: 82px;
+  padding: 16px 20px 12px;
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+  border-bottom: 1px solid rgba(112,225,178,.13);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brandText { display: grid; line-height: 1.1; }
+.brandText strong { font-size: 12px; letter-spacing: .23em; }
+.brandText small { margin-top: 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.cube {
+  width: 32px; height: 32px; position: relative; display: block;
+  transform: rotate(30deg) skew(-5deg); border: 2px solid var(--green);
+}
+.cube:before, .cube:after, .cube i { content: ""; position: absolute; background: var(--green); opacity: .68; }
+.cube:before { width: 2px; height: 100%; left: 50%; }
+.cube:after { width: 100%; height: 2px; top: 50%; }
+.cube i { width: 8px; height: 8px; left: 11px; top: 11px; border-radius: 50%; opacity: 1; }
+.topControls { display: flex; align-items: center; gap: 8px; }
+.hostPill {
+  min-height: 50px; padding: 7px 13px; display: flex; align-items: center; gap: 10px;
+  color: var(--ink); border: 1px solid var(--line); border-radius: 12px;
+  background: rgba(16,32,32,.72); text-align: left;
+}
+.hostLabel { display: grid; }
+.hostLabel strong { font-size: 13px; }
+.hostLabel small { color: var(--muted); font-size: 10px; margin-top: 2px; }
+.lockButton { min-height: 44px; padding: 0 12px; border: 0; color: var(--muted); background: transparent; }
+
+/* in-app view switcher — only ever shown to an admin session, since only
+   admins hold both views; a plain client never sees this at all */
+.viewTabs {
+  padding: 4px; display: grid; grid-auto-flow: column; gap: 2px;
+  background: #0b1919; border: 1px solid var(--line); border-radius: 11px;
+}
+.viewTabs button {
+  min-height: 42px; padding: 0 16px; color: var(--muted); border: 0; border-radius: 8px;
+  background: transparent; font-size: 12px; font-weight: 650;
+}
+.viewTabs button.active { color: var(--ink); background: #1b3432; box-shadow: inset 0 0 0 1px #365451; }
+
+/* ---- dashboard grid + cards (Dashboard.module.css) ---- */
+.dashboard { width: min(1080px, calc(100% - 40px)); margin: 38px auto 70px; display: grid; gap: 18px; }
+.row2 { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(320px,.8fr); gap: 18px; }
+.card {
+  border: 1px solid var(--line);
+  background: linear-gradient(145deg, rgba(20,39,39,.96), rgba(13,27,27,.96));
+  border-radius: 20px;
+}
+.heading { display: flex; justify-content: space-between; align-items: end; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.heading h2 { margin: 0; font-family: var(--serif); font-weight: 400; letter-spacing: -.025em; font-size: 34px; }
+.heading > span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+
+/* roster summary — stat tiles instead of one giant numeral, since
+   an overview genuinely has several numbers that all matter at once */
+.roster { padding: 30px 32px; position: relative; overflow: hidden; }
+.roster:after {
+  content: ""; position: absolute; inset: auto -10% -75% 55%; height: 210px; border-radius: 50%;
+  background: rgba(112,225,178,.05); filter: blur(12px);
+}
+.statGrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 26px; margin-top: 22px; position: relative; }
+.stat strong {
+  display: block; font-family: var(--serif); font-weight: 400; font-size: clamp(30px, 3.6vw, 44px);
+  line-height: 1; letter-spacing: -.03em;
+}
+.stat span { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .07em; }
+.stat.warm strong { color: var(--warm); }
+.stat.green strong { color: var(--green); }
+
+/* mesh glyph — the app's own network motif (Dashboard.module.css:83-106).
+   Kept here for reference but NOT used in either hero card: it is absolutely
+   positioned top-right, and in this layout that corner is occupied by real
+   data — the roster's 4-tile stat grid spans the full width, and the client
+   hero's status chip sits there. Both collided (the glyph drew straight
+   through "612 GB" and behind the "Active" chip). A decorative flourish must
+   not overlap the numbers it decorates, and the real app avoids this only
+   because its .summary card holds a single figure with space to spare. */
+.mesh { display: none; }
+.mesh--reference { width: 150px; height: 104px; position: absolute; right: 32px; top: 28px; opacity: .5; }
+.mesh i, .mesh span {
+  position: absolute; width: 12px; height: 12px; border: 3px solid var(--green); background: var(--panel);
+  transform: rotate(45deg);
+}
+.mesh i:nth-child(1) { left: 6px; top: 48px; }
+.mesh i:nth-child(2) { right: 6px; top: 10px; }
+.mesh i:nth-child(3) { right: 6px; bottom: 4px; }
+.mesh span { width: 20px; height: 20px; left: 65px; top: 42px; border-color: var(--warm); }
+.mesh:before, .mesh:after {
+  content: ""; position: absolute; left: 18px; width: 124px; height: 1px;
+  background: linear-gradient(90deg, var(--green), var(--warm), var(--green)); transform-origin: left;
+}
+.mesh:before { top: 52px; transform: rotate(-17deg); }
+.mesh:after { top: 54px; transform: rotate(17deg); }
+
+.operations { display: grid; gap: 18px; }
+.operation { padding: 26px; }
+.operation h2 { margin: 0; font-family: var(--serif); font-weight: 400; letter-spacing: -.025em; font-size: 26px; }
+.operation p:not([class]) { color: var(--muted); font-size: 13px; line-height: 1.55; margin: 8px 0 0; }
+.operation form { display: grid; gap: 10px; margin-top: 18px; }
+.operation .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+.fullWidth { width: 100%; margin-top: 4px; }
+
+.roleSwitch { padding: 4px; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: #0b1919; border: 1px solid var(--line); border-radius: 10px; }
+.roleSwitch button { min-height: 40px; padding: 0 6px; color: var(--muted); border: 0; border-radius: 7px; background: transparent; font-size: 12px; }
+.roleSwitch button.active { color: var(--ink); background: #1b3432; box-shadow: inset 0 0 0 1px #365451; }
+
+.list { padding: 26px; }
+.rows { margin: 0; padding: 0; list-style: none; }
+.storageRow, .memberRow {
+  padding: 16px 0;
+  display: grid;
+  gap: 16px;
+  align-items: center;
+  border-bottom: 1px solid rgba(41,64,62,.66);
+}
+.storageRow { grid-template-columns: auto minmax(0,1fr) auto auto; }
+/* Peers is read-only observability now (no more per-peer Remove — that
+   called the now-removed POST /v1/devices/remove; see StorageList for
+   where removal actually lives), so it's one column narrower. */
+.memberRow { grid-template-columns: auto minmax(0,1fr) auto; }
+.rows > li:last-child { border-bottom: 0; }
+.rowId { min-width: 0; display: grid; gap: 5px; }
+.rowId strong { font-family: var(--mono); font-size: 11px; line-height: 1.5; word-break: break-all; }
+.rowId span { color: var(--muted); font-size: 10px; }
+
+/* per-row capacity — display state and inline-edit state, toggled by JS.
+   Editable wherever the viewer owns the row (client view); read-only
+   display-only markup wherever they don't (admin's roster view). */
+.capacity { text-align: right; display: grid; gap: 4px; justify-items: end; }
+.capacity strong { font-size: 13px; font-variant-numeric: tabular-nums; }
+.barTrack { width: 96px; height: 5px; border-radius: 3px; background: #17302d; overflow: hidden; }
+.barFill { height: 100%; border-radius: 3px; background: var(--green); }
+.barFill.warn { background: var(--warm); }
+.capEdit { display: flex; align-items: center; gap: 6px; }
+.capEdit input {
+  width: 64px; min-height: 34px; padding: 6px 8px; border-radius: 7px;
+  font-size: 12px; text-align: right; font-variant-numeric: tabular-nums;
+}
+.capEdit span { color: var(--muted); font-size: 11px; }
+.rowActions { display: grid; gap: 8px; justify-items: end; }
+.removeButton { min-height: unset; padding: 0; font-size: 10px; text-decoration: underline; text-underline-offset: 2px; }
+
+/* ---- client "my storage" hero ---- */
+.myStorage { padding: 32px; position: relative; overflow: hidden; }
+.myStorage:after { content: ""; position: absolute; inset: auto -10% -75% 20%; height: 210px; border-radius: 50%; background: rgba(112,225,178,.055); filter: blur(12px); }
+.msTop { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+.msTitle strong { display: block; font-family: var(--serif); font-weight: 400; font-size: clamp(30px,4vw,42px); letter-spacing: -.03em; }
+.msTitle p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.gauge { margin-top: 26px; }
+.gaugeLabels { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+.gaugeLabels strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.gaugeTrack { height: 10px; border-radius: 6px; background: #0e1e1e; border: 1px solid var(--line); overflow: hidden; }
+.gaugeFill { height: 100%; background: linear-gradient(90deg, var(--green-dark), var(--green)); }
+.gaugeMeta { display: flex; justify-content: space-between; margin-top: 10px; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+
+.empty {
+  width: min(520px, calc(100% - 40px)); margin: 90px auto; padding: 55px 42px; text-align: center;
+  border: 1px solid var(--line); border-radius: 24px;
+  background: linear-gradient(150deg, rgba(20,39,39,.96), rgba(11,24,24,.98));
+  box-shadow: 0 30px 100px rgba(0,0,0,.22);
+}
+.empty h1 { margin: 0; font-family: var(--serif); font-weight: 400; font-size: clamp(30px,6vw,42px); line-height: 1.1; letter-spacing: -.03em; }
+.empty p { color: var(--muted); line-height: 1.6; font-size: 13px; margin-top: 14px; }
+.emptyMark { width: 56px; height: 56px; margin: 0 auto 24px; border: 2px solid var(--line); border-radius: 14px; position: relative; }
+.emptyMark:before { content: ""; position: absolute; inset: 15px; border: 2px solid var(--muted); border-radius: 3px; }
+
+/* ---- dialog (Dialog.module.css / ProfileDialog.module.css) ---- */
+.backdrop {
+  position: fixed; inset: 0; z-index: 20; padding: 20px 16px; display: grid; place-items: center;
+  background: rgba(4,11,11,.78); backdrop-filter: blur(12px);
+}
+.dialog { width: min(560px,100%); padding: 30px; border: 1px solid #35504d; border-radius: 22px; background: #102020; box-shadow: 0 32px 100px rgba(0,0,0,.5); }
+.dialog h2 { margin: 0; font-family: var(--serif); font-weight: 400; letter-spacing: -.025em; font-size: 30px; }
+.dialogHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.close { width: 44px; min-height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); background: transparent; }
+.dialog form { display: grid; gap: 16px; margin-top: 22px; }
+.note { padding: 15px; display: grid; gap: 5px; border-left: 3px solid var(--warm); background: rgba(245,184,103,.07); color: #e6d4b9; font-size: 11px; line-height: 1.45; }
+.note span { color: var(--muted); }
+
+/* ---- toast (Toast.module.css) — every rejection in useSession.ts becomes
+   one of these, so any screen that can call the backend must show where
+   they land. The earlier pass of this mockup had no error surface at all. */
+.toast {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+  z-index: 40; max-width: min(520px, calc(100% - 32px));
+  padding: 13px 17px; border-radius: 12px;
+  border: 1px solid rgba(255,135,127,.4); background: #241615; color: #ffd9d6;
+  font-size: 12px; line-height: 1.45; box-shadow: 0 18px 50px rgba(0,0,0,.45);
+}
+.toast strong { color: var(--danger); }
+
+/* ---- review harness (not part of the product UI) ---- */
+.reviewBar {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px; background: rgba(9,18,18,.9); backdrop-filter: blur(10px);
+  border-bottom: 1px dashed #2f4b47;
+}
+.reviewBar span { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-right: 4px; }
+.reviewBar button {
+  min-height: 34px; padding: 0 14px; border-radius: 999px; font-size: 11px; font-weight: 700;
+  border: 1px solid var(--line); background: rgba(16,32,32,.7); color: var(--muted);
+}
+.reviewBar button.on { color: #fff; background: var(--green-fill); border-color: var(--green-fill); }
+.view, .panel { display: none; }
+.view.show, .panel.show { display: block; }
+
+.footer {
+  margin-top: auto; min-height: 56px; padding: 14px 20px; display: flex; justify-content: center; gap: 30px;
+  border-top: 1px solid rgba(112,225,178,.11); color: #647975; font-size: 9px; text-transform: uppercase; letter-spacing: .12em;
+}
+
+/* Breakpoints match the app's own (Dashboard.module.css:199, :221) rather
+   than introducing a third value. */
+@media (max-width: 720px) {
+  .dashboard { width: min(100% - 24px, 560px); margin: 18px auto 44px; gap: 12px; }
+  .row2 { grid-template-columns: 1fr; gap: 12px; }
+  .statGrid { grid-template-columns: 1fr 1fr; }
+  .operation, .list, .roster { padding: 22px; }
+  .storageRow, .memberRow { grid-template-columns: auto 1fr; row-gap: 10px; }
+  .capacity, .rowActions { grid-column: 2; justify-self: start; text-align: left; align-items: start; }
+  .barTrack { margin-left: 0; }
+}
+@media (max-width: 440px) {
+  .mesh { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="reviewBar">
+  <span>Design review — session state</span>
+  <button class="on" data-act="view" data-arg="admin">Admin session</button>
+  <button data-act="view" data-arg="client">Client-only session</button>
+  <button data-act="view" data-arg="none">Not authorized</button>
+  <button id="toastToggle" data-act="toast">Error toast</button>
+  <button data-act="revoke-open">Revoke dialog</button>
+</div>
+
+<!-- ================= ADMIN SESSION (has both views) ================= -->
+<div class="view show" id="view-admin">
+  <header class="topbar">
+    <div class="brand">
+      <span class="cube"><i></i></span>
+      <div class="brandText"><strong>FORMSTR</strong><small>Storage control</small></div>
+    </div>
+    <div class="viewTabs" role="group" aria-label="View">
+      <button type="button" id="tab-roster" class="active" data-act="panel" data-arg="roster">Admin</button>
+      <button type="button" id="tab-mystorage" data-act="panel" data-arg="mystorage">My storage</button>
+    </div>
+    <div class="topControls">
+      <button class="hostPill" type="button">
+        <span class="statusDot on"></span>
+        <span class="hostLabel"><strong>Staging</strong><small>storage.stg.formstr.app</small></span>
+      </button>
+      <button class="lockButton" type="button">Lock</button>
+    </div>
+  </header>
+
+  <!-- ---- Admin panel: roster management only, nothing about this admin's own storage ---- -->
+  <div class="panel show" id="panel-roster">
+    <main class="dashboard">
+      <section class="card roster">
+        <p class="eyebrow">Roster overview</p>
+        <!-- 5 active + 2 pending + 1 unreachable = the 8 storages the list
+             below is headed with; 7 members is a separate count. The earlier
+             pass reused one "7" as both, which is how an implementer ends up
+             wiring the wrong field to the wrong tile. -->
+        <div class="statGrid">
+          <div class="stat">
+            <strong>7</strong>
+            <span>Authorized members</span>
+          </div>
+          <div class="stat green">
+            <strong>5</strong>
+            <span>Storages active</span>
+          </div>
+          <div class="stat warm">
+            <strong>2</strong>
+            <span>Pending verification</span>
+          </div>
+          <div class="stat">
+            <strong>612 GB</strong>
+            <span>Reported free of 940 GB</span>
+          </div>
+        </div>
+        <div class="mesh" aria-hidden="true"><i></i><i></i><i></i><span></span></div>
+      </section>
+
+      <section class="row2">
+        <article class="card operation">
+          <p class="eyebrow">Membership</p>
+          <h2>Authorize a client</h2>
+          <p>Grant an npub client access. From here, requesting an invite, bootstrapping a machine, and linking its storage npub to the roster are entirely theirs to do — see "My storage" for what that looks like from their side.</p>
+          <form>
+            <label for="add-npub">Client npub</label>
+            <div class="row">
+              <input id="add-npub" type="text" placeholder="npub1..." />
+              <button class="secondary" type="button" data-act="dialog-open">Authorize</button>
+            </div>
+          </form>
+        </article>
+
+        <!-- Replaces an "Enrollment override / Issue an invite" card from the
+             earlier pass. That card was a dead end: only the owner can call
+             POST /v1/storage, so an admin-issued invite still requires the
+             client to link the resulting npub themselves — it promised a way
+             around self-service that doesn't exist, and re-introduced the
+             out-of-band handoff decision 7 deliberately removed. Capacity
+             health is what this slot is actually missing. -->
+        <article class="card operation">
+          <p class="eyebrow">Capacity health</p>
+          <h2>Replica headroom</h2>
+          <p>5 active storages against a largest plan replica count of 3. Uploads fail outright below that — <code>uploadBlob</code> throws rather than under-replicate — so a revoke or two unreachable nodes is an availability event, not just bookkeeping.</p>
+          <div class="gauge" style="margin-top:20px">
+            <div class="gaugeLabels"><span>Active <strong>5</strong></span><span>Minimum <strong>3</strong></span></div>
+            <div class="gaugeTrack"><div class="gaugeFill" style="width:60%"></div></div>
+            <div class="gaugeMeta"><span>2 pending verification</span><span>1 unreachable</span></div>
+          </div>
+        </article>
+      </section>
+
+      <!-- The screen the earlier pass was missing entirely. GET /v1/members
+           and POST /v1/members/remove were both in the plan's route table
+           with no UI anywhere, which left the source doc's headline admin
+           capability — "They can remove any client... and its storage from
+           the roster" — unreachable. -->
+      <section class="card list">
+        <div class="heading">
+          <div><p class="eyebrow">Membership · admins and clients</p><h2>Members</h2></div>
+          <span>7 total</span>
+        </div>
+        <ul class="rows">
+          <li class="memberRow">
+            <span class="statusDot on"></span>
+            <div class="rowId">
+              <strong>npub1hx3f9c...m7v2q4a (you)</strong>
+              <span>Admin since Mar 2026 · 1 storage</span>
+            </div>
+            <div class="rowActions"><span class="chip role">Admin</span></div>
+          </li>
+          <li class="memberRow">
+            <span class="statusDot on"></span>
+            <div class="rowId">
+              <strong>npub1w4s7dk...c2m9v6b</strong>
+              <span>Client since Apr 2026 · 2 storages · authorized by you</span>
+            </div>
+            <div class="rowActions">
+              <span class="chip role">Client</span>
+              <button class="textButton danger removeButton" type="button" data-act="revoke-open">Revoke</button>
+            </div>
+          </li>
+          <li class="memberRow">
+            <span class="statusDot warn"></span>
+            <div class="rowId">
+              <strong>npub1zr8c2n...w5p9x1e</strong>
+              <span>Client since 3m ago · 1 storage, never reported in</span>
+            </div>
+            <div class="rowActions">
+              <span class="chip role">Client</span>
+              <button class="textButton danger removeButton" type="button" data-act="revoke-open">Revoke</button>
+            </div>
+          </li>
+          <li class="memberRow">
+            <span class="statusDot off"></span>
+            <div class="rowId">
+              <strong>npub1jd6h4p...q8x2n5t</strong>
+              <span>Revoked 12 Jul 2026 · storages removed from mesh</span>
+            </div>
+            <div class="rowActions">
+              <span class="chip unreachable">Revoked</span>
+              <button class="textButton edit" type="button">Re-authorize</button>
+            </div>
+          </li>
+        </ul>
+      </section>
+
+      <!-- Every npub in this list is a STORAGE MACHINE's own mesh identity,
+           never an operator's key (decision 3), so each row names its owner
+           separately. The earlier pass printed "npub1hx3f9c... (you)" here,
+           reusing the admin's operator npub as their storage npub — the exact
+           conflation decision 3 exists to prevent. Capacity shows three
+           distinct numbers (decision 5): declared cap, reported total,
+           reported free. It never shows a "verified" figure, because nothing
+           in v1 verifies anything. -->
+      <section class="card list">
+        <div class="heading">
+          <div><p class="eyebrow">Storage roster · all members</p><h2>Storages</h2></div>
+          <span>8 total</span>
+        </div>
+        <ul class="rows">
+          <li class="storageRow">
+            <span class="statusDot on"></span>
+            <div class="rowId">
+              <strong>npub1qy2mjr...ke0kw02</strong>
+              <span>owner npub1w4s7dk...c2m9v6b · 10.44.3.12 · blossom :3000 · relay :7777 · pinged 2m ago</span>
+            </div>
+            <div class="capacity">
+              <strong>44 GB free</strong>
+              <div class="barTrack"><div class="barFill" style="width:88%"></div></div>
+              <span style="color:var(--muted);font-size:10px">cap 50 · disk 60 GB</span>
+            </div>
+            <div class="rowActions">
+              <span class="chip active">Active</span>
+              <button class="textButton danger removeButton" type="button">Remove</button>
+            </div>
+          </li>
+          <li class="storageRow">
+            <span class="statusDot on"></span>
+            <div class="rowId">
+              <strong>npub1s5v8qk...r7d3f2m</strong>
+              <span>owner npub1hx3f9c...m7v2q4a (you) · 10.44.3.18 · blossom :3000 · relay :7777 · pinged 41s ago</span>
+            </div>
+            <div class="capacity">
+              <strong>13 GB free</strong>
+              <div class="barTrack"><div class="barFill warn" style="width:7%"></div></div>
+              <span style="color:var(--muted);font-size:10px">cap 200 · disk 200 GB</span>
+            </div>
+            <div class="rowActions">
+              <span class="chip active">Active</span>
+              <button class="textButton danger removeButton" type="button">Remove</button>
+            </div>
+          </li>
+          <li class="storageRow">
+            <span class="statusDot warn"></span>
+            <div class="rowId">
+              <strong>npub1zr8c2n...w5p9x1e</strong>
+              <span>owner npub1zr8c2n...w5p9x1e · linked by its owner 3m ago · no ping received yet</span>
+            </div>
+            <div class="capacity">
+              <strong>—</strong>
+              <div class="barTrack"><div class="barFill warn" style="width:8%"></div></div>
+              <span style="color:var(--muted);font-size:10px">cap 20 · disk not reported</span>
+            </div>
+            <div class="rowActions">
+              <span class="chip pending">Pending verification</span>
+              <button class="textButton danger removeButton" type="button">Remove</button>
+            </div>
+          </li>
+          <li class="storageRow">
+            <span class="statusDot off"></span>
+            <div class="rowId">
+              <strong>npub1lk4d7s...t3b6y8u</strong>
+              <span>owner npub1w4s7dk...c2m9v6b · 10.44.3.9 · last seen 51 min ago · blobs on this node are unreachable</span>
+            </div>
+            <div class="capacity">
+              <strong>0 GB free</strong>
+              <div class="barTrack"><div class="barFill" style="width:100%; background:var(--danger)"></div></div>
+              <span style="color:var(--muted);font-size:10px">cap 30 · disk 30 GB</span>
+            </div>
+            <div class="rowActions">
+              <span class="chip unreachable">Unreachable</span>
+              <button class="textButton danger removeButton" type="button">Remove</button>
+            </div>
+          </li>
+        </ul>
+      </section>
+
+      <!-- Read-only mesh observability. No role chips and no "(you)": a peer's
+           npub is fips_endpoint_npub — a storage machine's identity, which has
+           no Member row and therefore no role at all (decision 3). The only
+           honest annotation is whether it maps to a known Storage row. -->
+      <section class="card list">
+        <div class="heading">
+          <div><p class="eyebrow">Network roster · read-only</p><h2>Peers</h2></div>
+          <span>4 total</span>
+        </div>
+        <ul class="rows">
+          <li class="memberRow">
+            <span class="statusDot on"></span>
+            <div class="rowId"><strong>npub1qy2mjr...ke0kw02</strong><span>Tunnel IP 10.44.3.12 · linked storage</span></div>
+            <span class="chip active">Reachable</span>
+          </li>
+          <li class="memberRow">
+            <span class="statusDot on"></span>
+            <div class="rowId"><strong>npub1s5v8qk...r7d3f2m</strong><span>Tunnel IP 10.44.3.18 · linked storage</span></div>
+            <span class="chip active">Reachable</span>
+          </li>
+          <li class="memberRow">
+            <span class="statusDot off"></span>
+            <div class="rowId"><strong>npub1tt0e9m...h4k7s3w</strong><span>Tunnel IP 10.44.3.22 · no matching storage row — added at the host CLI, removable only there</span></div>
+            <span class="chip unreachable">Offline</span>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </div>
+
+  <!-- ---- My storage panel: same content/capabilities as a plain client's
+       whole session — an admin enrolling storage is not a special case
+       (decision 8). Row 2 here is the admin's own "npub1hx3f9c…" node from
+       the roster list above. ---- -->
+  <div class="panel" id="panel-mystorage">
+    <main class="dashboard" id="mystorage-admin"></main>
+  </div>
+
+  <footer class="footer">
+    <span>NIP-49 encrypted at rest</span>
+    <span>NIP-98 signed per request</span>
+    <span>Keys in memory only</span>
+  </footer>
+</div>
+
+<!-- ================= CLIENT-ONLY SESSION (one view, nothing else) ================= -->
+<div class="view" id="view-client">
+  <header class="topbar">
+    <div class="brand">
+      <span class="cube"><i></i></span>
+      <div class="brandText"><strong>FORMSTR</strong><small>Storage control</small></div>
+    </div>
+    <div class="topControls">
+      <button class="hostPill" type="button">
+        <span class="statusDot on"></span>
+        <span class="hostLabel"><strong>Staging</strong><small>storage.stg.formstr.app</small></span>
+      </button>
+      <button class="lockButton" type="button">Lock</button>
+    </div>
+  </header>
+
+  <main class="dashboard" id="mystorage-client"></main>
+
+  <footer class="footer">
+    <span>NIP-49 encrypted at rest</span>
+    <span>NIP-98 signed per request</span>
+    <span>Keys in memory only</span>
+  </footer>
+</div>
+
+<!-- ================= NOT AUTHORIZED ================= -->
+<div class="view" id="view-none">
+  <header class="topbar">
+    <div class="brand">
+      <span class="cube"><i></i></span>
+      <div class="brandText"><strong>FORMSTR</strong><small>Storage control</small></div>
+    </div>
+    <div class="topControls">
+      <button class="hostPill" type="button">
+        <span class="statusDot off"></span>
+        <span class="hostLabel"><strong>Staging</strong><small>storage.stg.formstr.app</small></span>
+      </button>
+      <button class="lockButton" type="button">Lock</button>
+    </div>
+  </header>
+  <section class="empty">
+    <div class="emptyMark"></div>
+    <p class="eyebrow">Session locked out</p>
+    <h1>Not authorized on this host.</h1>
+    <p>This key isn't on storage.stg.formstr.app's roster. Ask an admin to authorize your npub, or switch to a host profile you already have access to.</p>
+  </section>
+</div>
+
+<!-- ================= AUTHORIZE DIALOG (shown over the Admin panel) ================= -->
+<div class="backdrop" id="dialog" style="display:none">
+  <div class="dialog">
+    <div class="dialogHead">
+      <div><p class="eyebrow">Member roster</p><h2 id="dlg-title">Authorize a client</h2></div>
+      <button class="close" type="button" data-act="dialog-close">&times;</button>
+    </div>
+    <form>
+      <label for="dlg-npub">Client npub<input id="dlg-npub" type="text" placeholder="npub1..." value="npub1zr8c2n5f0e2w5p9x1e7t3q8m4k6j2h9d0a3s7f1g5h8j2k9l" /></label>
+      <div class="roleSwitch" role="group" aria-label="Role">
+        <button type="button" class="active">Client</button>
+        <button type="button">Admin</button>
+      </div>
+      <div class="note">
+        <strong>This grants membership only — nothing about storage.</strong>
+        <span>Once authorized, it's entirely on them: they request their own invite, bootstrap a storage machine with it, and link that machine's npub to the roster themselves. Two deliberate actions on their side, in their own "My storage" view — nothing here approves anything automatically.</span>
+      </div>
+      <button class="primary" type="button" data-act="dialog-close">Authorize client</button>
+    </form>
+  </div>
+</div>
+
+<!-- ============ REVOKE DIALOG — the confirmation the plan promised and the
+     earlier pass never drew. It has to state the cascade, because revoking a
+     member is the one action here that destroys someone else's enrollment. -->
+<div class="backdrop" id="revoke" style="display:none">
+  <div class="dialog">
+    <div class="dialogHead">
+      <div><p class="eyebrow">Member roster</p><h2>Revoke this client?</h2></div>
+      <button class="close" type="button" data-act="revoke-close">&times;</button>
+    </div>
+    <form>
+      <p style="margin:0;color:var(--muted);font-size:13px;line-height:1.55">
+        <code style="font-family:var(--mono);font-size:11px">npub1w4s7dk...c2m9v6b</code>
+        loses membership immediately.
+      </p>
+      <div class="note">
+        <strong>Their 2 storages are removed from the mesh too.</strong>
+        <span>Each is marked removed and dropped from the NVPN roster, so the proxies stop routing to them within one 15-second poll. Blobs whose only replicas live on those nodes become unreachable. You cannot reassign their storage to another client — that is theirs alone. Re-authorizing them later does not bring the storages back; they would link them again themselves.</span>
+      </div>
+      <button class="primary" type="button" disabled>
+        <span class="spinner"></span> Revoking
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- Error surface: useSession.ts turns every rejection into a toast, so any
+     screen that can call the backend needs somewhere for them to land. -->
+<div class="toast" id="toast" style="display:none">
+  <strong>Could not link that storage.</strong>
+  npub is already linked to another member — a storage can only ever belong to whoever linked it first.
+</div>
+
+<script>
+/* ---- "My storage" content, shared verbatim between the admin's own
+   My-storage panel and a plain client's only view — same markup, same
+   capabilities, because decision 8 says there's no difference. Built once
+   here and mounted into both slots so the two can never drift apart in
+   this mockup the way two independent copies eventually would. ---- */
+function myStorageMarkup(opts) {
+  return `
+    <section class="card myStorage">
+      <div class="msTop">
+        <div class="msTitle">
+          <p class="eyebrow">My storage</p>
+          <strong>${opts.offered}</strong>
+          <p>${opts.nodeCount} storage node${opts.nodeCount === 1 ? '' : 's'} · reporting every 5 minutes</p>
+        </div>
+        <span class="chip active">Active</span>
+      </div>
+      <!-- Three separate numbers, never collapsed (decision 5): the cap the
+           operator declared, what the agent measured as total, and what it
+           measured as free. Nothing here says "verified" — v1 does not
+           verify capacity, it relays what the storage reports. -->
+      <div class="gauge">
+        <div class="gaugeLabels"><span>Reported in use <strong>${opts.used}</strong></span><span>Reported free <strong>${opts.free}</strong></span></div>
+        <div class="gaugeTrack"><div class="gaugeFill" style="width:${opts.usedPct}%"></div></div>
+        <div class="gaugeMeta"><span>Declared cap ${opts.offered}</span><span>Last reported ${opts.pingAge}</span></div>
+      </div>
+      <div class="mesh" aria-hidden="true"><i></i><i></i><i></i><span></span></div>
+    </section>
+
+    <section class="row2">
+      <article class="card operation">
+        <p class="eyebrow">Enrollment · step 1</p>
+        <h2>Request invite</h2>
+        <p>Generates a bootstrap credential for a new storage machine. Take it to that machine and run its join script — it prints back a npub identifying that machine, separate from your own. The host's own npub and tunnel IP are shown with the invite; the machine needs both.</p>
+        <!-- Busy state shown as the default here because this is the one
+             action in the mockup whose latency is unavoidable: it spawns
+             "nvpn create-invite" behind a 45s COMMAND_TIMEOUT.
+             (No backticks in this string — it lives inside a JS template
+             literal, and a stray one silently kills the whole script.) -->
+        <button class="primary warm fullWidth" type="button" disabled>
+          <span class="spinner"></span> Requesting
+        </button>
+      </article>
+
+      <article class="card operation">
+        <p class="eyebrow">Enrollment · step 2</p>
+        <h2>Link a storage</h2>
+        <p>Paste the npub your storage machine printed. This is what actually approves it on the mesh and brings it onto your roster below — nothing happens until you do this.</p>
+        <form>
+          <label for="link-npub">Storage npub</label>
+          <div class="row">
+            <input id="link-npub" type="text" placeholder="npub1..." />
+            <!-- Disabled until the npub parses client-side: the backend's
+                 parse_device_npub rejects hex and truncated keys, and a
+                 round-trip to learn that is a poor trade. -->
+            <button class="secondary" type="button" disabled>Link</button>
+          </div>
+        </form>
+      </article>
+    </section>
+
+    <section class="card list">
+      <div class="heading">
+        <div><p class="eyebrow">Your nodes</p><h2>Storage</h2></div>
+        <span>${opts.nodeCount} total</span>
+      </div>
+      <ul class="rows">
+        ${opts.rows.join('')}
+      </ul>
+    </section>
+  `;
+}
+
+function storageRow(r) {
+  return `
+    <li class="storageRow">
+      <span class="statusDot ${r.dot}"></span>
+      <div class="rowId">
+        <strong>${r.npub}</strong>
+        <span>${r.meta}</span>
+      </div>
+      <div class="capacity" data-declared="${r.declared}">
+        <div class="capDisplay">
+          <strong>${r.free} GB free</strong>
+          <div class="barTrack"><div class="barFill${r.warn ? ' warn' : ''}" style="width:${r.pct}%"></div></div>
+          <span style="color:var(--muted);font-size:10px">cap ${r.declared} · disk ${r.total}</span>
+          <button class="textButton edit" type="button" data-act="cap-edit">Edit cap</button>
+        </div>
+        <div class="capEdit" hidden>
+          <input type="text" value="${r.declared}" inputmode="numeric" />
+          <span>GB</span>
+          <button class="secondary small" type="button" data-act="cap-save">Save</button>
+        </div>
+      </div>
+      <div class="rowActions">
+        <span class="chip ${r.chip}">${r.status}</span>
+      </div>
+    </li>
+  `;
+}
+
+/* Storage npubs, never the operator's own npub (decision 3) — a client owns
+   several machines, each with its own bootstrap-generated identity. */
+const clientRows = [
+  storageRow({ dot: 'on', npub: 'npub1qy2mjr...ke0kw02', meta: '10.44.3.31 · blossom :3000 · relay :7777 · pinged 2m ago', declared: 44, free: 31, total: 60, pct: 70, chip: 'active', status: 'Active' }),
+  storageRow({ dot: 'warn', npub: 'npub1t8k4p2...j5n0rq9', meta: 'linked 6m ago · no ping received yet — is storage-agent running?', declared: 20, free: '—', total: 'not reported', pct: 0, warn: true, chip: 'pending', status: 'Pending verification' }),
+];
+
+const adminOwnRows = [
+  storageRow({ dot: 'on', npub: 'npub1s5v8qk...r7d3f2m', meta: '10.44.3.18 · blossom :3000 · relay :7777 · pinged 41s ago', declared: 200, free: 13, total: 200, pct: 7, warn: true, chip: 'active', status: 'Active' }),
+];
+
+document.getElementById('mystorage-client').innerHTML = myStorageMarkup({
+  offered: '64 GB', used: '29 GB', free: '31 GB', usedPct: 48, pingAge: '2m ago', nodeCount: 2, rows: clientRows,
+});
+document.getElementById('mystorage-admin').innerHTML = myStorageMarkup({
+  offered: '200 GB', used: '187 GB', free: '13 GB', usedPct: 94, pingAge: '41s ago', nodeCount: 1, rows: adminOwnRows,
+});
+
+/* ---- interaction ----------------------------------------------------------
+   Why nothing in the previous revision was clickable: a code sample written
+   into the "Request invite" card used backticks, inside a JS template
+   literal. That closed the literal early and made this whole script a
+   SyntaxError, so no handler ever got defined and the generated "My storage"
+   panels never rendered either — the page looked almost fine, which is what
+   made it easy to miss.
+
+   Two changes so it can't recur silently: no backticks inside the template
+   literals (quotes instead), and every handler now hangs off ONE delegated
+   click listener keyed on data-act rather than inline onclick= attributes.
+   Delegation is the more robust form regardless — it survives a
+   nonce/hash-based CSP that would block inline handler attributes, and it
+   binds the dynamically generated storage rows without re-wiring after
+   innerHTML.
+   -------------------------------------------------------------------------- */
+function showView(name) {
+  document.querySelectorAll('.view').forEach(function (el) { el.classList.remove('show'); });
+  document.getElementById('view-' + name).classList.add('show');
+  document.querySelectorAll('.reviewBar button[data-arg]').forEach(function (b) {
+    if (b.dataset.act === 'view') b.classList.toggle('on', b.dataset.arg === name);
+  });
+}
+
+function showPanel(name) {
+  document.querySelectorAll('#view-admin .panel').forEach(function (el) { el.classList.remove('show'); });
+  document.getElementById('panel-' + name).classList.add('show');
+  document.getElementById('tab-roster').classList.toggle('active', name === 'roster');
+  document.getElementById('tab-mystorage').classList.toggle('active', name === 'mystorage');
+}
+
+function setOverlay(id, show) {
+  document.getElementById(id).style.display = show ? 'grid' : 'none';
+}
+
+function toggleToast() {
+  const el = document.getElementById('toast');
+  const on = el.style.display === 'none';
+  el.style.display = on ? 'block' : 'none';
+  document.getElementById('toastToggle').classList.toggle('on', on);
+}
+
+function editCapacity(btn) {
+  const wrap = btn.closest('.capacity');
+  wrap.querySelector('.capDisplay').hidden = true;
+  wrap.querySelector('.capEdit').hidden = false;
+  wrap.querySelector('.capEdit input').focus();
+}
+
+function saveCapacity(btn) {
+  const wrap = btn.closest('.capacity');
+  const value = wrap.querySelector('.capEdit input').value;
+  /* Only the declared cap is editable here — the free/total figures beside it
+     come from the agent's last ping and are not the operator's to set. */
+  const meta = wrap.querySelector('.capDisplay span');
+  if (meta) meta.textContent = meta.textContent.replace(/cap \S+/, 'cap ' + value);
+  wrap.querySelector('.capEdit').hidden = true;
+  wrap.querySelector('.capDisplay').hidden = false;
+}
+
+const ACTIONS = {
+  view: function (el) { showView(el.dataset.arg); },
+  panel: function (el) { showPanel(el.dataset.arg); },
+  toast: toggleToast,
+  'dialog-open': function () { setOverlay('dialog', true); },
+  'dialog-close': function () { setOverlay('dialog', false); },
+  'revoke-open': function () { setOverlay('revoke', true); },
+  'revoke-close': function () { setOverlay('revoke', false); },
+  'cap-edit': editCapacity,
+  'cap-save': saveCapacity,
+};
+
+document.addEventListener('click', function (event) {
+  const el = event.target.closest('[data-act]');
+  if (!el) return;
+  const action = ACTIONS[el.dataset.act];
+  if (!action) return;
+  event.preventDefault();
+  action(el);
+});
+
+/* The mockup's forms submit nowhere; the real screens post to the control
+   plane. Blocking submit here keeps Enter in an npub field from reloading. */
+document.addEventListener('submit', function (event) { event.preventDefault(); });
+
+/* Escape closes whichever overlay is open, matching Dialog.tsx. */
+document.addEventListener('keydown', function (event) {
+  if (event.key !== 'Escape') return;
+  setOverlay('dialog', false);
+  setOverlay('revoke', false);
+});
+</script>
+</body>
+</html>

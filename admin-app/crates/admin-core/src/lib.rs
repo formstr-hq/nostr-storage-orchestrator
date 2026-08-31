@@ -22,11 +22,13 @@ use url::Url;
 use zeroize::Zeroizing;
 
 pub const STATUS_PATH: &str = "/v1/status";
+pub const ME_PATH: &str = "/v1/me";
+pub const ROSTER_PATH: &str = "/v1/roster";
+pub const MEMBERS_PATH: &str = "/v1/members";
+pub const MEMBERS_REMOVE_PATH: &str = "/v1/members/remove";
 pub const INVITES_PATH: &str = "/v1/invites";
-pub const DEVICES_PATH: &str = "/v1/devices";
-// Not DELETE: nostr::nips::nip98::HttpMethod only covers GET/POST/PUT/PATCH,
-// so this mutation is POST too, same as DEVICES_PATH and INVITES_PATH.
-pub const DEVICES_REMOVE_PATH: &str = "/v1/devices/remove";
+pub const STORAGES_PATH: &str = "/v1/storages";
+pub const STORAGE_PATH: &str = "/v1/storage";
 
 /// scrypt cost ceiling for NIP-49, about 64 MiB. Keys this crate generates use
 /// it, and imported credentials may not exceed it, so an untrusted `ncryptsec`
@@ -133,6 +135,109 @@ pub struct Peer {
 pub struct HostStatus {
     pub connected_count: usize,
     pub peers: Vec<Peer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Admin,
+    Client,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Me {
+    pub npub: String,
+    pub role: Role,
+    pub member_since: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberCounts {
+    pub authorized: usize,
+    pub admins: usize,
+    pub clients: usize,
+    pub revoked: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCounts {
+    pub total: usize,
+    pub active: usize,
+    pub pending: usize,
+    pub unreachable: usize,
+    pub reported_total_bytes: String,
+    pub reported_free_bytes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Roster {
+    pub members: MemberCounts,
+    pub storages: StorageCounts,
+    pub replica_count_required: usize,
+    pub replica_shortfall: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberRole {
+    Admin,
+    Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberStatus {
+    Active,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Member {
+    pub npub: String,
+    pub role: MemberRole,
+    pub status: MemberStatus,
+    pub storage_count: usize,
+    pub created_at: String,
+    pub updated_at: String,
+    pub added_by_npub: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageLifecycle {
+    Linked,
+    Removed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageLiveness {
+    Pending,
+    Active,
+    Unreachable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Storage {
+    pub npub: String,
+    pub owner_npub: String,
+    pub tunnel_ip: Option<String>,
+    pub blossom_port: Option<u16>,
+    pub relay_port: Option<u16>,
+    pub declared_capacity_bytes: Option<String>,
+    pub reported_total_bytes: Option<String>,
+    pub reported_free_bytes: Option<String>,
+    pub lifecycle: StorageLifecycle,
+    pub liveness: StorageLiveness,
+    pub last_ping_at: Option<String>,
+    pub created_at: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -254,16 +359,14 @@ pub fn unlock_keys(ncryptsec: &str, passphrase: &str) -> Result<Keys> {
     Ok(Keys::new(secret_key))
 }
 
-/// Validate a device public key and return its canonical npub encoding.
+/// Validate a Nostr public key and return its canonical npub encoding.
 pub fn canonical_npub(input: &str) -> Result<String> {
     let candidate = input.trim();
     if !candidate.starts_with("npub1") {
-        return Err(CoreError::new(
-            "Device must be an npub, not a hex public key",
-        ));
+        return Err(CoreError::new("Enter an npub, not a hex public key"));
     }
-    let public_key =
-        PublicKey::from_bech32(candidate).map_err(|_| CoreError::new("Enter a valid Nostr npub"))?;
+    let public_key = PublicKey::from_bech32(candidate)
+        .map_err(|_| CoreError::new("Enter a valid Nostr npub"))?;
     encode_npub(&public_key)
 }
 
@@ -304,7 +407,12 @@ impl Session {
         })
     }
 
-    async fn sign(&self, path: &str, method: Method, body: Option<Vec<u8>>) -> Result<SignedRequest> {
+    async fn sign(
+        &self,
+        path: &str,
+        method: Method,
+        body: Option<Vec<u8>>,
+    ) -> Result<SignedRequest> {
         let url = endpoint(&self.host_url, path)?;
         let mut data = HttpData::new(url.clone(), method.nip98());
         if let Some(body) = body.as_deref() {
@@ -327,28 +435,74 @@ impl Session {
         self.sign(STATUS_PATH, Method::Get, None).await
     }
 
+    pub async fn me_request(&self) -> Result<SignedRequest> {
+        self.sign(ME_PATH, Method::Get, None).await
+    }
+
+    pub async fn roster_request(&self) -> Result<SignedRequest> {
+        self.sign(ROSTER_PATH, Method::Get, None).await
+    }
+
+    pub async fn members_request(&self) -> Result<SignedRequest> {
+        self.sign(MEMBERS_PATH, Method::Get, None).await
+    }
+
+    pub async fn storages_request(&self) -> Result<SignedRequest> {
+        self.sign(STORAGES_PATH, Method::Get, None).await
+    }
+
     pub async fn invite_request(&self) -> Result<SignedRequest> {
         self.sign(INVITES_PATH, Method::Post, Some(b"{}".to_vec()))
             .await
     }
 
-    /// Sign a device approval. `npub` is validated and canonicalized first, so
-    /// the signed payload hash always covers the exact bytes that are sent.
-    pub async fn device_request(&self, npub: &str) -> Result<SignedRequest> {
+    pub async fn member_request(&self, npub: &str, role: MemberRole) -> Result<SignedRequest> {
         let npub = canonical_npub(npub)?;
-        let body = serde_json::to_vec(&json!({ "npub": npub }))
-            .map_err(|_| CoreError::new("Could not prepare the device request"))?;
-        self.sign(DEVICES_PATH, Method::Post, Some(body)).await
+        let body = serde_json::to_vec(&json!({ "npub": npub, "role": role }))
+            .map_err(|_| CoreError::new("Could not prepare the member request"))?;
+        self.sign(MEMBERS_PATH, Method::Post, Some(body)).await
     }
 
-    /// Sign a device removal. Same body shape and validation as
-    /// [`Session::device_request`]; only the path differs.
-    pub async fn device_removal_request(&self, npub: &str) -> Result<SignedRequest> {
+    pub async fn member_removal_request(&self, npub: &str) -> Result<SignedRequest> {
         let npub = canonical_npub(npub)?;
         let body = serde_json::to_vec(&json!({ "npub": npub }))
-            .map_err(|_| CoreError::new("Could not prepare the device request"))?;
-        self.sign(DEVICES_REMOVE_PATH, Method::Post, Some(body))
+            .map_err(|_| CoreError::new("Could not prepare the member request"))?;
+        self.sign(MEMBERS_REMOVE_PATH, Method::Post, Some(body))
             .await
+    }
+
+    pub async fn storage_request(&self, npub: &str) -> Result<SignedRequest> {
+        let npub = canonical_npub(npub)?;
+        let body = serde_json::to_vec(&json!({ "npub": npub }))
+            .map_err(|_| CoreError::new("Could not prepare the storage request"))?;
+        self.sign(STORAGE_PATH, Method::Post, Some(body)).await
+    }
+
+    pub async fn storage_capacity_request(
+        &self,
+        npub: &str,
+        declared_capacity_bytes: &str,
+    ) -> Result<SignedRequest> {
+        let npub = canonical_npub(npub)?;
+        if declared_capacity_bytes.is_empty()
+            || !declared_capacity_bytes
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return Err(CoreError::new("Capacity must be a decimal byte string"));
+        }
+        let body = serde_json::to_vec(&json!({
+            "declaredCapacityBytes": declared_capacity_bytes
+        }))
+        .map_err(|_| CoreError::new("Could not prepare the capacity request"))?;
+        let path = format!("/v1/storage/{npub}/capacity");
+        self.sign(&path, Method::Post, Some(body)).await
+    }
+
+    pub async fn storage_removal_request(&self, npub: &str) -> Result<SignedRequest> {
+        let npub = canonical_npub(npub)?;
+        let path = format!("/v1/storage/{npub}/remove");
+        self.sign(&path, Method::Post, Some(b"{}".to_vec())).await
     }
 }
 
@@ -416,6 +570,27 @@ pub fn status_response(status: u16, body: &[u8]) -> Result<HostStatus> {
     })
 }
 
+fn parse_response<T: for<'de> Deserialize<'de>>(status: u16, body: &[u8]) -> Result<T> {
+    let value = interpret(status, body)?;
+    serde_json::from_value(value).map_err(|_| CoreError::new("Host returned an invalid response"))
+}
+
+pub fn me_response(status: u16, body: &[u8]) -> Result<Me> {
+    parse_response(status, body)
+}
+
+pub fn roster_response(status: u16, body: &[u8]) -> Result<Roster> {
+    parse_response(status, body)
+}
+
+pub fn members_response(status: u16, body: &[u8]) -> Result<Vec<Member>> {
+    parse_response(status, body)
+}
+
+pub fn storages_response(status: u16, body: &[u8]) -> Result<Vec<Storage>> {
+    parse_response(status, body)
+}
+
 pub fn invite_response(status: u16, body: &[u8]) -> Result<String> {
     let value = interpret(status, body)?;
     value
@@ -426,9 +601,9 @@ pub fn invite_response(status: u16, body: &[u8]) -> Result<String> {
         .ok_or_else(|| CoreError::new("Host response did not include an invite"))
 }
 
-/// Device approval carries no payload worth reading, so any 2xx is success —
+/// Mutations carry no payload worth reading, so any 2xx is success —
 /// including an empty body a JSON parse would reject.
-pub fn device_response(status: u16, body: &[u8]) -> Result<()> {
+pub fn mutation_response(status: u16, body: &[u8]) -> Result<()> {
     if (200..300).contains(&status) {
         return Ok(());
     }
@@ -500,7 +675,11 @@ mod tests {
     fn imported_nsec_rejects_non_nsec_input() {
         let secret = SecretKey::generate();
         assert!(encrypt_nsec(&secret.to_secret_hex(), PASSPHRASE).is_err());
-        assert!(encrypt_nsec(&Keys::new(secret).public_key().to_bech32().unwrap(), PASSPHRASE).is_err());
+        assert!(encrypt_nsec(
+            &Keys::new(secret).public_key().to_bech32().unwrap(),
+            PASSPHRASE
+        )
+        .is_err());
         assert!(encrypt_nsec("nsec1notvalid", PASSPHRASE).is_err());
         assert!(encrypt_nsec("nsec1anything", "").is_err());
     }
@@ -508,7 +687,7 @@ mod tests {
     #[tokio::test]
     async fn nip98_header_interoperates_with_nostr_verifier_and_payload() {
         let keys = Keys::generate();
-        let url = Url::parse("https://storage.example/v1/devices").unwrap();
+        let url = Url::parse("https://storage.example/v1/storage").unwrap();
         let body = br#"{"npub":"npub1example"}"#;
         let digest = sha256::Hash::hash(body);
         let data = HttpData::new(url.clone(), HttpMethod::POST)
@@ -547,13 +726,13 @@ mod tests {
             public_key
         );
 
-        let device = session.device_request(&npub).await.unwrap();
-        assert_eq!(device.url, "https://storage.example/v1/devices");
-        let body = device.body.clone().unwrap();
+        let storage = session.storage_request(&npub).await.unwrap();
+        assert_eq!(storage.url, "https://storage.example/v1/storage");
+        let body = storage.body.clone().unwrap();
         assert_eq!(
             verify_auth_header(
-                &device.authorization,
-                &Url::parse(&device.url).unwrap(),
+                &storage.authorization,
+                &Url::parse(&storage.url).unwrap(),
                 HttpMethod::POST,
                 Timestamp::now(),
                 Some(&body)
@@ -563,37 +742,94 @@ mod tests {
         );
         // A different body must not validate against the same header.
         assert!(verify_auth_header(
-            &device.authorization,
-            &Url::parse(&device.url).unwrap(),
+            &storage.authorization,
+            &Url::parse(&storage.url).unwrap(),
             HttpMethod::POST,
             Timestamp::now(),
             Some(b"{}")
         )
         .is_err());
+
+        for (request, path) in [
+            (session.me_request().await.unwrap(), "/v1/me"),
+            (session.roster_request().await.unwrap(), "/v1/roster"),
+            (session.members_request().await.unwrap(), "/v1/members"),
+            (session.storages_request().await.unwrap(), "/v1/storages"),
+        ] {
+            assert_eq!(request.url, format!("https://storage.example{path}"));
+            assert_eq!(request.method, Method::Get);
+            assert!(request.body.is_none());
+        }
+
+        let invite = session.invite_request().await.unwrap();
+        assert_eq!(invite.url, "https://storage.example/v1/invites");
+        assert_eq!(invite.body.as_deref(), Some(b"{}".as_slice()));
     }
 
     #[tokio::test]
-    async fn device_request_canonicalizes_and_rejects_bad_npubs() {
+    async fn storage_request_canonicalizes_and_rejects_bad_npubs() {
         let session = session();
         let npub = session.npub().unwrap();
-        let request = session.device_request(&format!("  {npub}  ")).await.unwrap();
+        let request = session
+            .storage_request(&format!("  {npub}  "))
+            .await
+            .unwrap();
         let body: Value = serde_json::from_slice(&request.body.unwrap()).unwrap();
         assert_eq!(body["npub"], Value::String(npub));
 
-        assert!(session.device_request("deadbeef").await.is_err());
-        assert!(session.device_request("npub1invalid").await.is_err());
+        assert!(session.storage_request("deadbeef").await.is_err());
+        assert!(session.storage_request("npub1invalid").await.is_err());
     }
 
     #[tokio::test]
-    async fn device_removal_request_targets_the_remove_path() {
+    async fn member_requests_target_the_roster_paths() {
         let session = session();
         let npub = session.npub().unwrap();
-        let request = session.device_removal_request(&npub).await.unwrap();
-        assert_eq!(request.url, "https://storage.example/v1/devices/remove");
+        let request = session
+            .member_request(&npub, MemberRole::Admin)
+            .await
+            .unwrap();
+        assert_eq!(request.url, "https://storage.example/v1/members");
         let body: Value = serde_json::from_slice(&request.body.unwrap()).unwrap();
         assert_eq!(body["npub"], Value::String(npub));
+        assert_eq!(body["role"], "admin");
 
-        assert!(session.device_removal_request("npub1invalid").await.is_err());
+        let removal = session
+            .member_removal_request(&session.npub().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(removal.url, "https://storage.example/v1/members/remove");
+        assert!(session
+            .member_removal_request("npub1invalid")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn storage_capacity_and_removal_requests_use_dynamic_paths() {
+        let session = session();
+        let npub = session.npub().unwrap();
+        let capacity = session
+            .storage_capacity_request(&npub, "1500000000")
+            .await
+            .unwrap();
+        assert_eq!(
+            capacity.url,
+            format!("https://storage.example/v1/storage/{npub}/capacity")
+        );
+        let body: Value = serde_json::from_slice(&capacity.body.unwrap()).unwrap();
+        assert_eq!(body["declaredCapacityBytes"], "1500000000");
+        assert!(session
+            .storage_capacity_request(&npub, "1.5")
+            .await
+            .is_err());
+
+        let removal = session.storage_removal_request(&npub).await.unwrap();
+        assert_eq!(
+            removal.url,
+            format!("https://storage.example/v1/storage/{npub}/remove")
+        );
+        assert_eq!(removal.body.as_deref(), Some(b"{}".as_slice()));
     }
 
     #[test]
@@ -641,6 +877,49 @@ mod tests {
     }
 
     #[test]
+    fn parses_control_plane_responses() {
+        let me = me_response(
+            200,
+            br#"{"npub":"npub1operator","role":"client","memberSince":"2026-08-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(me.role, Role::Client);
+        assert!(me.member_since.is_some());
+        let unauthorized = me_response(
+            200,
+            br#"{"npub":"npub1operator","role":"none","memberSince":null}"#,
+        )
+        .unwrap();
+        assert_eq!(unauthorized.role, Role::None);
+        assert!(unauthorized.member_since.is_none());
+
+        let roster = roster_response(
+            200,
+            br#"{"members":{"authorized":3,"admins":1,"clients":2,"revoked":1},"storages":{"total":4,"active":2,"pending":1,"unreachable":1,"reportedTotalBytes":"9000000000","reportedFreeBytes":"4000000000"},"replicaCountRequired":3,"replicaShortfall":true}"#,
+        )
+        .unwrap();
+        assert_eq!(roster.members.authorized, 3);
+        assert!(roster.replica_shortfall);
+
+        let members = members_response(
+            200,
+            br#"[{"npub":"npub1member","role":"admin","status":"active","storageCount":2,"createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-02T00:00:00Z","addedByNpub":null}]"#,
+        )
+        .unwrap();
+        assert_eq!(members[0].role, MemberRole::Admin);
+
+        let storages = storages_response(
+            200,
+            br#"[{"npub":"npub1storage","ownerNpub":"npub1member","tunnelIp":null,"blossomPort":null,"relayPort":null,"declaredCapacityBytes":"1000000000","reportedTotalBytes":null,"reportedFreeBytes":null,"lifecycle":"linked","liveness":"pending","lastPingAt":null,"createdAt":"2026-08-01T00:00:00Z"}]"#,
+        )
+        .unwrap();
+        assert_eq!(storages[0].liveness, StorageLiveness::Pending);
+
+        assert!(me_response(200, br#"{"role":"owner"}"#).is_err());
+        assert!(members_response(200, br#"{}"#).is_err());
+    }
+
+    #[test]
     fn surfaces_host_error_messages() {
         assert_eq!(
             status_response(403, br#"{"error":"forbidden"}"#)
@@ -657,9 +936,9 @@ mod tests {
             "nvpn-invite"
         );
         assert!(invite_response(200, br#"{}"#).is_err());
-        assert!(device_response(204, b"").is_ok());
+        assert!(mutation_response(204, b"").is_ok());
         assert_eq!(
-            device_response(401, br#"{"message":"unauthorized"}"#)
+            mutation_response(401, br#"{"message":"unauthorized"}"#)
                 .unwrap_err()
                 .message(),
             "unauthorized"

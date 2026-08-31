@@ -72,5 +72,45 @@ services:
       retries: 10
       start_period: 30s
 
+  storage-agent:
+    profiles: ["agent"]
+    build: ./storage-agent
+    restart: unless-stopped
+    network_mode: "service:nvpn"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    environment:
+      # Optional overrides. Normally both values are derived from the imported
+      # invite and the sole peer route on nvpn0.
+      CONTROL_PLANE_HOST_NPUB: "${CONTROL_PLANE_HOST_NPUB:-}"
+      CONTROL_PLANE_HOST_TUNNEL_IP: "${CONTROL_PLANE_HOST_TUNNEL_IP:-}"
+      CONTROL_PLANE_API_PORT: "${CONTROL_PLANE_API_PORT:-3002}"
+      NVPN_TUN_IFACE: "${NVPN_TUN_IFACE:-nvpn0}"
+      BLOSSOM_DATA_PATH: /storage/blossom
+      RELAY_DATA_PATH: /storage/strfry
+      BLOSSOM_PORT: "${BLOSSOM_PORT:-3000}"
+      NOSTR_PORT: "${NOSTR_PORT:-7777}"
+      AGENT_HEALTH_PORT: "${AGENT_HEALTH_PORT:-3010}"
+      PING_INTERVAL_SECS: "${PING_INTERVAL_SECS:-300}"
+      PING_RETRY_SECS: "${PING_RETRY_SECS:-15}"
+    depends_on:
+      nvpn:
+        condition: service_healthy
+        restart: true
+    volumes:
+      - ${BLOSSOM_DATA_PATH}:/storage/blossom:ro
+      - ${RELAY_DATA_PATH}:/storage/strfry:ro
+      # Identity only: storage-agent never executes nvpn and shares no PID namespace.
+      - nvpn_data:/data:ro
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/storage-agent", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 volumes:
   nvpn_data:

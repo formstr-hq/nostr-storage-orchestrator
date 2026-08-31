@@ -2,6 +2,8 @@
 
 ## Status
 
+Completed - 07.08.2026
+
 Reviewed against `nostr-vpn` tag `v4.0.87`, built from commit
 `9f5d7017f3e7248f9679824481f2ff7a5ca6dd83`.
 
@@ -35,10 +37,10 @@ goal. A meshless Compose topology remains available for local development and sm
 
 Use only versioned release artifacts and verify SHA-256 during the image build.
 
-| Docker platform | Release artifact | SHA-256 |
-|---|---|---|
-| `linux/amd64` | `nvpn-v4.0.87-x86_64-unknown-linux-musl.tar.gz` | `c57498e08ef35916e2125b653d693a0bb5ec174dbf11fadf49f60734eb147e9a` |
-| `linux/arm64` | `nvpn-v4.0.87-aarch64-unknown-linux-musl.tar.gz` | `be14af1cb17dab52d49e9ebd93541e82f903eae864c0122c2ea337f5f08bb89c` |
+| Docker platform | Release artifact                                 | SHA-256                                                            |
+| --------------- | ------------------------------------------------ | ------------------------------------------------------------------ |
+| `linux/amd64`   | `nvpn-v4.0.87-x86_64-unknown-linux-musl.tar.gz`  | `c57498e08ef35916e2125b653d693a0bb5ec174dbf11fadf49f60734eb147e9a` |
+| `linux/arm64`   | `nvpn-v4.0.87-aarch64-unknown-linux-musl.tar.gz` | `be14af1cb17dab52d49e9ebd93541e82f903eae864c0122c2ea337f5f08bb89c` |
 
 The image must fail on unsupported `TARGETARCH` values. Do not download an unversioned
 asset or use a `latest` NVPN tag.
@@ -239,11 +241,11 @@ its firewall before becoming healthy or starting application dependents.
 
 Use role-independent settings so the image remains reusable:
 
-| Variable | Root proxy value | Storage-client value |
-|---|---|---|
-| `NVPN_PUBLIC_INPUT_PORTS` | `3001,8007` | empty |
-| `NVPN_MESH_INPUT_PORTS` | empty | `3000,7777` |
-| `NVPN_PRIVATE_CIDR` | `10.44.0.0/16` | `10.44.0.0/16` |
+| Variable                  | Root proxy value | Storage-client value |
+| ------------------------- | ---------------- | -------------------- |
+| `NVPN_PUBLIC_INPUT_PORTS` | `3001,8007`      | empty                |
+| `NVPN_MESH_INPUT_PORTS`   | empty            | `3000,7777`          |
+| `NVPN_PRIVATE_CIDR`       | `10.44.0.0/16`   | `10.44.0.0/16`       |
 
 The firewall must:
 
@@ -499,26 +501,26 @@ docker buildx build --platform linux/amd64,linux/arm64 ./nvpn
 
 ## Files to Change
 
-| File | Change |
-|---|---|
-| `nvpn/Dockerfile` | Pinned/checksummed `4.0.87` multi-arch image |
-| `nvpn/compose.yml` | Shared capability, device, environment, and health settings |
-| `nvpn/entrypoint.sh` | Atomic bootstrap, role validation, and daemon supervisor |
-| `nvpn/firewall.sh` | Split-tunnel inbound and route leak protection |
-| `nvpn/healthcheck.sh` | Initialization, firewall, and daemon-state health |
-| `nvpn/README.md` | Generic sidecar contract and supported platforms |
-| `docker-compose.yml` | Root sidecar namespace and per-project state volume |
-| `storage-client/docker-compose.yml` | Client sidecar namespace; remove app publications |
-| `storage-client/compose.direct-udp.yml` | Optional same-port UDP publication |
-| `docker-compose.dev.yml` | Meshless root development topology |
-| `storage-client/docker-compose.dev.yml` | Meshless backend development topology |
-| `.env.example` | NVPN settings while preserving local URL defaults |
-| `storage-client/.env.example` | Client NVPN settings and join instructions |
-| `scripts/nvpn-invite.sh` | Terminal-only invite generation |
-| `scripts/nvpn-join.sh` | Stdin-only, one-shot client bootstrap |
-| `scripts/nvpn-approve.sh` | Validated `add-device --device ... --publish` wrapper |
-| `scripts/docker-smoke-test.sh` | Explicit meshless files and no fixed container names |
-| `README.md` | Production operator flow, recovery, and security boundaries |
+| File                                    | Change                                                      |
+| --------------------------------------- | ----------------------------------------------------------- |
+| `nvpn/Dockerfile`                       | Pinned/checksummed `4.0.87` multi-arch image                |
+| `nvpn/compose.yml`                      | Shared capability, device, environment, and health settings |
+| `nvpn/entrypoint.sh`                    | Atomic bootstrap, role validation, and daemon supervisor    |
+| `nvpn/firewall.sh`                      | Split-tunnel inbound and route leak protection              |
+| `nvpn/healthcheck.sh`                   | Initialization, firewall, and daemon-state health           |
+| `nvpn/README.md`                        | Generic sidecar contract and supported platforms            |
+| `docker-compose.yml`                    | Root sidecar namespace and per-project state volume         |
+| `storage-client/docker-compose.yml`     | Client sidecar namespace; remove app publications           |
+| `storage-client/compose.direct-udp.yml` | Optional same-port UDP publication                          |
+| `docker-compose.dev.yml`                | Meshless root development topology                          |
+| `storage-client/docker-compose.dev.yml` | Meshless backend development topology                       |
+| `.env.example`                          | NVPN settings while preserving local URL defaults           |
+| `storage-client/.env.example`           | Client NVPN settings and join instructions                  |
+| `scripts/nvpn-invite.sh`                | Terminal-only invite generation                             |
+| `scripts/nvpn-join.sh`                  | Stdin-only, one-shot client bootstrap                       |
+| `scripts/nvpn-approve.sh`               | Validated `add-device --device ... --publish` wrapper       |
+| `scripts/docker-smoke-test.sh`          | Explicit meshless files and no fixed container names        |
+| `README.md`                             | Production operator flow, recovery, and security boundaries |
 
 ## Upstream References
 

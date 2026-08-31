@@ -1,4 +1,4 @@
-use admin_backend::{Config, router};
+use control_plane_backend::{Config, router};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -6,16 +6,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // RUST_LOG overrides this; the default is quiet on library noise but shows
     // per-request spans and every nvpn/authorization decision this service makes.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("info,admin_backend=debug,tower_http=info")
-        }))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                EnvFilter::new("info,control_plane_backend=debug,tower_http=info")
+            }),
+        )
         .init();
 
     let config = Config::from_env().map_err(|message| format!("configuration error: {message}"))?;
     let listen_addr = config.listen_addr;
-    tracing::info!(%listen_addr, "admin-backend starting");
+    let state = config.into_state();
+    state.initialize().await?;
+    state.spawn_pending_reaper();
+    tracing::info!(%listen_addr, "control-plane-backend starting");
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
-    axum::serve(listener, router(config.into_state()))
+    axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())

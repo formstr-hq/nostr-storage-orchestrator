@@ -64,6 +64,7 @@ services:
       # setting DATABASE_URL directly in .env instead.
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      STORAGE_ACTIVE_WINDOW_SECS: "${ACTIVE_FRESHNESS_SECS:-960}"
     # Bound to the host's loopback only (not 0.0.0.0) — reachable from
     # sibling containers on the bridge network via `db:$DB_API_PORT`, and
     # from the host via localhost. Never reachable off this machine.
@@ -90,6 +91,8 @@ services:
     environment:
       NVPN_ROLE: proxy
       NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${RELAY_PORT:-8007},${ADMIN_API_PORT:-3002}"
+      # Storage agents reach the control plane over the encrypted mesh.
+      NVPN_MESH_INPUT_PORTS: "${ADMIN_API_PORT:-3002}"
     volumes:
       - nvpn_data:/data
     ports:
@@ -102,7 +105,7 @@ services:
   admin:
     build:
       context: .
-      dockerfile: ./admin-backend/Dockerfile
+      dockerfile: ./control-plane-backend/Dockerfile
     container_name: nso_admin
     network_mode: "service:nvpn"
     # `nvpn status --json` reports live daemon state (connected peers,
@@ -125,6 +128,12 @@ services:
       ADMIN_ALLOWED_PUBKEYS: "${ADMIN_ALLOWED_PUBKEYS:-}"
       ADMIN_API_PORT: "${ADMIN_API_PORT:-3002}"
       ADMIN_PUBLIC_URL: "${ADMIN_PUBLIC_URL:-}"
+      CONTROL_PLANE_MESH_URL: "${CONTROL_PLANE_MESH_URL:-}"
+      DB_API_URL: "http://db:${DB_API_PORT:-4000}"
+      NVPN_PRIVATE_CIDR: "${NVPN_PRIVATE_CIDR:-10.44.0.0/16}"
+      ACTIVE_FRESHNESS_SECS: "${ACTIVE_FRESHNESS_SECS:-960}"
+      PENDING_REAP_SECS: "${PENDING_REAP_SECS:-86400}"
+      PING_PEER_CACHE_SECS: "${PING_PEER_CACHE_SECS:-15}"
       HOME: /data/home
       XDG_CONFIG_HOME: /data/config
       NVPN_CONFIG: /data/config/nvpn/config.toml
@@ -133,6 +142,8 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
     depends_on:
+      db:
+        condition: service_healthy
       nvpn:
         condition: service_healthy
         restart: true

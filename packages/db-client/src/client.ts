@@ -1,4 +1,15 @@
-import type { BlobRecord, PlanConfig, RelayEventRecord, UserInfo } from "./types.js";
+import type {
+  ActiveStorageRecord,
+  BlobRecord,
+  MemberRecord,
+  MemberRole,
+  MemberStatus,
+  PlanConfig,
+  RelayEventRecord,
+  StorageRecord,
+  StorageUpdate,
+  UserInfo,
+} from "./types.js";
 
 export class DbApiError extends Error {
   status: number;
@@ -112,5 +123,63 @@ export class DbClient {
 
   deleteRelayEvent(eventId: string): Promise<{ deleted: true }> {
     return this.mutate("DELETE", `/relay-events/${encodeURIComponent(eventId)}`);
+  }
+
+  getMember(npub: string): Promise<MemberRecord | null> {
+    return this.get<MemberRecord>(`/members/${encodeURIComponent(npub)}`);
+  }
+
+  listMembers(filters: { role?: MemberRole; status?: MemberStatus } = {}): Promise<Array<MemberRecord & { storageCount: number }>> {
+    const query = new URLSearchParams();
+    if (filters.role) query.set("role", filters.role);
+    if (filters.status) query.set("status", filters.status);
+    const suffix = query.size > 0 ? `?${query}` : "";
+    return this.getOk(`/members${suffix}`);
+  }
+
+  putMember(npub: string, data: { role?: MemberRole; addedByNpub?: string | null }): Promise<MemberRecord> {
+    return this.mutate("PUT", `/members/${encodeURIComponent(npub)}`, data);
+  }
+
+  deleteMember(npub: string): Promise<MemberRecord> {
+    return this.mutate("DELETE", `/members/${encodeURIComponent(npub)}`);
+  }
+
+  getStorage(npub: string): Promise<StorageRecord | null> {
+    return this.get<StorageRecord>(`/storages/${encodeURIComponent(npub)}`);
+  }
+
+  listStorages(ownerNpub?: string): Promise<StorageRecord[]> {
+    const suffix = ownerNpub === undefined ? "" : `?ownerNpub=${encodeURIComponent(ownerNpub)}`;
+    return this.getOk(`/storages${suffix}`);
+  }
+
+  listActiveStorages(): Promise<ActiveStorageRecord[]> {
+    return this.getOk("/storages/active");
+  }
+
+  createStorage(data: {
+    npub: string;
+    ownerNpub: string;
+    declaredCapacityBytes?: string | number | null;
+  }): Promise<StorageRecord> {
+    return this.mutate("POST", "/storages", data);
+  }
+
+  updateStorage(npub: string, data: StorageUpdate): Promise<StorageRecord> {
+    return this.mutate("PATCH", `/storages/${encodeURIComponent(npub)}`, data);
+  }
+
+  deleteStorage(npub: string): Promise<StorageRecord> {
+    return this.mutate("DELETE", `/storages/${encodeURIComponent(npub)}`);
+  }
+
+  backfillReplicaIds(dryRun = false): Promise<{
+    dryRun: boolean;
+    changedRows: number;
+    replacedValues: number;
+    unmatchedValues: number;
+  }> {
+    return this.mutate("POST", "/storages/backfill-replicas", { dryRun });
   }
 }

@@ -12,6 +12,8 @@
 export interface AdminClient {
   /** Validate and canonicalize a host base URL. Rejects non-HTTPS URLs. */
   normalizeHostUrl(url: string): Promise<string>;
+  /** Validate and canonicalize a Nostr public key. */
+  canonicalNpub(npub: string): Promise<string>;
 
   /** Generate a fresh Nostr key, returned NIP-49 encrypted. */
   generateHostKey(passphrase: string): Promise<GeneratedKey>;
@@ -31,9 +33,16 @@ export interface AdminClient {
   lockHost(): Promise<void>;
 
   status(): Promise<HostStatus>;
+  me(): Promise<Me>;
+  roster(): Promise<Roster>;
+  members(): Promise<Member[]>;
+  storages(): Promise<Storage[]>;
   generateInvite(): Promise<string>;
-  addDevice(npub: string): Promise<void>;
-  removeDevice(npub: string): Promise<void>;
+  authorizeMember(npub: string, role: MemberRole): Promise<void>;
+  revokeMember(npub: string): Promise<void>;
+  linkStorage(npub: string): Promise<void>;
+  setStorageCapacity(npub: string, declaredCapacityBytes: string): Promise<void>;
+  removeStorage(npub: string): Promise<void>;
 }
 
 export interface UnlockInput {
@@ -64,11 +73,70 @@ export interface HostStatus {
   peers: Peer[];
 }
 
+export type Role = "admin" | "client" | "none";
+export type MemberRole = Exclude<Role, "none">;
+export type MemberStatus = "active" | "revoked";
+export type StorageLifecycle = "linked" | "removed";
+export type StorageLiveness = "pending" | "active" | "unreachable";
+
+export interface Me {
+  npub: string;
+  role: Role;
+  memberSince: string | null;
+}
+
+export interface Roster {
+  members: {
+    authorized: number;
+    admins: number;
+    clients: number;
+    revoked: number;
+  };
+  storages: {
+    total: number;
+    active: number;
+    pending: number;
+    unreachable: number;
+    reportedTotalBytes: string;
+    reportedFreeBytes: string;
+  };
+  replicaCountRequired: number;
+  replicaShortfall: boolean;
+}
+
+export interface Member {
+  npub: string;
+  role: MemberRole;
+  status: MemberStatus;
+  storageCount: number;
+  createdAt: string;
+  updatedAt: string;
+  addedByNpub: string | null;
+}
+
+export interface Storage {
+  npub: string;
+  ownerNpub: string;
+  tunnelIp: string | null;
+  blossomPort: number | null;
+  relayPort: number | null;
+  declaredCapacityBytes: string | null;
+  reportedTotalBytes: string | null;
+  reportedFreeBytes: string | null;
+  lifecycle: StorageLifecycle;
+  liveness: StorageLiveness;
+  lastPingAt: string | null;
+  createdAt: string;
+}
+
 /** The operations the UI can be busy with, used to scope spinners. */
 export type BusyKind =
   | "unlock"
-  | "status"
+  | "refresh"
   | "invite"
-  | "device"
-  | "device-remove"
+  | "member-authorize"
+  | "member-revoke"
+  | "storage-link"
+  | "storage-capacity"
+  | "storage-remove"
   | "profile";

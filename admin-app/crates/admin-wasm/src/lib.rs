@@ -89,6 +89,42 @@ impl Session {
             .map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = meRequest)]
+    pub async fn me_request(&self) -> Result<SignedRequest, JsValue> {
+        self.inner
+            .me_request()
+            .await
+            .map(SignedRequest::from)
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = rosterRequest)]
+    pub async fn roster_request(&self) -> Result<SignedRequest, JsValue> {
+        self.inner
+            .roster_request()
+            .await
+            .map(SignedRequest::from)
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = membersRequest)]
+    pub async fn members_request(&self) -> Result<SignedRequest, JsValue> {
+        self.inner
+            .members_request()
+            .await
+            .map(SignedRequest::from)
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = storagesRequest)]
+    pub async fn storages_request(&self) -> Result<SignedRequest, JsValue> {
+        self.inner
+            .storages_request()
+            .await
+            .map(SignedRequest::from)
+            .map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = inviteRequest)]
     pub async fn invite_request(&self) -> Result<SignedRequest, JsValue> {
         self.inner
@@ -98,19 +134,59 @@ impl Session {
             .map_err(js_error)
     }
 
-    #[wasm_bindgen(js_name = deviceRequest)]
-    pub async fn device_request(&self, npub: String) -> Result<SignedRequest, JsValue> {
+    #[wasm_bindgen(js_name = memberRequest)]
+    pub async fn member_request(
+        &self,
+        npub: String,
+        role: String,
+    ) -> Result<SignedRequest, JsValue> {
+        let role = match role.as_str() {
+            "client" => core::MemberRole::Client,
+            "admin" => core::MemberRole::Admin,
+            _ => return Err(JsValue::from_str("Role must be client or admin")),
+        };
         self.inner
-            .device_request(&npub)
+            .member_request(&npub, role)
             .await
             .map(SignedRequest::from)
             .map_err(js_error)
     }
 
-    #[wasm_bindgen(js_name = deviceRemovalRequest)]
-    pub async fn device_removal_request(&self, npub: String) -> Result<SignedRequest, JsValue> {
+    #[wasm_bindgen(js_name = memberRemovalRequest)]
+    pub async fn member_removal_request(&self, npub: String) -> Result<SignedRequest, JsValue> {
         self.inner
-            .device_removal_request(&npub)
+            .member_removal_request(&npub)
+            .await
+            .map(SignedRequest::from)
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = storageRequest)]
+    pub async fn storage_request(&self, npub: String) -> Result<SignedRequest, JsValue> {
+        self.inner
+            .storage_request(&npub)
+            .await
+            .map(SignedRequest::from)
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = storageCapacityRequest)]
+    pub async fn storage_capacity_request(
+        &self,
+        npub: String,
+        declared_capacity_bytes: String,
+    ) -> Result<SignedRequest, JsValue> {
+        self.inner
+            .storage_capacity_request(&npub, &declared_capacity_bytes)
+            .await
+            .map(SignedRequest::from)
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = storageRemovalRequest)]
+    pub async fn storage_removal_request(&self, npub: String) -> Result<SignedRequest, JsValue> {
+        self.inner
+            .storage_removal_request(&npub)
             .await
             .map(SignedRequest::from)
             .map_err(js_error)
@@ -120,6 +196,11 @@ impl Session {
 #[wasm_bindgen(js_name = normalizeHostUrl)]
 pub fn normalize_host_url(url: &str) -> Result<String, JsValue> {
     core::normalize_host_url(url).map_err(js_error)
+}
+
+#[wasm_bindgen(js_name = canonicalNpub)]
+pub fn canonical_npub(npub: &str) -> Result<String, JsValue> {
+    core::canonical_npub(npub).map_err(js_error)
 }
 
 #[wasm_bindgen(js_name = generateHostKey)]
@@ -139,14 +220,34 @@ pub fn status_response(status: u16, body: &[u8]) -> Result<JsValue, JsValue> {
     to_js(&core::status_response(status, body).map_err(js_error)?)
 }
 
+#[wasm_bindgen(js_name = meResponse)]
+pub fn me_response(status: u16, body: &[u8]) -> Result<JsValue, JsValue> {
+    to_js(&core::me_response(status, body).map_err(js_error)?)
+}
+
+#[wasm_bindgen(js_name = rosterResponse)]
+pub fn roster_response(status: u16, body: &[u8]) -> Result<JsValue, JsValue> {
+    to_js(&core::roster_response(status, body).map_err(js_error)?)
+}
+
+#[wasm_bindgen(js_name = membersResponse)]
+pub fn members_response(status: u16, body: &[u8]) -> Result<JsValue, JsValue> {
+    to_js(&core::members_response(status, body).map_err(js_error)?)
+}
+
+#[wasm_bindgen(js_name = storagesResponse)]
+pub fn storages_response(status: u16, body: &[u8]) -> Result<JsValue, JsValue> {
+    to_js(&core::storages_response(status, body).map_err(js_error)?)
+}
+
 #[wasm_bindgen(js_name = inviteResponse)]
 pub fn invite_response(status: u16, body: &[u8]) -> Result<String, JsValue> {
     core::invite_response(status, body).map_err(js_error)
 }
 
-#[wasm_bindgen(js_name = deviceResponse)]
-pub fn device_response(status: u16, body: &[u8]) -> Result<(), JsValue> {
-    core::device_response(status, body).map_err(js_error)
+#[wasm_bindgen(js_name = mutationResponse)]
+pub fn mutation_response(status: u16, body: &[u8]) -> Result<(), JsValue> {
+    core::mutation_response(status, body).map_err(js_error)
 }
 
 /// The message every binding uses when the host is unreachable.

@@ -18,6 +18,21 @@ enum Plan {
   PRO
 }
 
+enum MemberRole {
+  CLIENT
+  ADMIN
+}
+
+enum MemberStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum StorageLifecycle {
+  LINKED
+  REMOVED
+}
+
 model Blob {
   hash      String   @id
   npub      String
@@ -51,4 +66,33 @@ model User {
 
   blobs       Blob[]
   relayEvents RelayEvent[]
+}
+
+model Member {
+  npub        String       @id
+  role        MemberRole   @default(CLIENT)
+  status      MemberStatus @default(ACTIVE)
+  addedByNpub String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  storages Storage[]
+}
+
+model Storage {
+  npub                  String           @id
+  ownerNpub             String
+  owner                 Member           @relation(fields: [ownerNpub], references: [npub])
+  tunnelIp              String?
+  blossomPort           Int?
+  relayPort             Int?
+  declaredCapacityBytes BigInt?
+  reportedTotalBytes    BigInt?
+  reportedFreeBytes     BigInt?
+  lifecycle             StorageLifecycle @default(LINKED)
+  lastPingAt            DateTime?
+  createdAt             DateTime         @default(now())
+
+  @@index([lifecycle, lastPingAt])
+  @@index([ownerNpub])
 }

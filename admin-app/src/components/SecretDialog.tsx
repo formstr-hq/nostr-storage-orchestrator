@@ -8,7 +8,7 @@ export type SecretKind = "invite" | "backup";
 interface Props {
   kind: SecretKind;
   secret: string;
-  /** Shown for backups so the operator can add themselves to the allowlist. */
+  /** Shown for backups so the operator can identify the encrypted key. */
   npub?: string | undefined;
   onCopy: (value: string) => void;
   onClose: () => void;
@@ -16,9 +16,9 @@ interface Props {
 
 const COPY = {
   invite: {
-    eyebrow: "Bearer credential",
-    title: "Share this invite securely.",
-    body: "Anyone holding this reusable host invite can request enrollment until the host rotates it. Send it through a secure channel.",
+    eyebrow: "Bootstrap credential",
+    title: "Take this invite to your storage machine.",
+    body: "This invite is self-sufficient: the storage join flow needs no separate host npub, tunnel address, or other metadata. Treat it as a secret until it has been used.",
     action: "Copy invite",
   },
   backup: {
@@ -41,7 +41,7 @@ export function SecretDialog({ kind, secret, npub, onCopy, onClose }: Props) {
 
       {kind === "backup" && npub && (
         <div className={styles.operatorKey}>
-          <span>Operator npub / add to host allowlist</span>
+          <span>Operator npub</span>
           <code>{npub}</code>
           <button
             className={controls.textButton}
@@ -69,7 +69,7 @@ export function SecretDialog({ kind, secret, npub, onCopy, onClose }: Props) {
         type="button"
         onClick={onClose}
       >
-        I have stored it safely
+        {kind === "invite" ? "Close" : "I have stored it safely"}
       </button>
     </Dialog>
   );

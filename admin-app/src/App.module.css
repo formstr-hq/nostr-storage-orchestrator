@@ -19,6 +19,17 @@
   letter-spacing: .12em;
 }
 
+.loading {
+  width: min(520px, calc(100% - 40px));
+  margin: 90px auto;
+  padding: 42px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  color: var(--muted);
+  background: var(--panel);
+  text-align: center;
+}
+
 @media (max-width: 720px) {
   .footer { flex-wrap: wrap; gap: 9px 16px; }
 }
