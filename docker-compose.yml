@@ -165,6 +165,7 @@ services:
       nvpn:
         condition: service_healthy
         restart: true
+    restart: unless-stopped
 
   relay:
     build:
@@ -185,6 +186,7 @@ services:
       nvpn:
         condition: service_healthy
         restart: true
+    restart: unless-stopped
 
 volumes:
   nso_postgres_data:
