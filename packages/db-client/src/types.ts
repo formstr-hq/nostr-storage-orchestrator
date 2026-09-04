@@ -50,6 +50,7 @@ export interface StorageRecord {
   tunnelIp: string | null;
   blossomPort: number | null;
   relayPort: number | null;
+  pgAgentPort: number | null;
   declaredCapacityBytes: string | null;
   reportedTotalBytes: string | null;
   reportedFreeBytes: string | null;
@@ -66,10 +67,15 @@ export interface ActiveStorageRecord extends StorageRecord {
   lastPingAt: string;
 }
 
+export interface ActivePgStorageRecord extends ActiveStorageRecord {
+  pgAgentPort: number;
+}
+
 export interface StorageUpdate {
   tunnelIp?: string | null;
   blossomPort?: number | null;
   relayPort?: number | null;
+  pgAgentPort?: number | null;
   declaredCapacityBytes?: string | number | null;
   reportedTotalBytes?: string | number | null;
   reportedFreeBytes?: string | number | null;

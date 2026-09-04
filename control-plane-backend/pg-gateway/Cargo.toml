@@ -1,0 +1,31 @@
+[package]
+name = "pg-gateway"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+chrono = { version = "0.4.41", features = ["serde"] }
+futures = "0.3"
+parking_lot = "0.12"
+pgwire = { version = "0.41", default-features = false, features = ["server-api-aws-lc-rs"] }
+reqwest = { version = "0.12.22", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+sqlparser = { version = "0.62", features = ["serde"] }
+thiserror = "2"
+tokio = { version = "1.45.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-postgres = { version = "0.7.14", features = ["with-serde_json-1"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+ulid = { version = "1.2", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1.45.1", features = ["rt", "test-util"] }
+
+[profile.release]
+lto = "thin"
+strip = true

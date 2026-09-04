@@ -1,0 +1,107 @@
+# Local two-node test topology for the mesh-PG layer: one orchestrator
+# (postgres + db-api + pg-gateway) and one provider (mesh-postgres + pg-agent).
+# Usage:
+#   docker compose -f compose.mesh-pg-test.yml up --build
+#   psql "host=localhost port=55432 user=orchestrator dbname=orchestrator"
+#
+# The registry is seeded via db-api: POST /storages with the provider's npub
+# + tunnelIp (localhost:3300 in this meshless topology), then a ping PATCH
+# (or direct PATCH with lastPingAt) so /storages/active-pg returns it.
+
+services:
+  # ── orchestrator ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    container_name: test_orchestrator_pg
+    environment:
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: orchestrator
+      POSTGRES_DB: orchestrator
+    volumes:
+      - test_orchestrator_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U orchestrator"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  db:
+    build:
+      context: .
+      dockerfile: ./packages/db/Dockerfile
+    container_name: test_db_api
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: orchestrator
+      POSTGRES_DB: orchestrator
+      DB_API_PORT: "4000"
+    ports:
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  pg-gateway:
+    build:
+      context: ./control-plane-backend/pg-gateway
+    container_name: test_pg_gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    environment:
+      PG_GATEWAY_LISTEN_ADDR: "0.0.0.0:5432"
+      DB_API_URL: http://db:4000
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: orchestrator
+      POSTGRES_DB: orchestrator
+      PG_DEFAULT_REPLICA_COUNT: "1"
+    ports:
+      - "127.0.0.1:55432:5432"
+
+  # ── provider (single mesh storage node) ─────────────────────────────────
+  mesh-postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    container_name: test_provider_pg
+    environment:
+      POSTGRES_USER: mesh
+      POSTGRES_PASSWORD: mesh
+      POSTGRES_DB: mesh
+    volumes:
+      - test_provider_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U mesh"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pg-agent:
+    build: ./storage-client/pg-agent
+    container_name: test_pg_agent
+    depends_on:
+      mesh-postgres:
+        condition: service_healthy
+    environment:
+      PG_AGENT_PORT: "3300"
+      MESH_PG_HOST: mesh-postgres
+      MESH_PG_PORT: "5432"
+      MESH_PG_DATABASE: mesh
+      MESH_PG_USER: mesh
+      MESH_PG_PASSWORD: mesh
+    ports:
+      - "127.0.0.1:3300:3300"
+
+volumes:
+  test_orchestrator_pg:
+  test_provider_pg:

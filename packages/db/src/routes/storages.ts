@@ -52,6 +52,24 @@ storagesRouter.get("/active", async (_req, res) => {
   res.json(storages.map(storageToJson));
 });
 
+// Mesh-PG providers: active storages that also expose a pg-agent. The
+// pg-gateway polls this instead of /storages/active so providers without a
+// postgres stack never enter the mesh-PG placement pool.
+storagesRouter.get("/active-pg", async (_req, res) => {
+  const cutoff = new Date(Date.now() - ACTIVE_WINDOW_SECS * 1000);
+  const storages = await prisma.storage.findMany({
+    where: {
+      lifecycle: StorageLifecycle.LINKED,
+      lastPingAt: { gt: cutoff },
+      tunnelIp: { not: null },
+      blossomPort: { not: null },
+      relayPort: { not: null },
+      pgAgentPort: { not: null },
+    },
+  });
+  res.json(storages.map(storageToJson));
+});
+
 // One-shot internal migration helper. Unknown URLs remain untouched so no
 // durable replica pointer is lost when it cannot be attributed safely.
 storagesRouter.post("/backfill-replicas", async (req, res) => {
@@ -198,9 +216,10 @@ storagesRouter.patch("/:npub", async (req, res) => {
   try {
     const blossomPort = parseOptionalPort(body.blossomPort);
     const relayPort = parseOptionalPort(body.relayPort);
+    const pgAgentPort = parseOptionalPort(body.pgAgentPort);
     const lastPingAt = parseOptionalDate(body.lastPingAt);
     const createdAt = parseOptionalDate(body.createdAt);
-    if (Number.isNaN(blossomPort) || Number.isNaN(relayPort)
+    if (Number.isNaN(blossomPort) || Number.isNaN(relayPort) || Number.isNaN(pgAgentPort)
       || (body.lastPingAt !== undefined && lastPingAt === undefined)
       || (body.createdAt !== undefined && createdAt === undefined)) {
       return res.status(400).json({ error: "invalid_storage" });
@@ -212,6 +231,7 @@ storagesRouter.patch("/:npub", async (req, res) => {
     if (body.tunnelIp === null || typeof body.tunnelIp === "string") data.tunnelIp = body.tunnelIp;
     if (blossomPort !== undefined) data.blossomPort = blossomPort;
     if (relayPort !== undefined) data.relayPort = relayPort;
+    if (pgAgentPort !== undefined) data.pgAgentPort = pgAgentPort;
     if (body.declaredCapacityBytes !== undefined) data.declaredCapacityBytes = parseBigInt(body.declaredCapacityBytes) as bigint | null;
     if (body.reportedTotalBytes !== undefined) data.reportedTotalBytes = parseBigInt(body.reportedTotalBytes) as bigint | null;
     if (body.reportedFreeBytes !== undefined) data.reportedFreeBytes = parseBigInt(body.reportedFreeBytes) as bigint | null;
