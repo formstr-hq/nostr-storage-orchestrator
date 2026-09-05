@@ -25,6 +25,12 @@ pub struct Config {
     pub provider_token: Option<String>,
     /// pgwire auth: fixed password when set, otherwise cleartext-accept-any.
     pub gateway_password: Option<String>,
+    /// Optional separate database for catalog introspection; defaults to the
+    /// central database (a `mesh_catalog` schema keeps it isolated).
+    pub catalog_database_url: String,
+    /// Allow bulk UPDATE/DELETE without pk (fan-out apply to all providers).
+    /// Intended for migration backfills; off by default.
+    pub broad_writes_enabled: bool,
     /// Replica count used when a table does not override it.
     pub default_replica_count: usize,
 }
@@ -47,6 +53,13 @@ impl Config {
             fanout_timeout: Duration::from_secs(u64_env("PG_FANOUT_TIMEOUT_SECS", 10)),
             provider_token: nonempty_env("PG_PROVIDER_TOKEN"),
             gateway_password: nonempty_env("PG_GATEWAY_PASSWORD"),
+            catalog_database_url: match nonempty_env("PG_CATALOG_DATABASE_URL") {
+                Some(url) => url,
+                None => central_database_url()?,
+            },
+            broad_writes_enabled: std::env::var("PG_ENABLE_BROAD_WRITES")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
             default_replica_count: usize_env("PG_DEFAULT_REPLICA_COUNT", 1),
         })
     }

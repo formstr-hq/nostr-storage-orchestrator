@@ -66,42 +66,78 @@ services:
       POSTGRES_USER: orchestrator
       POSTGRES_PASSWORD: orchestrator
       POSTGRES_DB: orchestrator
-      PG_DEFAULT_REPLICA_COUNT: "1"
+      PG_DEFAULT_REPLICA_COUNT: "2"
+      PG_GATEWAY_PASSWORD: "x"
+      PG_ENABLE_BROAD_WRITES: "1"
     ports:
+      # loopback for psql/e2e + docker bridge for sibling containers (nostream)
       - "127.0.0.1:55432:5432"
+      - "172.17.0.1:55432:5432"
 
-  # ── provider (single mesh storage node) ─────────────────────────────────
-  mesh-postgres:
+  # ── providers (two mesh storage nodes) ──────────────────────────────────
+  mesh-postgres-1:
     image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
-    container_name: test_provider_pg
+    container_name: test_provider1_pg
     environment:
       POSTGRES_USER: mesh
       POSTGRES_PASSWORD: mesh
       POSTGRES_DB: mesh
     volumes:
-      - test_provider_pg:/var/lib/postgresql/data
+      - test_provider1_pg:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U mesh"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  pg-agent:
+  pg-agent-1:
     build: ./storage-client/pg-agent
-    container_name: test_pg_agent
+    container_name: test_pg_agent_1
     depends_on:
-      mesh-postgres:
+      mesh-postgres-1:
         condition: service_healthy
     environment:
       PG_AGENT_PORT: "3300"
-      MESH_PG_HOST: mesh-postgres
+      MESH_PG_HOST: mesh-postgres-1
       MESH_PG_PORT: "5432"
       MESH_PG_DATABASE: mesh
       MESH_PG_USER: mesh
       MESH_PG_PASSWORD: mesh
     ports:
-      - "127.0.0.1:3300:3300"
+      - "127.0.0.1:3301:3300"
+
+  mesh-postgres-2:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    container_name: test_provider2_pg
+    environment:
+      POSTGRES_USER: mesh
+      POSTGRES_PASSWORD: mesh
+      POSTGRES_DB: mesh
+    volumes:
+      - test_provider2_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U mesh"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pg-agent-2:
+    build: ./storage-client/pg-agent
+    container_name: test_pg_agent_2
+    depends_on:
+      mesh-postgres-2:
+        condition: service_healthy
+    environment:
+      PG_AGENT_PORT: "3300"
+      MESH_PG_HOST: mesh-postgres-2
+      MESH_PG_PORT: "5432"
+      MESH_PG_DATABASE: mesh
+      MESH_PG_USER: mesh
+      MESH_PG_PASSWORD: mesh
+    ports:
+      - "127.0.0.1:3302:3300"
 
 volumes:
   test_orchestrator_pg:
-  test_provider_pg:
+  test_provider1_pg:
+  test_provider2_pg:

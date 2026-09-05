@@ -179,6 +179,7 @@ fn build_op_payload(op: &WriteOp) -> WriteOpPayload {
         op: op.op.clone(),
         row_id: op.row_id.clone(),
         row: op.payload.clone().or_else(|| Some(Value::Null)),
+        conflict_columns: None,
     }
 }
 

@@ -73,14 +73,23 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tokio::spawn(dispatcher.run_forever());
 
+    let catalog = Arc::new(central::CatalogStore::new(config.catalog_database_url.clone()));
+    catalog
+        .ensure_schema()
+        .await
+        .map_err(|error| format!("catalog schema bootstrap failed: {error}"))?;
+    tracing::info!("catalog schema ensured");
+
     let handlers = GatewayHandlers {
         store,
+        catalog,
         registry,
         provider: provider_client,
         schema,
         read,
         write_lock: Arc::new(tokio::sync::Mutex::new(())),
         auth_password: config.gateway_password.clone(),
+        broad_writes_enabled: config.broad_writes_enabled,
     };
 
     let listener = TcpListener::bind(&config.listen_addr).await?;

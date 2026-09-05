@@ -17,8 +17,8 @@ use pgwire::api::auth::{AuthSource, DefaultServerParameterProvider, LoginInfo, P
 use pgwire::api::copy::CopyHandler;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
-use pgwire::api::results::{FieldFormat, FieldInfo, QueryResponse, Response};
-use pgwire::api::stmt::QueryParser;
+use pgwire::api::results::{DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response};
+use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::store::PortalStore;
 use pgwire::api::{ClientInfo, ClientPortalStore, PgWireServerHandlers, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
@@ -28,7 +28,7 @@ use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::central::CentralStore;
+use crate::central::{CatalogStore, CentralStore};
 use crate::error::GatewayError;
 use crate::provider::ProviderClient;
 use crate::readengine::ReadEngine;
@@ -39,6 +39,7 @@ use crate::sqlanalyze::{self, AnalyzedStatement, StatementKind};
 #[derive(Clone)]
 pub struct GatewayHandlers {
     pub store: Arc<CentralStore>,
+    pub catalog: Arc<CatalogStore>,
     pub registry: Arc<ProviderRegistry>,
     pub provider: ProviderClient,
     pub schema: Arc<SchemaManager>,
@@ -47,6 +48,7 @@ pub struct GatewayHandlers {
     /// upsert must be atomic from the client's perspective.
     pub write_lock: Arc<Mutex<()>>,
     pub auth_password: Option<String>,
+    pub broad_writes_enabled: bool,
 }
 
 pub enum Outcome {
@@ -61,6 +63,7 @@ pub enum Outcome {
 #[derive(Clone, Debug)]
 pub struct Column {
     pub name: String,
+    pub type_oid: u32,
 }
 
 impl GatewayHandlers {
@@ -82,10 +85,43 @@ impl GatewayHandlers {
     /// for extended-protocol writes (resolved from bound parameters); simple
     /// queries carry literals inline.
     pub async fn execute_sql(&self, sql: &str, bound_row_id: Option<&str>) -> Result<Outcome, GatewayError> {
+        self.execute_sql_bound(sql, bound_row_id, &[]).await
+    }
+
+    /// Full binding: params are text-format values (None = NULL), indexed
+    /// from $1. Only used by the catalog path today.
+    pub async fn execute_sql_bound(
+        &self,
+        sql: &str,
+        bound_row_id: Option<&str>,
+        params: &[Option<String>],
+    ) -> Result<Outcome, GatewayError> {
         if sqlanalyze::is_session_command(sql) {
             return Ok(Outcome::Session);
         }
-        let analyzed = sqlanalyze::analyze(sql)?;
+        // Catalog introspection & bookkeeping (pg_catalog, information_schema,
+        // knex_migrations...) never touches providers: it is answered from a
+        // real local catalog schema on the orchestrator.
+        if let Some(outcome) = self.catalog_request(sql, params).await? {
+            return Ok(outcome);
+        }
+        let analyzed = match sqlanalyze::analyze(sql) {
+            Ok(analyzed) => analyzed,
+            Err(parse_error) => {
+                // Multi-statement / exotic DDL batches (e.g. knex ALTER
+                // batches) fail to parse; fall through to the verbatim DDL
+                // fallback when enabled, otherwise surface the error.
+                let broad_dml = {
+                    let lower = sql.trim().to_ascii_lowercase();
+                    (lower.starts_with("delete") || lower.starts_with("update") || lower.starts_with("with"))
+                        && self.broad_writes_enabled
+                };
+                if self.broad_writes_enabled && (is_ddl_text(sql) || broad_dml) {
+                    return self.fallback_ddl(AnalyzedStatement::Read { sql: String::new() }, sql, params).await;
+                }
+                return Err(parse_error);
+            }
+        };
         match analyzed {
             AnalyzedStatement::Read { .. } => {
                 // Point reads (single equality on pk) route to one provider;
@@ -94,11 +130,28 @@ impl GatewayHandlers {
                     .map(|id| id.to_string())
                     .or_else(|| sqlanalyze::point_read_row_id(sql).ok().flatten());
                 let result = match point {
-                    Some(row_id) => self.read.point_read(sql, &row_id).await,
-                    None => self.read.fanout_read(sql).await,
+                    Some(row_id) => {
+                        let effective_sql = if params.is_empty() {
+                            sql.to_string()
+                        } else {
+                            inline_params(sql, params)?
+                        };
+                        self.read.point_read(&effective_sql, &row_id).await
+                    }
+                    None => {
+                        let effective_sql = if params.is_empty() {
+                            sql.to_string()
+                        } else {
+                            inline_params(sql, params)?
+                        };
+                        self.read.fanout_read(&effective_sql).await
+                    },
                 }?;
                 let table = sqlanalyze::read_table_name(sql).unwrap_or_default();
-                let columns = infer_columns(&result.rows, &table);
+                let columns = apply_provider_oids(
+                    infer_columns(&result.rows, &table),
+                    &result.columns,
+                );
                 let count = result.rows.len();
                 let rows = result
                     .rows
@@ -115,16 +168,43 @@ impl GatewayHandlers {
                 Ok(Outcome::Rows(columns, rows, count))
             }
             AnalyzedStatement::Ddl { kind, table, sql } => {
-                self.schema.handle_ddl(kind.clone(), &table, &sql).await?;
+                // Non-additive alterations (DROP COLUMN, ALTER TYPE) fall
+                // through to the verbatim DDL fallback when enabled.
+                if sqlanalyze::is_additive_ddl(&kind, sql.as_str()).is_err() {
+                    let sql_owned = sql.clone();
+                    let analyzed_copy = AnalyzedStatement::Ddl {
+                        kind: StatementKind::Alter,
+                        table: table.clone(),
+                        sql: sql_owned.clone(),
+                    };
+                    return self.fallback_ddl(analyzed_copy, sql_owned.as_str(), params).await;
+                }
+                // Index DDL doesn't register tables; it propagates + mirrors.
+                if kind != StatementKind::CreateIndex {
+                    self.schema.handle_ddl(kind.clone(), &table, &sql).await?;
+                } else {
+                    self.schema.propagate_ddl(&sql).await?;
+                }
+                // Mirror the DDL to the catalog schema so introspection sees it.
+                if let Err(error) = self.catalog.apply_ddl(&sql).await {
+                    tracing::warn!("catalog ddl mirror failed: {error}");
+                }
                 let tag = match kind {
                     StatementKind::Create => "CREATE TABLE",
+                    StatementKind::CreateIndex => "CREATE INDEX",
                     StatementKind::Alter => "ALTER TABLE",
                     StatementKind::Drop => "DROP TABLE",
                     _ => "DDL",
                 };
                 Ok(Outcome::Command(tag.to_string(), 0))
             }
-            AnalyzedStatement::Write { kind, table, row_id, sql, row_id_placeholder, generate_row_id, returning } => {
+            AnalyzedStatement::Write { kind, table, row_id, sql, row_id_placeholder, generate_row_id, returning, broad, conflict_columns } => {
+                // Bulk ops (migration backfills): apply the statement
+                // verbatim to EVERY active provider so replicas stay
+                // identical; no buffer, no placement bookkeeping.
+                if broad {
+                    return self.apply_broad_write(kind, &table, sql.as_str(), params).await;
+                }
                 // Resolve the pk: bound param > literal > gateway allocation.
                 let row_id = if let Some(placeholder) = row_id_placeholder.as_deref() {
                     bound_row_id
@@ -208,8 +288,21 @@ impl GatewayHandlers {
                 // INSERTs buffer the full materialized row (read-your-writes +
                 // identical replicas); UPDATE/DELETE apply by row id on
                 // providers, so the payload keeps the statement.
-                let payload = materialized
+                let mut payload = materialized
                     .or_else(|| Some(serde_json::json!({ "sql": sql })));
+                // Carry the conflict target for the provider's upsert.
+                if let Some(columns) = conflict_columns.as_ref() {
+                    if !columns.is_empty() {
+                        if let Some(object) =
+                            payload.as_mut().and_then(|value| value.as_object_mut())
+                        {
+                            object.insert(
+                                "_conflictColumns".to_string(),
+                                serde_json::json!(columns),
+                            );
+                        }
+                    }
+                }
                 let op_id = ulid::Ulid::new().to_string();
                 self.store
                     .enqueue_write_op(&op_id, &table, op_name, &row_id, payload.as_ref())
@@ -251,7 +344,102 @@ impl GatewayHandlers {
                     None => Ok(Outcome::Command(op_name.to_string(), 1)),
                 }
             }
+            other => self.fallback_ddl(other, sql, params).await,
         }
+    }
+
+    /// Fallback for DDL the strict analyzer rejects (multi-statement ALTER
+    /// batches, ALTER COLUMN TYPE, etc.). Executed verbatim on every provider
+    /// (schema transformation) and mirrored to the catalog. Only when broad
+    /// writes are enabled; otherwise the analyzer error surfaces.
+    async fn fallback_ddl(
+        &self,
+        analyzed: AnalyzedStatement,
+        sql: &str,
+        params: &[Option<String>],
+    ) -> Result<Outcome, GatewayError> {
+        // Only DDL-shaped statements get the fallback; DML errors propagate.
+        let lower = sql.trim().to_ascii_lowercase();
+        let is_ddl = lower.starts_with("create")
+            || lower.starts_with("alter")
+            || lower.starts_with("drop")
+            || lower.starts_with("delete")
+            || lower.starts_with("update")
+            || lower.starts_with("with");
+        if !is_ddl {
+            return Err(analyze_error(sql));
+        }
+        if !self.broad_writes_enabled {
+            return Err(analyze_error(sql));
+        }
+        let effective_sql = if params.is_empty() {
+            sql.to_string()
+        } else {
+            inline_params(sql, params)?
+        };
+        for provider in &self.registry.providers() {
+            let op = crate::provider::WriteOpPayload {
+                id: ulid::Ulid::new().to_string(),
+                table_name: String::new(),
+                op: "RAW".to_string(),
+                row_id: String::new(),
+                row: Some(serde_json::json!({ "sql": effective_sql })),
+                conflict_columns: None,
+            };
+            self.provider
+                .apply(&provider.url, &crate::provider::ApplyRequest { ops: vec![op] })
+                .await
+                .map_err(|error| GatewayError::provider(error.to_string()))?;
+        }
+        if let Err(error) = self.catalog.apply_ddl(&effective_sql).await {
+            tracing::warn!("catalog ddl mirror failed: {error}");
+        }
+        Ok(Outcome::Command("DDL".to_string(), 0))
+    }
+
+    /// Applies a broad UPDATE/DELETE verbatim on every provider (RAW op).
+    /// Used by migration backfills; requires PG_ENABLE_BROAD_WRITES.
+    async fn apply_broad_write(
+        &self,
+        kind: StatementKind,
+        _table: &str,
+        sql: &str,
+        params: &[Option<String>],
+    ) -> Result<Outcome, GatewayError> {
+        if !self.broad_writes_enabled {
+            return Err(GatewayError::WriteRequiresPk(
+                "bulk UPDATE/DELETE without a pk predicate is not supported by mesh-PG".to_string(),
+            ));
+        }
+        let providers = self.registry.providers();
+        if providers.is_empty() {
+            return Err(GatewayError::NoProviders);
+        }
+        let effective_sql = if params.is_empty() {
+            sql.to_string()
+        } else {
+            inline_params(sql, params)?
+        };
+        for provider in &providers {
+            let op = crate::provider::WriteOpPayload {
+                id: ulid::Ulid::new().to_string(),
+                table_name: String::new(),
+                op: "RAW".to_string(),
+                row_id: String::new(),
+                row: Some(serde_json::json!({ "sql": effective_sql })),
+                conflict_columns: None,
+            };
+            self.provider
+                .apply(&provider.url, &crate::provider::ApplyRequest { ops: vec![op] })
+                .await
+                .map_err(|error| GatewayError::provider(error.to_string()))?;
+        }
+        let verb = match kind {
+            StatementKind::Update => "UPDATE",
+            StatementKind::Delete => "DELETE",
+            _ => "OK",
+        };
+        Ok(Outcome::Command(verb.to_string(), 0))
     }
 }
 
@@ -262,9 +450,19 @@ fn infer_columns(rows: &[Value], _table: &str) -> Vec<Column> {
         if let Some(object) = row.as_object() {
             for key in object.keys() {
                 if seen.insert(key.clone()) {
-                    columns.push(Column { name: key.clone() });
+                    columns.push(Column { name: key.clone(), type_oid: Type::TEXT.oid() });
                 }
             }
+        }
+    }
+    columns
+}
+
+/// Merges provider-declared OIDs into the inferred column list.
+fn apply_provider_oids(mut columns: Vec<Column>, provider: &[crate::provider::QueryColumn]) -> Vec<Column> {
+    for provider_column in provider {
+        if let Some(column) = columns.iter_mut().find(|column| column.name == provider_column.name) {
+            column.type_oid = provider_column.oid;
         }
     }
     columns
@@ -297,7 +495,10 @@ impl AuthSource for FixedAuthSource {
 fn text_fields(columns: &[Column]) -> Vec<FieldInfo> {
     columns
         .iter()
-        .map(|column| FieldInfo::new(column.name.clone().into(), None, None, Type::TEXT, FieldFormat::Text))
+        .map(|column| {
+            let pg_type = Type::from_oid(column.type_oid).unwrap_or(Type::TEXT);
+            FieldInfo::new(column.name.clone().into(), None, None, pg_type, FieldFormat::Text)
+        })
         .collect()
 }
 
@@ -425,7 +626,17 @@ impl ExtendedQueryHandler for GatewayHandlers {
     {
         let row_id = bound_row_id(portal).await;
         let sql = &portal.statement.statement.sql;
-        match self.execute_sql(sql, row_id.as_deref()).await {
+        // Binary-safe inlining up front: BYTEA params (nostr pubkeys/ids)
+        // become hex escape literals; UTF-8 params inline as text literals.
+        let effective_sql = if portal.parameters.is_empty() {
+            sql.to_string()
+        } else {
+            match inline_params_bytes(sql, &portal.parameters) {
+                Ok(inlined) => inlined,
+                Err(error) => return Err(self.error(&error)),
+            }
+        };
+        match self.execute_sql_bound(&effective_sql, row_id.as_deref(), &[]).await {
             Ok(Outcome::Session) => Ok(Response::Execution(pgwire::api::results::Tag::new("OK"))),
             Ok(Outcome::Command(tag, count)) => {
                 Ok(Response::Execution(pgwire::api::results::Tag::new(&tag).with_rows(count)))
@@ -433,6 +644,132 @@ impl ExtendedQueryHandler for GatewayHandlers {
             Ok(Outcome::Rows(columns, rows, count)) => rows_response(&columns, rows, count),
             Err(error) => Err(self.error(&error)),
         }
+    }
+
+    /// Describes a statement (pre-bind): dry-run with NULL params inlined to
+    /// learn the real column set. Column names/types don't depend on param
+    /// values, so this matches what Execute will return.
+    async fn do_describe_statement<C>(
+        &self,
+        _client: &mut C,
+        target: &StoredStatement<Self::Statement>,
+    ) -> PgWireResult<DescribeStatementResponse>
+    where
+        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::PortalStore: PortalStore<Statement = Self::Statement>,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let sql = &target.statement.sql;
+        let schema = if is_catalog_statement(sql) {
+            // Real metadata from the catalog connection's prepare(): exact
+            // column names even for zero-row results.
+            match self.catalog.describe_columns(sql).await {
+                Ok(names) => text_fields(
+                    &names.into_iter().map(|name| Column { name, type_oid: Type::TEXT.oid() }).collect::<Vec<Column>>(),
+                ),
+                Err(_) => vec![],
+            }
+        } else {
+            // Shape probe: column names only. Binary literals in the real
+            // query (bytea pubkeys) can't survive a text dry-run, so probe
+            // the table shape directly.
+            let dry_sql = match sqlanalyze::read_table_name(sql) {
+                Some(table) => format!("select * from {table} limit 0"),
+                None => {
+                    let param_count = sql.matches('$').count();
+                    let params: Vec<Option<String>> = vec![Some("NULL".to_string()); param_count];
+                    inline_params(sql, &params).unwrap_or_else(|_| sql.to_string())
+                }
+            };
+            let dry_columns = match self.execute_sql_bound(&dry_sql, None, &[]).await {
+                Ok(Outcome::Rows(columns, _, _)) => columns,
+                _ => vec![],
+            };
+            // Zero-row dry-runs yield no shape from data — fall back to the
+            // registry's declared columns for the target table.
+            let columns = if dry_columns.is_empty() {
+                match sqlanalyze::read_table_name(sql) {
+                    Some(table) => match futures::executor::block_on(self.read.table(&table)) {
+                        Ok(table_def) => table_columns_as_columns(&table_def),
+                        Err(_) => vec![],
+                    },
+                    None => vec![],
+                }
+            } else {
+                dry_columns
+            };
+            text_fields(&columns)
+        };
+        let param_types: Vec<Type> = target
+            .parameter_types
+            .iter()
+            .map(|pt| pt.clone().unwrap_or(Type::UNKNOWN))
+            .collect();
+        Ok(DescribeStatementResponse::new(param_types, schema))
+    }
+
+    /// Describes a portal by executing it: the gateway materializes real
+    /// columns (catalog queries and provider fan-outs), so introspection
+    /// matches the actual rows. Cheap for catalog queries; fan-outs use
+    /// LIMIT-less dry runs only when cheap — here we just run it, matching
+    /// what Execute would return.
+    async fn do_describe_portal<C>(
+        &self,
+        _client: &mut C,
+        target: &Portal<Self::Statement>,
+    ) -> PgWireResult<DescribePortalResponse>
+    where
+        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::PortalStore: PortalStore<Statement = Self::Statement>,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let sql = &target.statement.statement.sql;
+        if is_catalog_statement(sql) {
+            match self.catalog.describe_columns(sql).await {
+                Ok(names) => {
+                    let fields = text_fields(
+                        &names.into_iter().map(|name| Column { name, type_oid: Type::TEXT.oid() }).collect::<Vec<Column>>(),
+                    );
+                    return Ok(DescribePortalResponse::new(fields));
+                }
+                Err(_) => return Ok(DescribePortalResponse::new(vec![])),
+            }
+        }
+        // Shape probe: column names only. Binary literals in the real query
+        // (bytea pubkeys) can't survive a text dry-run, so probe the table
+        // shape directly.
+        let dry_sql = match sqlanalyze::read_table_name(sql) {
+            Some(table) => format!("select * from {table} limit 0"),
+            None => {
+                let params: Vec<Option<String>> = target
+                    .parameters
+                    .iter()
+                    .map(|raw| raw.as_ref().map(|bytes| String::from_utf8_lossy(bytes).to_string()))
+                    .collect();
+                match inline_params(sql, &params) {
+                    Ok(inlined) => format!("{inlined} LIMIT 0"),
+                    Err(_) => format!("{sql} LIMIT 0"),
+                }
+            }
+        };
+        let dry_columns = match self.execute_sql_bound(&dry_sql, None, &[]).await {
+            Ok(Outcome::Rows(columns, _, _)) => columns,
+            _ => vec![],
+        };
+        let columns = if dry_columns.is_empty() {
+            match sqlanalyze::read_table_name(sql) {
+                Some(table) => match futures::executor::block_on(self.read.table(&table)) {
+                    Ok(table_def) => table_columns_as_columns(&table_def),
+                    Err(_) => vec![],
+                },
+                None => vec![],
+            }
+        } else {
+            dry_columns
+        };
+        Ok(DescribePortalResponse::new(text_fields(&columns)))
     }
 
     async fn on_sync<C>(&self, client: &mut C, _message: PgSync) -> PgWireResult<()>
@@ -519,6 +856,7 @@ impl PgWireServerHandlers for GatewayHandlers {
     fn copy_handler(&self) -> Arc<impl CopyHandler> {
         Arc::new(self.clone())
     }
+
 }
 
 fn table_columns_as_columns(table: &crate::central::MeshTable) -> Vec<Column> {
@@ -529,7 +867,7 @@ fn table_columns_as_columns(table: &crate::central::MeshTable) -> Vec<Column> {
             array
                 .iter()
                 .filter_map(|column| column.get("name").and_then(|name| name.as_str()))
-                .map(|name| Column { name: name.to_string() })
+                .map(|name| Column { name: name.to_string(), type_oid: Type::TEXT.oid() })
                 .collect()
         })
         .unwrap_or_default()
@@ -590,7 +928,7 @@ async fn materialize_insert_row(
                     .await?;
                 serde_json::json!(value)
             }
-            "UUID" => serde_json::json!(ulid::Ulid::new().to_string()),
+            "UUID" => serde_json::json!(uuid::Uuid::new_v4().to_string()),
             "NOW" => serde_json::json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
             _ => continue,
         };
@@ -612,10 +950,177 @@ async fn materialize_insert_row(
                     .await?;
                 serde_json::json!(value)
             }
-            _ => serde_json::json!(ulid::Ulid::new().to_string()),
+            _ => serde_json::json!(uuid::Uuid::new_v4().to_string()),
         };
         row.insert(sqlanalyze::PK_COLUMN.to_string(), generated);
     }
     let _ = row_id;
     Ok(serde_json::Value::Object(row))
+}
+
+/// True for statements that reference catalogs or ORM bookkeeping tables and
+/// must be served from the local catalog database.
+fn is_catalog_statement(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    let trimmed = lower.trim().trim_end_matches(';').trim();
+    // Catalog-schema references, ORM bookkeeping tables, and extension DDL
+    // (uuid-ossp etc.) are catalog-domain: they run on the local catalog
+    // database only.
+    trimmed.starts_with("create extension")
+        || trimmed.starts_with("drop extension")
+        || trimmed.starts_with("create function")
+        || trimmed.starts_with("create or replace function")
+        || trimmed.starts_with("drop function")
+        // knex bookkeeping DDL: creates/drops of its own bookkeeping tables.
+        || ((trimmed.starts_with("create table")
+            || trimmed.starts_with("drop table")
+            || trimmed.starts_with("create index")
+            || trimmed.starts_with("create unique index"))
+            && (lower.contains("knex_migrations")))
+        || lower.contains("pg_catalog.")
+        || lower.contains("information_schema.")
+        || lower.contains("knex_migrations")
+        || lower.contains("to_regclass")
+        || lower.contains("pg_class")
+        || lower.contains("pg_namespace")
+        || lower.contains("pg_attribute")
+        || lower.contains("pg_index")
+        || lower.contains("pg_constraint")
+        || lower.contains("pg_type")
+}
+
+impl GatewayHandlers {
+    /// Returns Some(outcome) when the statement was handled by the catalog.
+    async fn catalog_request(&self, sql: &str, params: &[Option<String>]) -> Result<Option<Outcome>, GatewayError> {
+        if !is_catalog_statement(sql) {
+            tracing::debug!("not catalog: {}", sql);
+            return Ok(None);
+        }
+        tracing::debug!("catalog route: {}", sql);
+        // DDL: CREATE TABLE/INDEX referencing catalog bookkeeping or
+        // extension setup (CREATE EXTENSION) runs only on the catalog.
+        let trimmed = sql.trim().trim_end_matches(';').to_ascii_lowercase();
+        if trimmed.starts_with("create extension")
+            || trimmed.starts_with("create index")
+            || trimmed.starts_with("create unique index")
+            || trimmed.starts_with("create table")
+            || trimmed.starts_with("drop table")
+            || trimmed.starts_with("insert into")
+            || trimmed.starts_with("update ")
+            || trimmed.starts_with("delete from")
+        {
+            // Qualify bare bookkeeping table names into the catalog schema.
+            let rewritten = qualify_catalog_sql(sql);
+            let affected = if params.is_empty() {
+                self.catalog.execute(&rewritten).await?
+            } else {
+                self.catalog
+                    .execute(&inline_params(&rewritten, params)?)
+                    .await?
+            };
+            // Clients (knex) read rowCount from the command tag to detect
+            // how many rows a lock UPDATE touched — "OK" would read as 0.
+            let verb = trimmed
+                .split_whitespace()
+                .next()
+                .unwrap_or("OK")
+                .to_ascii_uppercase();
+            return Ok(Some(Outcome::Command(verb, affected as usize)));
+        }
+        let effective_sql = if params.is_empty() {
+            qualify_catalog_sql(sql)
+        } else {
+            qualify_catalog_sql(&inline_params(sql, params)?)
+        };
+        // DDL that slipped past the write branch (multi-statement bodies,
+        // describe dry-runs) executes on the catalog instead of reading.
+        let ddlish = effective_sql.trim().to_ascii_lowercase();
+        if ddlish.starts_with("create")
+            || ddlish.starts_with("drop")
+            || ddlish.starts_with("alter")
+        {
+            self.catalog.execute(&effective_sql).await?;
+            return Ok(Some(Outcome::Command("OK".to_string(), 1)));
+        }
+        tracing::debug!("catalog read effective_sql={}", effective_sql);
+        let rows = self.catalog.query(&effective_sql).await?;
+        let columns = infer_columns(&rows, "");
+        let count = rows.len();
+        let wire_rows = rows
+            .iter()
+            .map(|row| {
+                columns
+                    .iter()
+                    .map(|column| row.get(&column.name).and_then(value_to_wire_text))
+                    .collect::<Vec<Option<String>>>()
+            })
+            .collect();
+        Ok(Some(Outcome::Rows(columns, wire_rows, count)))
+    }
+}
+
+/// Replaces $N placeholders with inlined text literals for the catalog path.
+/// The catalog is a local trust boundary (gateway-owned), so naive inlining
+/// is acceptable; params arrive as text from the wire.
+fn inline_params(sql: &str, params: &[Option<String>]) -> Result<String, GatewayError> {
+    let mut result = sql.to_string();
+    for (index, param) in params.iter().enumerate().rev() {
+        let placeholder = format!("${}", index + 1);
+        let literal = match param {
+            Some(text) => format!("'{}'", text.replace('\'', "''")),
+            None => "NULL".to_string(),
+        };
+        result = result.replace(&placeholder, &literal);
+    }
+    Ok(result)
+}
+
+/// Binary-safe inlining: params arrive as raw wire bytes; when they are not
+/// valid UTF-8 (e.g. BYTEA pubkeys from nostr), emit a hex escape literal.
+pub fn inline_params_bytes(sql: &str, params: &[Option<bytes::Bytes>]) -> Result<String, GatewayError> {
+    let mut result = sql.to_string();
+    for (index, param) in params.iter().enumerate().rev() {
+        let placeholder = format!("${}", index + 1);
+        let literal = match param {
+            Some(bytes) => match std::str::from_utf8(bytes) {
+                Ok(text) => format!("'{}'", text.replace('\'', "''")),
+                Err(_) => {
+                    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    format!("E'\\\\x{hex}'::bytea")
+                }
+            },
+            None => "NULL".to_string(),
+        };
+        result = result.replace(&placeholder, &literal);
+    }
+    Ok(result)
+}
+
+/// Naive qualification of bare table names for catalog bookkeeping SQL
+/// (knex emits `insert into "knex_migrations"`, `select * from
+/// "knex_migrations"` etc. with quoted identifiers).
+fn qualify_catalog_sql(sql: &str) -> String {
+    // Only qualify the known bookkeeping tables; catalog-prefixed queries
+    // already carry their own qualification.
+    let mut result = sql.to_string();
+    for table in ["knex_migrations_lock", "knex_migrations"] {
+        let quoted = format!("\"{table}\"");
+        if result.contains(&quoted) && !result.contains(&format!("mesh_catalog.{quoted}")) {
+            result = result.replace(&quoted, &format!("mesh_catalog.{}", quoted));
+        }
+    }
+    result
+}
+
+/// Re-runs the analyzer to surface its original error for non-DDL fallbacks.
+fn analyze_error(sql: &str) -> GatewayError {
+    sqlanalyze::analyze(sql).unwrap_err()
+}
+
+/// Cheap DDL detection without parsing (used when the parser itself fails).
+fn is_ddl_text(sql: &str) -> bool {
+    let lower = sql.trim().to_ascii_lowercase();
+    lower.starts_with("create")
+        || lower.starts_with("alter")
+        || lower.starts_with("drop")
 }

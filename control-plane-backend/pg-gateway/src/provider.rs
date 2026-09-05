@@ -19,6 +19,8 @@ pub struct WriteOpPayload {
     pub row_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row: Option<Value>,
+    #[serde(rename = "conflictColumns", skip_serializing_if = "Option::is_none")]
+    pub conflict_columns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -27,8 +29,16 @@ pub struct ApplyRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct QueryColumn {
+    pub name: String,
+    pub oid: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryResponse {
     pub rows: Vec<Value>,
+    #[serde(default)]
+    pub columns: Vec<QueryColumn>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -88,6 +98,15 @@ impl ProviderClient {
     }
 
     pub async fn query(&self, provider_url: &str, sql: &str) -> Result<Vec<Value>> {
+        self.query_with_columns(provider_url, sql).await.map(|(rows, _)| rows)
+    }
+
+    /// Returns rows plus the provider-declared column type OIDs.
+    pub async fn query_with_columns(
+        &self,
+        provider_url: &str,
+        sql: &str,
+    ) -> Result<(Vec<Value>, Vec<QueryColumn>)> {
         let response = self
             .request(reqwest::Method::POST, &format!("{}/pg/query", self.base(provider_url)))
             .json(&serde_json::json!({ "sql": sql }))
@@ -105,7 +124,7 @@ impl ProviderClient {
             .json()
             .await
             .map_err(|error| GatewayError::provider(format!("{provider_url}: bad JSON: {error}")))?;
-        Ok(decoded.rows)
+        Ok((decoded.rows, decoded.columns))
     }
 
     pub async fn schema(&self, provider_url: &str, migrations: &[crate::central::PendingMigration]) -> Result<i32> {

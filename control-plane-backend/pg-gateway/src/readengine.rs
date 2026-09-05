@@ -24,6 +24,8 @@ pub struct ReadResult {
     pub rows: Vec<Value>,
     /// True when only a subset of providers answered a fan-out query.
     pub partial: bool,
+    /// Provider-declared column types from the first answering provider.
+    pub columns: Vec<crate::provider::QueryColumn>,
 }
 
 impl ReadEngine {
@@ -52,7 +54,7 @@ impl ReadEngine {
         let table_name = sql_table_name(sql)?;
         let pending = self.store.pending_rows(&table_name).await?;
         if let Some((_, Some(row))) = pending.iter().find(|(id, _)| id == row_id) {
-            return Ok(ReadResult { rows: vec![row.clone()], partial: false });
+            return Ok(ReadResult { rows: vec![row.clone()], partial: false, columns: vec![] });
         }
 
         let Some((replicas, _)) = self.store.get_placement(&table_name, row_id).await? else {
@@ -67,7 +69,7 @@ impl ReadEngine {
                     row.get(pk).and_then(value_as_string).as_deref() == Some(row_id)
                 })
                 .collect();
-            return Ok(ReadResult { rows, partial: result.partial });
+            return Ok(ReadResult { rows, partial: result.partial, columns: result.columns });
         };
 
         for replica in &replicas {
@@ -82,7 +84,7 @@ impl ReadEngine {
                             row.get(PK_COLUMN).and_then(value_as_string).as_deref() == Some(row_id)
                         })
                         .collect();
-                    return Ok(ReadResult { rows, partial: false });
+                    return Ok(ReadResult { rows, partial: false, columns: vec![] });
                 }
                 Err(error) => {
                     tracing::warn!("point read from {replica} failed: {error}");
@@ -105,15 +107,19 @@ impl ReadEngine {
             let sql = sql.to_string();
             handles.push(tokio::spawn(async move {
                 let npub = provider.npub.clone();
-                (npub, client.query(&url, &sql).await)
+                (npub, client.query_with_columns(&url, &sql).await)
             }));
         }
         let mut merged_index: HashMap<String, Value> = HashMap::new();
         let mut answered = 0usize;
+        let mut columns_out: Vec<crate::provider::QueryColumn> = Vec::new();
         for handle in handles {
             match handle.await {
-                Ok((_npub, Ok(rows))) => {
+                Ok((_npub, Ok((rows, columns)))) => {
                     answered += 1;
+                    if columns_out.is_empty() {
+                        columns_out = columns;
+                    }
                     for row in rows {
                         let pk = row.get(PK_COLUMN).and_then(value_as_string).unwrap_or_default();
                         merged_index
@@ -122,7 +128,7 @@ impl ReadEngine {
                     }
                 }
                 Ok((npub, Err(error))) => {
-                    tracing::warn!("fan-out read from {npub} failed: {error}");
+                    tracing::warn!("fan-out read failed (sql={sql}): {error}");
                 }
                 Err(join_error) => {
                     tracing::warn!("fan-out read task failed: {join_error}");
@@ -143,7 +149,7 @@ impl ReadEngine {
                 rows.push(row);
             }
         }
-        Ok(ReadResult { rows, partial: answered < provider_count })
+        Ok(ReadResult { rows, partial: answered < provider_count, columns: columns_out })
     }
 }
 

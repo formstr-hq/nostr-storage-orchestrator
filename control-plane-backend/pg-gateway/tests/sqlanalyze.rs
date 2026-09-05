@@ -39,15 +39,20 @@ fn reversed_pk_equality() {
 }
 
 #[test]
-fn rejects_writes_without_pk() {
+fn writes_without_pk_are_marked_broad() {
     for sql in [
         "UPDATE notes SET body = 'x' WHERE body = 'y'",
         "UPDATE notes SET body = 'x'",
         "DELETE FROM notes",
         "DELETE FROM notes WHERE body = 'y'",
     ] {
-        let error = pg_gateway::sqlanalyze::analyze(sql).unwrap_err();
-        assert!(matches!(error, GatewayError::WriteRequiresPk(_)), "{sql}: {error:?}");
+        match pg_gateway::sqlanalyze::analyze(sql).unwrap() {
+            AnalyzedStatement::Write { broad, row_id, .. } => {
+                assert!(broad, "{sql} should be broad");
+                assert!(row_id.is_empty(), "{sql} should have no row id");
+            }
+            other => panic!("{sql}: expected write, got {other:?}"),
+        }
     }
 }
 
@@ -57,10 +62,12 @@ fn rejects_multi_row_insert_and_conflict() {
         "INSERT INTO notes (id, body) VALUES ('a', 'x'), ('b', 'y')"
     )
     .is_err());
+    // Target-less ON CONFLICT DO NOTHING is now supported (provider-side
+    // dedup on any unique constraint).
     assert!(pg_gateway::sqlanalyze::analyze(
         "INSERT INTO notes (id, body) VALUES ('a', 'x') ON CONFLICT DO NOTHING"
     )
-    .is_err());
+    .is_ok());
 }
 
 #[test]

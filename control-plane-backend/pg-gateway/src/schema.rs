@@ -53,6 +53,15 @@ impl SchemaManager {
         Ok(())
     }
 
+    /// Propagates a DDL statement (e.g. CREATE INDEX) to all active
+    /// providers without touching the table registry.
+    pub async fn propagate_ddl(&self, sql: &str) -> Result<()> {
+        let migration_id = Ulid::new().to_string();
+        self.store.append_migration(sql, &migration_id).await?;
+        self.propagate_now(&migration_id).await?;
+        Ok(())
+    }
+
     /// Pushes PENDING migrations to every active provider immediately.
     async fn propagate_now(&self, migration_id: &str) -> Result<()> {
         let migrations = self.pending_migrations_from(migration_id).await?;

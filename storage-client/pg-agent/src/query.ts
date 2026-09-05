@@ -19,12 +19,21 @@ export function buildQueryRouter(sql: postgres.Sql) {
     if (!parsed.success) {
       return errorResponse(ctx, 400, "invalid_query");
     }
-    const text = parsed.data.sql.trim();
-    // Read-only: a single statement, SELECT-shaped.
+    // A single statement with one optional trailing semicolon.
+    const text = parsed.data.sql.trim().replace(/;\s*$/, "");
     if (!/^(select|with)\b/i.test(text) || text.includes(";")) {
       return errorResponse(ctx, 400, "only_single_select_supported");
     }
     try {
+      // describe() prepares (no execution); run it on its own pending query
+      // before executing — awaiting a pending query twice would deadlock.
+      let described: { columns: Array<{ name: string; type: number }> } | undefined;
+      try {
+        const d = await sql.unsafe(text).describe();
+        described = d as { columns: Array<{ name: string; type: number }> };
+      } catch (describeError) {
+        console.error("describe failed:", describeError);
+      }
       const rows = await sql.unsafe(text);
       const json = rows.map((row) => {
         const output: Record<string, unknown> = {};
@@ -33,7 +42,14 @@ export function buildQueryRouter(sql: postgres.Sql) {
         }
         return output;
       });
-      return ctx.json({ rows: json });
+      // Column OIDs (via prepare/Describe) so the gateway can emit real PG
+      // types on the wire instead of everything-as-TEXT. Boolean "f" as a
+      // TEXT string is truthy in JS clients — a real correctness bug.
+      const columns = (described?.columns ?? []).map((column: { name: string; type: number }) => ({
+        name: column.name,
+        oid: column.type,
+      }));
+      return ctx.json({ rows: json, columns });
     } catch (error) {
       console.error("query failed:", error);
       return errorResponse(ctx, 500, error instanceof Error ? error.message : "query_failed");

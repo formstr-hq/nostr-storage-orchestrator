@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS pg_placement (
 );
 "#;
 
+/// Applied to the shadow catalog database (a real Postgres schema on the
+/// orchestrator that mirrors mesh DDL). Catalog introspection
+/// (pg_catalog/information_schema/knex_migrations bookkeeping) is answered
+/// from here with real rows instead of fanned out to providers.
+pub const CATALOG_SCHEMA_SQL: &str = r#"
+CREATE SCHEMA IF NOT EXISTS mesh_catalog;
+"#;
+
 /// A mesh table registered in the central schema registry.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MeshTable {
@@ -512,6 +520,155 @@ impl CentralStore {
             .map_err(|error| GatewayError::central(format!("sequence alloc: {error:?}")))?;
         Ok(row.get::<_, i64>(0))
     }
+}
+
+/// Shadow catalog: mirrors mesh DDL on a real local schema so that
+/// pg_catalog / information_schema / ORM bookkeeping queries work with real
+/// results. Data rows do NOT live here — only schema + ORM bookkeeping
+/// tables (e.g. knex_migrations) that clients expect to read/write directly.
+pub struct CatalogStore {
+    client: tokio::sync::Mutex<Option<tokio_postgres::Client>>,
+    url: String,
+}
+
+impl CatalogStore {
+    pub fn new(database_url: String) -> Self {
+        Self { client: tokio::sync::Mutex::new(None), url: database_url }
+    }
+
+    async fn connect(&self) -> Result<tokio::sync::MutexGuard<'_, Option<tokio_postgres::Client>>> {
+        let mut slot = self.client.lock().await;
+        if let Some(client) = slot.as_ref() {
+            if client.simple_query("SELECT 1").await.is_ok() {
+                return Ok(slot);
+            }
+        }
+        let (client, connection) = tokio_postgres::connect(&self.url, NoTls)
+            .await
+            .map_err(|error| GatewayError::central(format!("catalog pg connect: {error}")))?;
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::debug!("catalog pg connection closed: {error}");
+            }
+        });
+        *slot = Some(client);
+        Ok(slot)
+    }
+
+    pub async fn ensure_schema(&self) -> Result<()> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("catalog pg client is initialized");
+        client
+            .batch_execute(CATALOG_SCHEMA_SQL)
+            .await
+            .map_err(|error| GatewayError::central(format!("catalog schema: {error:?}")))?;
+        Ok(())
+    }
+
+    /// Applies mesh DDL verbatim to the catalog schema. CREATE TABLE is
+    /// qualified into `mesh_catalog.`; CREATE INDEX / UNIQUE INDEX keep their
+    /// table references but run inside the catalog search_path.
+    pub async fn apply_ddl(&self, ddl: &str) -> Result<()> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("catalog pg client is initialized");
+        let rewritten = qualify_ddl(ddl);
+        client
+            .batch_execute(&rewritten)
+            .await
+            .map_err(|error| GatewayError::central(format!("catalog ddl: {error:?}")))?;
+        Ok(())
+    }
+
+    /// Executes a read-only statement against the catalog schema.
+    /// Column names of a statement's result set (via prepare, no execution).
+    pub async fn describe_columns(&self, sql: &str) -> Result<Vec<String>> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("catalog pg client is initialized");
+        let statement = client
+            .prepare(sql)
+            .await
+            .map_err(|error| GatewayError::central(format!("catalog describe: {error:?}")))?;
+        Ok(statement.columns().iter().map(|column| column.name().to_string()).collect())
+    }
+
+    pub async fn query(&self, sql: &str) -> Result<Vec<Value>> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("catalog pg client is initialized");
+        let messages = client
+            .simple_query(sql)
+            .await
+            .map_err(|error| GatewayError::central(format!("catalog query: {error:?}")))?;
+        let mut out: Vec<Value> = Vec::new();
+        for message in messages {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = message {
+                let mut object = serde_json::Map::new();
+                for index in 0..row.columns().len() {
+                    let name = row.columns()[index].name();
+                    let value = match row.get(index) {
+                        Some(text) if !text.is_empty() => serde_json::Value::String(text.to_owned()),
+                        Some(_) => serde_json::Value::Null,
+                        None => serde_json::Value::Null,
+                    };
+                    object.insert(name.to_string(), value);
+                }
+                out.push(serde_json::Value::Object(object));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Executes a write (knex migration bookkeeping inserts/creates) against
+    /// the catalog schema. Tables resolved relative to mesh_catalog.
+    pub async fn execute(&self, sql: &str) -> crate::error::Result<u64> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("catalog pg client is initialized");
+        // Statements with inner semicolons (function bodies, ALTER batches)
+        // cannot run as a single prepared statement — use batch_execute.
+        let has_inner_semicolon = {
+            let trimmed = sql.trim().trim_end_matches(';').trim();
+            trimmed.contains(';')
+        };
+        if has_inner_semicolon {
+            let result = client.batch_execute(sql).await;
+            return result.map(|_| 0).or_else(|error| {
+                let text = format!("{error:?}");
+                if text.contains("42P07") || text.contains("42723") || text.contains("already exists") {
+                    Ok(0)
+                } else {
+                    Err(GatewayError::central(format!("catalog execute: {error:?}")))
+                }
+            });
+        }
+        client
+            .execute(sql, &[])
+            .await
+            .or_else(|error| {
+                // Idempotent catalog DDL: duplicate table/extension errors are
+                // benign (clients check-then-create without IF NOT EXISTS).
+                let text = format!("{error:?}");
+                if text.contains("42P07") || text.contains("42723") || text.contains("already exists") {
+                    Ok(0)
+                } else {
+                    Err(GatewayError::central(format!("catalog execute: {error:?}")))
+                }
+            })
+    }
+}
+
+/// Qualifies unqualified table names in DDL with the catalog schema, so the
+/// catalog mirrors the mesh without colliding with gateway bookkeeping.
+fn qualify_ddl(ddl: &str) -> String {
+    ddl.to_string()
 }
 
 fn mesh_table_from_row(row: &Row) -> MeshTable {

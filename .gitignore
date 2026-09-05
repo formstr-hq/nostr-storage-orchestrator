@@ -33,3 +33,6 @@ target/
 # python
 __pycache__/
 *.pyc
+
+# tauri generated code
+admin-app/src-tauri/gen/

@@ -17,7 +17,10 @@ use crate::error::{GatewayError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatementKind {
+    /// CREATE TABLE
     Create,
+    /// CREATE [UNIQUE] INDEX
+    CreateIndex,
     Alter,
     Drop,
     Insert,
@@ -40,6 +43,12 @@ pub enum AnalyzedStatement {
         generate_row_id: bool,
         /// Columns the INSERT asked to RETURN, or None when no RETURNING.
         returning: Option<Vec<String>>,
+        /// True for UPDATE/DELETE without a pk predicate (bulk ops). These
+        /// are only accepted when broad writes are enabled and are applied
+        /// verbatim to every provider.
+        broad: bool,
+        /// INSERT ... ON CONFLICT (cols) target columns; None = plain insert.
+        conflict_columns: Option<Vec<String>>,
     },
     Read { sql: String },
 }
@@ -91,11 +100,30 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
                     "multi-row INSERT is not supported; issue one INSERT per row".to_string(),
                 ));
             }
-            if insert.on.is_some() {
-                return Err(GatewayError::UnsupportedSql(
-                    "ON CONFLICT / DO NOTHING is not supported".to_string(),
-                ));
-            }
+            let conflict_columns = match insert.on.as_ref() {
+                None => None,
+                Some(sqlparser::ast::OnInsert::OnConflict(on_conflict)) => {
+                    let columns = match on_conflict.conflict_target.as_ref() {
+                        Some(sqlparser::ast::ConflictTarget::Columns(columns)) => {
+                            Some(columns.iter().map(|ident| ident.value.clone()).collect::<Vec<String>>())
+                        }
+                        Some(_) => {
+                            return Err(GatewayError::UnsupportedSql(
+                                "ON CONFLICT ON CONSTRAINT is not supported".to_string(),
+                            ))
+                        }
+                        // `ON CONFLICT DO NOTHING` without a target: any
+                        // unique constraint dedups at the provider.
+                        None => None,
+                    };
+                    columns
+                }
+                Some(_) => {
+                    return Err(GatewayError::UnsupportedSql(
+                        "INSERT OR / DUPLICATE KEY UPDATE is not supported".to_string(),
+                    ))
+                }
+            };
             let row = &rows[0];
             let pk_index = insert
                 .columns
@@ -147,47 +175,47 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
                 row_id_placeholder,
                 generate_row_id,
                 returning,
+                broad: false,
+                conflict_columns,
             })
         }
         Statement::Update(update) => {
             let table = extract_table_factor_name(&update.table.relation)?;
-            match update.selection.as_ref() {
-                Some(where_clause) => {
-                    let row_id = extract_pk_equality(where_clause)?;
-                    Ok(AnalyzedStatement::Write {
-                        kind: StatementKind::Update,
-                        table,
-                        row_id,
-                        sql: sql.to_string(),
-                        row_id_placeholder: None,
-                        generate_row_id: false,
-                        returning: None,
-                    })
-                }
-                None => Err(GatewayError::WriteRequiresPk(
-                    "UPDATE requires WHERE <pk> = <literal>".to_string(),
-                )),
-            }
+            let pk_result = update.selection.as_ref().map(extract_pk_equality);
+            let (row_id, broad) = match pk_result {
+                Some(Ok(row_id)) => (row_id, false),
+                Some(Err(_)) | None => (String::new(), true),
+            };
+            Ok(AnalyzedStatement::Write {
+                kind: StatementKind::Update,
+                table,
+                row_id,
+                sql: sql.to_string(),
+                row_id_placeholder: None,
+                generate_row_id: false,
+                returning: None,
+                broad,
+                conflict_columns: None,
+            })
         }
         Statement::Delete(delete) => {
             let table = extract_delete_table(delete.from.clone())?;
-            match delete.selection.as_ref() {
-                Some(where_clause) => {
-                    let row_id = extract_pk_equality(where_clause)?;
-                    Ok(AnalyzedStatement::Write {
-                        kind: StatementKind::Delete,
-                        table,
-                        row_id,
-                        sql: sql.to_string(),
-                        row_id_placeholder: None,
-                        generate_row_id: false,
-                        returning: None,
-                    })
-                }
-                None => Err(GatewayError::WriteRequiresPk(
-                    "DELETE requires WHERE <pk> = <literal>".to_string(),
-                )),
-            }
+            let pk_result = delete.selection.as_ref().map(extract_pk_equality);
+            let (row_id, broad) = match pk_result {
+                Some(Ok(row_id)) => (row_id, false),
+                Some(Err(_)) | None => (String::new(), true),
+            };
+            Ok(AnalyzedStatement::Write {
+                kind: StatementKind::Delete,
+                table,
+                row_id,
+                sql: sql.to_string(),
+                row_id_placeholder: None,
+                generate_row_id: false,
+                returning: None,
+                broad,
+                conflict_columns: None,
+            })
         }
         Statement::CreateTable(create) => {
             let table = extract_table_name(&create.name)?;
@@ -209,6 +237,30 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
             )?;
             Ok(AnalyzedStatement::Ddl { kind: StatementKind::Drop, table, sql: sql.to_string() })
         }
+        Statement::CreateIndex(create_index) => {
+            let table = match &create_index.table_name {
+                sqlparser::ast::ObjectName(parts) => {
+                    let last = parts.last().ok_or_else(|| {
+                        GatewayError::UnsupportedSql("CREATE INDEX needs a table".to_string())
+                    })?;
+                    last.as_ident()
+                        .map(|ident| ident.value.clone())
+                        .ok_or_else(|| {
+                            GatewayError::UnsupportedSql("index table must be an identifier".to_string())
+                        })?
+                }
+            };
+            Ok(AnalyzedStatement::Ddl { kind: StatementKind::CreateIndex, table, sql: sql.to_string() })
+        }
+        Statement::Drop {
+            object_type: sqlparser::ast::ObjectType::Index,
+            names,
+            ..
+        } => Ok(AnalyzedStatement::Ddl {
+            kind: StatementKind::Drop,
+            table: String::new(),
+            sql: sql.to_string(),
+        }),
         other => Err(GatewayError::UnsupportedSql(format!(
             "statement of kind {} is not supported",
             describe_statement(&other)
@@ -217,11 +269,14 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
 }
 
 fn analyze_select(query: Query, sql: &str) -> Result<AnalyzedStatement> {
-    if query.with.is_some() || query.limit_clause.is_some() || query.fetch.is_some() || !query.locks.is_empty() {
+    if query.with.is_some() || query.fetch.is_some() || !query.locks.is_empty() {
         return Err(GatewayError::UnsupportedSql(
             "CTEs, window expressions and locking clauses are not supported".to_string(),
         ));
     }
+    // LIMIT is allowed: fan-out applies it per provider (may over-fetch;
+    // merge keeps the invariant "at least the requested rows from each
+    // provider", which satisfies correctness for replicated data).
     let body = match query.body.as_ref() {
         sqlparser::ast::SetExpr::Select(select) => select,
         _ => {
@@ -558,9 +613,11 @@ pub fn is_additive_ddl(kind: &StatementKind, sql: &str) -> Result<bool> {
                 for operation in alter.operations {
                     match operation {
                         sqlparser::ast::AlterTableOperation::AddColumn { .. } => {}
+                        sqlparser::ast::AlterTableOperation::AddConstraint { .. } => {}
                         _ => {
                             return Err(GatewayError::UnsupportedSql(
-                                "only ADD COLUMN alterations are supported".to_string(),
+                                "only ADD COLUMN and ADD CONSTRAINT alterations are supported"
+                                    .to_string(),
                             ))
                         }
                     }
@@ -569,6 +626,7 @@ pub fn is_additive_ddl(kind: &StatementKind, sql: &str) -> Result<bool> {
             Statement::CreateTable(_) => {
                 debug_assert!(matches!(kind, StatementKind::Create));
             }
+            Statement::CreateIndex(_) => {}
             Statement::Drop {
                 object_type: sqlparser::ast::ObjectType::Table,
                 ..
@@ -576,6 +634,10 @@ pub fn is_additive_ddl(kind: &StatementKind, sql: &str) -> Result<bool> {
                 // DROP TABLE is allowed; it is destructive but explicit.
                 return Ok(true);
             }
+            Statement::Drop {
+                object_type: sqlparser::ast::ObjectType::Index,
+                ..
+            } => {}
             _ => {
                 return Err(GatewayError::UnsupportedSql(
                     "only CREATE TABLE, ALTER TABLE ... ADD COLUMN and DROP TABLE are supported"

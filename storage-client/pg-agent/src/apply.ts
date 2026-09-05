@@ -11,13 +11,14 @@ import { errorResponse } from "./middleware.ts";
 
 const OpSchema = z.object({
   id: z.string().min(1),
-  table: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/),
-  op: z.enum(["INSERT", "UPDATE", "DELETE"]),
+  table: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/).or(z.literal("")),
+  op: z.enum(["INSERT", "UPDATE", "DELETE", "RAW"]),
   rowId: z.string(),
   row: z
     .union([z.record(z.string(), z.any()), z.object({ sql: z.string() })])
     .nullable()
     .optional(),
+  conflictColumns: z.array(z.string()).optional(),
 });
 
 const ApplySchema = z.object({ ops: z.array(OpSchema).max(500) });
@@ -44,7 +45,11 @@ export function buildApplyRouter(sql: postgres.Sql) {
           `;
           if (applied.length === 0) continue;
 
-          if (op.op === "DELETE") {
+          if (op.op === "RAW") {
+            const rawSql = (op.row as { sql?: string })?.sql;
+            if (!rawSql) throw new Error("missing raw sql");
+            await tx.unsafe(rawSql);
+          } else if (op.op === "DELETE") {
             await tx`DELETE FROM ${sql(table)} WHERE id = ${op.rowId}`;
           } else if (op.op === "UPDATE") {
             // UPDATE arrives as its SQL text; providers apply verbatim.
@@ -55,19 +60,37 @@ export function buildApplyRouter(sql: postgres.Sql) {
             await tx.unsafe(updateSql!);
           } else {
             // INSERT: full row image from the gateway buffer overlay.
-            const row = (op.row ?? {}) as Record<string, unknown>;
+            const rawRow = { ...((op.row ?? {}) as Record<string, unknown>) };
+            // Reserved key carrying the conflict target from the gateway.
+            const declaredConflict = Array.isArray(rawRow["_conflictColumns"])
+              ? (rawRow["_conflictColumns"] as string[])
+              : op.conflictColumns;
+            delete rawRow["_conflictColumns"];
+            const row = rawRow;
             const columns = Object.keys(row);
             if (columns.length === 0) {
               throw new Error("empty insert row");
             }
-            await tx`
-              INSERT INTO ${tx(table)} ${tx(
-                Object.fromEntries(columns.map((column) => [column, row[column]])),
-              )}
-              ON CONFLICT (id) DO UPDATE SET ${tx(
-                Object.fromEntries(columns.map((column) => [column, row[column]])),
-              )}
-            `;
+            const values = tx(
+              Object.fromEntries(columns.map((column) => [column, row[column]])),
+            );
+            const conflict = declaredConflict ?? [];
+            if (conflict.length > 0) {
+              await tx`
+                INSERT INTO ${tx(table)} ${values}
+                ON CONFLICT (${tx(conflict)}) DO UPDATE SET ${values}
+              `;
+            } else if ("id" in row) {
+              // Gateway-allocated pk: upsert on it.
+              await tx`
+                INSERT INTO ${tx(table)} ${values}
+                ON CONFLICT (id) DO UPDATE SET ${values}
+              `;
+            } else {
+              // Target-less ON CONFLICT DO NOTHING: dedup on any unique
+              // constraint.
+              await tx`INSERT INTO ${tx(table)} ${values} ON CONFLICT DO NOTHING`;
+            }
           }
         }
       });
