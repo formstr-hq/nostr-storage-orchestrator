@@ -480,6 +480,38 @@ impl CentralStore {
             })
             .collect())
     }
+
+    // ── central id allocation ───────────────────────────────────────────────
+
+    /// Allocates the next value of a per-table sequence (bigserial-style).
+    /// Sequences live in the orchestrator PG so every replica receives the
+    /// same value — providers never run their own generators for mesh tables.
+    pub async fn next_sequence_value(&self, table_name: &str, column_name: &str) -> Result<i64> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("central pg client is initialized");
+        // Identifier must be inlined (sequence names are dynamic), but the
+        // table name was validated as an identifier by the analyzer, so this
+        // is safe.
+        let sequence: String = format!("mesh_pg_seq_{table_name}_{column_name}")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        client
+            .execute(
+                &format!("CREATE SEQUENCE IF NOT EXISTS {sequence}"),
+                &[],
+            )
+            .await
+            .map_err(|error| GatewayError::central(format!("sequence create: {error:?}")))?;
+        let sql = format!("SELECT nextval('{sequence}')");
+        let row = client
+            .query_one(&sql, &[])
+            .await
+            .map_err(|error| GatewayError::central(format!("sequence alloc: {error:?}")))?;
+        Ok(row.get::<_, i64>(0))
+    }
 }
 
 fn mesh_table_from_row(row: &Row) -> MeshTable {

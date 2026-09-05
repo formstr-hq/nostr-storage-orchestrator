@@ -336,20 +336,18 @@ tracks versions.
 
 ## Open Questions
 
-- **Server-generated values diverge across replicas (must-fix before v1).**
-  PG per provider means sequences (`serial`, `GENERATED ... AS IDENTITY`,
-  `DEFAULT nextval(...)`) and `DEFAULT now()` are allocated independently per
-  database. The same INSERT applied to N providers yields N different rows;
-  the placement index still reports them all as healthy copies. v0 survives
-  only because the analyzer requires an explicit literal `id` on every
-  INSERT — an implicit, unenforced guard. Non-PK serial columns (an
-  `order_number bigserial` omitted from the column list) already diverge.
-  The fix is central allocation: the gateway intercepts sequence-backed
-  columns at parse time, draws values from a central `mesh_pg_sequences`
-  table, and rewrites the INSERT before buffering; migrations strip
-  SERIAL/nextval defaults from mesh tables so no path can bypass the
-  gateway. Note: this interacts with the UPDATE row-image gap (buffering a
-  full post-image is only safe once no server-side generators remain).
+- ~~Server-generated values diverge across replicas~~ **RESOLVED
+  (04.09.2026).** The gateway is now the sole id/value authority: CREATE
+  TABLE registers column descriptors (`default: SERIAL | UUID | NOW |
+  literal`), and the write path materializes the **full row** at enqueue —
+  serial -> per-column central sequence (`mesh_pg_seq_<table>_<column>`),
+  `gen_random_uuid()` -> ULID, `now()` -> gateway clock. INSERTs without an
+  explicit pk get a gateway-allocated id, and `RETURNING id/...` is
+  synthesized from the buffer before any provider is touched. Propagated
+  DDL is rewritten on providers (`stripServerGenerators` in pg-agent):
+  serial -> plain integer, identity clauses and nextval/uuid/now defaults
+  removed — providers hold zero sequences for mesh tables, so replicas
+  cannot diverge. Client-supplied values always win over defaults.
 - Placement fan-out read consistency: add a monotonic write seq to rows
   and dedupe by max-seq? (Cheap to add now; recommended before v1.)
 - Should `usedStorage`/plan quotas apply to mesh-PG bytes, or stay

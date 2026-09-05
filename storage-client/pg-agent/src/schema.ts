@@ -42,8 +42,9 @@ export function buildSchemaRouter(sql: postgres.Sql) {
           SELECT 1 FROM _mesh_pg_migrations WHERE id = ${migration.id}
         `;
         if (known.length > 0) continue;
+        const ddl = stripServerGenerators(migration.ddl);
         await sql.begin(async (tx) => {
-          await tx.unsafe(migration.ddl);
+          await tx.unsafe(ddl);
           await tx`
             INSERT INTO _mesh_pg_migrations (id, version) VALUES (${migration.id}, ${migration.version})
           `;
@@ -69,4 +70,33 @@ async function currentVersion(sql: postgres.Sql): Promise<number> {
     SELECT value FROM _mesh_pg_meta WHERE key = 'schema_version'
   `;
   return rows.length > 0 ? Number(rows[0].value) : 0;
+}
+/**
+ * Strips server-side generators from propagated DDL. The gateway
+ * materializes every generated value (serial via its central sequence,
+ * gen_random_uuid, now()) before ops reach providers, so a provider that
+ * also ran its own sequence/default would produce diverging replicas.
+ * Providers become dumb row stores for defaults.
+ *
+ * Transformations:
+ *   `bigserial`/`serial`  -> `bigint`/`integer` (no sequence at all)
+ *   DEFAULT nextval(...)  -> removed
+ *   DEFAULT gen_random_uuid() -> removed (gateway supplies)
+ *   DEFAULT now()/CURRENT_TIMESTAMP -> removed (gateway supplies)
+ */
+export function stripServerGenerators(ddl: string): string {
+  return ddl
+    // serial -> plain integer types
+    .replace(/\b(bigserial|serial8)\b/gi, "bigint")
+    .replace(/\b(smallserial|serial2)\b/gi, "smallint")
+    .replace(/\bserial4\b|\bserial(?![0-9a-zA-Z_])/gi, "integer")
+    // GENERATED ... AS IDENTITY -> plain type (keep NOT NULL from the clause)
+    .replace(/\bGENERATED\s+(ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY(\s*\([^)]*\))?/gi, "")
+    // DEFAULT nextval('...') -> drop the DEFAULT clause
+    .replace(/DEFAULT\s+nextval\s*\(\s*'[^']*'\s*(::[^)\s]+)?\s*\)/gi, "")
+    // DEFAULT gen_random_uuid() / uuid_generate_v4()
+    .replace(/DEFAULT\s+(?:pg_catalog\.)?(?:gen_random_uuid|uuid_generate_v4)\s*\(\s*\)/gi, "")
+    // DEFAULT now() / CURRENT_TIMESTAMP / clock_timestamp()
+    .replace(/DEFAULT\s+(?:pg_catalog\.)?(?:now|clock_timestamp)\s*\(\s*\)|DEFAULT\s+CURRENT_TIMESTAMP(\(\d*\))?|DEFAULT\s+'now'::text::timestamp(\s+with\s+time\s+zone)?/gi, "DEFAULT NULL")
+    ;
 }

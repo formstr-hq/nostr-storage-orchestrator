@@ -4,9 +4,14 @@
 //! never silently misroute. Statements inside the subset are forwarded to
 //! providers verbatim.
 
-use sqlparser::ast::{BinaryOperator, DataType, Expr, ObjectName, Query, Statement, TableFactor, Value};
+use sqlparser::ast::{
+    BinaryOperator, ColumnOption, DataType, Expr, GeneratedAs, ObjectName, Query, Statement,
+    TableConstraint, TableFactor, Value,
+};
 use sqlparser::dialect::GenericDialect;
+use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::Token;
 
 use crate::error::{GatewayError, Result};
 
@@ -24,7 +29,18 @@ pub enum StatementKind {
 #[derive(Debug, Clone)]
 pub enum AnalyzedStatement {
     Ddl { kind: StatementKind, table: String, sql: String },
-    Write { kind: StatementKind, table: String, row_id: String, sql: String },
+    Write {
+        kind: StatementKind,
+        table: String,
+        row_id: String,
+        sql: String,
+        /// Row-id placeholder name for extended-protocol writes (`$1`).
+        row_id_placeholder: Option<String>,
+        /// True when the INSERT omits the pk and the gateway must allocate it.
+        generate_row_id: bool,
+        /// Columns the INSERT asked to RETURN, or None when no RETURNING.
+        returning: Option<Vec<String>>,
+    },
     Read { sql: String },
 }
 
@@ -85,27 +101,52 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
                 .columns
                 .iter()
                 .position(|ident| object_name_eq(ident, PK_COLUMN));
-            let value = match pk_index {
+            let pk_value = match pk_index {
                 Some(index) => row.get(index),
                 None => {
                     // INSERT without a column list: first column is the pk.
                     if insert.columns.is_empty() {
                         row.first()
                     } else {
-                        return Err(GatewayError::UnsupportedSql(format!(
-                            "INSERT must include the \"{PK_COLUMN}\" column"
-                        )));
+                        // pk omitted -> gateway allocates it (RETURNING id works).
+                        None
                     }
                 }
             };
-            let row_id = literal_to_string(value.ok_or_else(|| {
-                GatewayError::UnsupportedSql("INSERT is missing a primary-key value".to_string())
-            })?)?;
+            let (row_id, row_id_placeholder, generate_row_id) = match pk_value {
+                Some(Expr::Value(vws)) if matches!(vws.value, Value::Placeholder(_)) => {
+                    let placeholder = match &vws.value {
+                        Value::Placeholder(name) => name.clone(),
+                        _ => unreachable!(),
+                    };
+                    (String::new(), Some(placeholder), false)
+                }
+                Some(value) => {
+                    let row_id = literal_to_string(value)?;
+                    (row_id, None, false)
+                }
+                None => (String::new(), None, true),
+            };
+            let returning = insert.returning.as_ref().map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| match item {
+                        sqlparser::ast::SelectItem::Wildcard(_) => None,
+                        sqlparser::ast::SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                            Some(ident.value.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<String>>()
+            });
             Ok(AnalyzedStatement::Write {
                 kind: StatementKind::Insert,
                 table,
                 row_id,
                 sql: sql.to_string(),
+                row_id_placeholder,
+                generate_row_id,
+                returning,
             })
         }
         Statement::Update(update) => {
@@ -118,6 +159,9 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
                         table,
                         row_id,
                         sql: sql.to_string(),
+                        row_id_placeholder: None,
+                        generate_row_id: false,
+                        returning: None,
                     })
                 }
                 None => Err(GatewayError::WriteRequiresPk(
@@ -135,6 +179,9 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
                         table,
                         row_id,
                         sql: sql.to_string(),
+                        row_id_placeholder: None,
+                        generate_row_id: false,
+                        returning: None,
                     })
                 }
                 None => Err(GatewayError::WriteRequiresPk(
@@ -368,7 +415,11 @@ fn normalize_parse_error(error: &sqlparser::parser::ParserError) -> String {
 }
 
 /// Columns of a CREATE TABLE, in declaration order, as the canonical JSON
-/// shape stored in the registry: [{name, type}].
+/// shape stored in the registry:
+///   [{name, type, default: "SERIAL" | "UUID" | "NOW" | <literal-json> | null,
+///     notNull: bool, primaryKey: bool}]
+/// `default` captures exactly the server-generated values the gateway must
+/// materialize so every provider replica receives identical rows.
 pub fn extract_create_columns(sql: &str) -> Result<serde_json::Value> {
     let statements = Parser::parse_sql(&GenericDialect {}, sql)
         .map_err(|error| GatewayError::UnsupportedSql(normalize_parse_error(&error)))?;
@@ -378,16 +429,119 @@ pub fn extract_create_columns(sql: &str) -> Result<serde_json::Value> {
                 .columns
                 .iter()
                 .map(|column| {
+                    let mut default = serde_json::Value::Null;
+                    let mut not_null = false;
+                    let mut primary_key = false;
+                    for option in &column.options {
+                        match &option.option {
+                            ColumnOption::Default(expr) => {
+                                default = default_to_descriptor(&column.data_type, expr);
+                            }
+                            ColumnOption::NotNull => not_null = true,
+                            ColumnOption::PrimaryKey(_) => primary_key = true,
+                            // GENERATED ... AS IDENTITY / BIGSERIAL-family handled via
+                            // type+default; explicit identity options count as SERIAL.
+                            ColumnOption::DialectSpecific(tokens) => {
+                                if tokens.iter().any(|token| matches!(token, Token::Word(word) if word.keyword == Keyword::AUTOINCREMENT || word.keyword == Keyword::AUTO_INCREMENT)) {
+                                    default = serde_json::json!("SERIAL");
+                                }
+                            }
+                            ColumnOption::Generated { generated_as, sequence_options, .. } => {
+                                // `GENERATED ALWAYS/BY DEFAULT AS IDENTITY` is
+                                // sequence-backed; sequence_options present marks it.
+                                if matches!(generated_as, GeneratedAs::Always | GeneratedAs::ByDefault)
+                                    && sequence_options.is_some()
+                                {
+                                    default = serde_json::json!("SERIAL");
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if describe_column_type(&column.data_type).to_ascii_lowercase().ends_with("serial") {
+                        default = serde_json::json!("SERIAL");
+                    }
                     serde_json::json!({
                         "name": column.name.value,
                         "type": describe_column_type(&column.data_type),
+                        "default": default,
+                        "notNull": not_null,
+                        "primaryKey": primary_key,
                     })
                 })
                 .collect();
-            return Ok(serde_json::Value::Array(columns));
+            // Table-level PRIMARY KEY constraints mark the pk column too.
+            let mut columns = serde_json::Value::Array(columns);
+            for constraint in &create.constraints {
+                if let TableConstraint::PrimaryKey(pk) = constraint {
+                    for index_column in &pk.columns {
+                        // IndexColumn wraps an OrderByExpr whose expr is the Ident.
+                        let name = match &index_column.column.expr {
+                            Expr::Identifier(ident) => ident.value.clone(),
+                            _ => continue,
+                        };
+                        if let Some(entry) = columns
+                            .as_array_mut()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|column| column["name"] == name)
+                        {
+                            entry["primaryKey"] = serde_json::json!(true);
+                        }
+                    }
+                }
+            }
+            return Ok(columns);
         }
     }
     Err(GatewayError::UnsupportedSql("could not re-parse CREATE TABLE".to_string()))
+}
+
+/// Classifies a DEFAULT expression into a gateway-materializable descriptor.
+/// Returns "SERIAL" (central sequence), "UUID" (gateway uuid), "NOW"
+/// (gateway clock), a JSON literal, or null when unsupported (the DDL is
+/// rejected upstream if required).
+fn default_to_descriptor(data_type: &DataType, expr: &Expr) -> serde_json::Value {
+    let type_text = describe_column_type(data_type).to_ascii_lowercase();
+    match expr {
+        Expr::Function(function) => {
+            let name = function
+                .name
+                .0
+                .last()
+                .and_then(|part| part.as_ident())
+                .map(|ident| ident.value.to_ascii_lowercase());
+            match name.as_deref() {
+                Some("gen_random_uuid") | Some("uuid_generate_v4") => serde_json::json!("UUID"),
+                Some("now") | Some("current_timestamp") | Some("clock_timestamp") => {
+                    serde_json::json!("NOW")
+                }
+                _ => serde_json::Value::Null,
+            }
+        }
+        Expr::Value(vws) => match &vws.value {
+            Value::Number(number, _) => {
+                // A numeric literal default on a serial-typed column is a seed.
+                if type_text.ends_with("serial") {
+                    serde_json::json!("SERIAL")
+                } else {
+                    serde_json::json!(number.clone())
+                }
+            }
+            Value::SingleQuotedString(text) => serde_json::json!(text.clone()),
+            Value::Null => serde_json::Value::Null,
+            Value::Boolean(flag) => serde_json::json!(flag),
+            _ => serde_json::Value::Null,
+        },
+        Expr::Cast { .. } | Expr::Nested(_) => serde_json::Value::Null,
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// True when the column type is sequence-backed.
+pub fn is_serial_type(type_text: &str) -> bool {
+    let lower = type_text.to_ascii_lowercase();
+    lower == "serial" || lower == "smallserial" || lower == "bigserial"
 }
 
 fn describe_column_type(data_type: &DataType) -> String {
