@@ -473,6 +473,12 @@ impl GatewayHandlers {
         } else {
             inline_params(sql, params)?
         };
+        // Apply to the authoritative buffer (orchestrator PG) too. Otherwise a
+        // broad UPDATE/DELETE only lands on providers and the buffer diverges:
+        // stale rows linger, re-inserts hit duplicate-key, and the
+        // read-your-writes overlay can resurrect deleted rows. Triggers fire
+        // here as well, keeping derived tables (event_tags) consistent.
+        self.store.execute_capture(&effective_sql).await?;
         for provider in &providers {
             let op = crate::provider::WriteOpPayload {
                 id: ulid::Ulid::new().to_string(),

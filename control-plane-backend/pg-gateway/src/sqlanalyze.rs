@@ -328,9 +328,15 @@ fn analyze_select(query: Query, sql: &str) -> Result<AnalyzedStatement> {
         // SELECT without FROM (e.g. `SELECT 1`): constant, no providers.
         return Ok(AnalyzedStatement::Read { sql: sql.to_string() });
     }
-    if body.from.len() != 1 || !body.from[0].joins.is_empty() {
+    // A single FROM entry may carry JOINs: they are pushed down to each
+    // provider and executed locally. This is correct only for co-located
+    // tables — i.e. a co-location group where matching rows always land on the
+    // same provider (e.g. a trigger-derived table like nostream's event_tags,
+    // which is created locally from the events rows a provider holds). Comma
+    // (cross-product) FROM lists are still rejected.
+    if body.from.len() != 1 {
         return Err(GatewayError::UnsupportedSql(
-            "exactly one plain table (no JOINs) is supported".to_string(),
+            "multiple FROM tables (comma joins) are not supported; use explicit JOIN".to_string(),
         ));
     }
     // Validate the projection so we can reject expressions the merge layer
@@ -347,11 +353,9 @@ fn analyze_select(query: Query, sql: &str) -> Result<AnalyzedStatement> {
                     ));
                 }
             }
-            sqlparser::ast::SelectItem::QualifiedWildcard(_, _) => {
-                return Err(GatewayError::UnsupportedSql(
-                    "qualified wildcards are not supported".to_string(),
-                ));
-            }
+            // `events.*` — the provider expands it to the table's columns;
+            // the gateway reads the real columns back via query_with_columns.
+            sqlparser::ast::SelectItem::QualifiedWildcard(_, _) => {}
         }
     }
     let _ = extract_table_factor_name(&body.from[0].relation)?;
@@ -873,6 +877,23 @@ fn placeholder_in_equality(expr: &Expr) -> Option<String> {
 }
 
 /// Table name of a SELECT, when it is a plain single-table read.
+/// True when the SELECT's FROM carries JOINs. The read-your-writes buffer
+/// overlay keys on the base table's pk and cannot re-evaluate join predicates
+/// against pending rows, so it is skipped for joins.
+pub fn has_join(sql: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&GenericDialect {}, sql) else {
+        return false;
+    };
+    for statement in statements {
+        if let Statement::Query(query) = statement {
+            if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
+                return select.from.iter().any(|from| !from.joins.is_empty());
+            }
+        }
+    }
+    false
+}
+
 pub fn read_table_name(sql: &str) -> Option<String> {
     let statements = Parser::parse_sql(&GenericDialect {}, sql).ok()?;
     for statement in statements {

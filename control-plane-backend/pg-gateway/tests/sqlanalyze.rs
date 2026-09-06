@@ -71,7 +71,7 @@ fn rejects_multi_row_insert_and_conflict() {
 }
 
 #[test]
-fn reads_classify_and_rejects_joins_and_aggregates() {
+fn reads_allow_colocated_joins_reject_aggregates() {
     assert!(matches!(
         pg_gateway::sqlanalyze::analyze("SELECT * FROM notes"),
         Ok(AnalyzedStatement::Read { .. })
@@ -80,7 +80,14 @@ fn reads_classify_and_rejects_joins_and_aggregates() {
         pg_gateway::sqlanalyze::analyze("SELECT body FROM notes WHERE id = 'x'"),
         Ok(AnalyzedStatement::Read { .. })
     ));
-    assert!(pg_gateway::sqlanalyze::analyze("SELECT * FROM a JOIN b ON a.id = b.id").is_err());
+    // Explicit JOINs are pushed down to co-located providers (allowed).
+    assert!(matches!(
+        pg_gateway::sqlanalyze::analyze("SELECT a.* FROM a JOIN b ON a.id = b.id"),
+        Ok(AnalyzedStatement::Read { .. })
+    ));
+    assert!(pg_gateway::sqlanalyze::has_join("SELECT a.* FROM a JOIN b ON a.id = b.id"));
+    // Comma / cross-product FROM lists stay rejected.
+    assert!(pg_gateway::sqlanalyze::analyze("SELECT * FROM a, b WHERE a.id = b.id").is_err());
     assert!(pg_gateway::sqlanalyze::analyze("SELECT COUNT(*) FROM notes").is_err());
     assert!(pg_gateway::sqlanalyze::analyze("SELECT DISTINCT id FROM notes").is_err());
 }
