@@ -127,7 +127,13 @@ impl ReadEngine {
                 (npub, result)
             }));
         }
+        // Dedup by pk *when the projection includes it* — a JOIN's `events.*`
+        // carries the pk, so per-tag duplicate rows collapse. When the pk is not
+        // projected (e.g. `SELECT event_content`) we cannot dedup, so rows are
+        // kept as-is; that is correct under exclusive placement because a row
+        // lives on exactly one node, so there are no cross-node duplicates.
         let mut merged_index: HashMap<String, Value> = HashMap::new();
+        let mut extra_rows: Vec<Value> = Vec::new();
         let mut answered = 0usize;
         let mut columns_out: Vec<crate::provider::QueryColumn> = Vec::new();
         for handle in handles {
@@ -138,10 +144,12 @@ impl ReadEngine {
                         columns_out = columns;
                     }
                     for row in rows {
-                        let pk = row.get(pk_column).and_then(value_as_string).unwrap_or_default();
-                        merged_index
-                            .entry(pk)
-                            .or_insert(row);
+                        match row.get(pk_column).and_then(value_as_string) {
+                            Some(pk) => {
+                                merged_index.entry(pk).or_insert(row);
+                            }
+                            None => extra_rows.push(row),
+                        }
                     }
                 }
                 Ok((npub, Err(error))) => {
@@ -156,6 +164,7 @@ impl ReadEngine {
             return Err(GatewayError::NoProviders);
         }
         let mut rows: Vec<Value> = merged_index.into_values().collect();
+        rows.extend(extra_rows);
         // Buffer overlay: pending rows shadow provider rows. Skipped for joins —
         // the overlay keys on the base table's pk and cannot re-check the join
         // predicate against a pending row (would surface non-matching rows).

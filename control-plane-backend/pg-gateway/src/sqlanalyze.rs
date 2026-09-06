@@ -370,9 +370,17 @@ fn expr_has_aggregate(expr: &Expr) -> bool {
                 .0
                 .last()
                 .and_then(|part| part.as_ident().map(|ident| ident.value.to_ascii_lowercase()));
+            // Reject aggregates outright until the distributed-aggregation
+            // update lands — a naive fan-out merge would return wrong results
+            // (notably string_agg/array_agg silently truncating to one node).
             matches!(
                 name.as_deref(),
                 Some("count") | Some("sum") | Some("avg") | Some("min") | Some("max")
+                    | Some("string_agg") | Some("array_agg") | Some("json_agg")
+                    | Some("jsonb_agg") | Some("bool_and") | Some("bool_or")
+                    | Some("every") | Some("bit_and") | Some("bit_or")
+                    | Some("stddev") | Some("stddev_pop") | Some("stddev_samp")
+                    | Some("variance") | Some("var_pop") | Some("var_samp")
             )
         }
         Expr::BinaryOp { left, right, .. } => expr_has_aggregate(left) || expr_has_aggregate(right),

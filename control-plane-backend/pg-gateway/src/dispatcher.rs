@@ -87,38 +87,25 @@ impl Dispatcher {
 
         let acked_ids: Vec<String> = Vec::new();
         for op in &ops {
-            let Some(table) = tables.get(&op.table_name).cloned() else { continue };
-            let target_count = (table.replica_count.max(1) as usize).max(self.default_replicas);
-            let target_count = target_count.max(1);
-            // Target set: already-placed replicas (that are still active) plus
-            // enough fresh providers to reach the replica target.
-            let existing = self.store.get_placement(&op.table_name, &op.row_id).await?;
-            let mut targets: Vec<String> = Vec::new();
-            if let Some((replicas, _)) = existing {
-                for replica in replicas {
-                    if targets.len() >= target_count {
-                        break;
-                    }
-                    if providers.iter().any(|provider| provider.npub == replica) {
-                        targets.push(replica);
-                    }
+            let Some(_table) = tables.get(&op.table_name).cloned() else { continue };
+            // Exclusive database-node placement: one owning node per row, sticky
+            // if already placed else chosen by hash(pk). Matches the gateway.
+            let existing = self
+                .store
+                .get_placement(&op.table_name, &op.row_id)
+                .await?
+                .map(|(replicas, _)| replicas)
+                .unwrap_or_default();
+            let targets: Vec<String> = match crate::registry::select_owner(&op.row_id, &providers, &existing) {
+                Some(owner) => vec![owner],
+                None => {
+                    // Roster is empty mid-flight; back off this op.
+                    self.store
+                        .record_write_failure(&op.id, "no active mesh-PG providers")
+                        .await?;
+                    continue;
                 }
-            }
-            for provider in &providers {
-                if targets.len() >= target_count {
-                    break;
-                }
-                if !targets.contains(&provider.npub) {
-                    targets.push(provider.npub.clone());
-                }
-            }
-            if targets.is_empty() {
-                // Roster is empty mid-flight; back off this op.
-                self.store
-                    .record_write_failure(&op.id, "no active mesh-PG providers")
-                    .await?;
-                continue;
-            }
+            };
 
             let payload = build_op_payload(&op);
             let request = ApplyRequest { ops: vec![payload] };
@@ -142,7 +129,7 @@ impl Dispatcher {
                 }
             }
 
-            if acked.len() >= target_count {
+            if acked.len() >= targets.len() {
                 self.store
                     .upsert_placement(&op.table_name, &op.row_id, &acked, "ACTIVE")
                     .await?;

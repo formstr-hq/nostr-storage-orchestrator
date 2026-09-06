@@ -312,26 +312,19 @@ impl GatewayHandlers {
                 };
 
                 let providers = self.registry.providers();
-                let target_count = (table_def.replica_count.max(1) as usize).max(1);
-                // Placement: reuse existing (still-active) replicas, top up
-                // with fresh providers. Mirrors the dispatcher's policy.
-                let mut replicas = self
+                // Exclusive database-node placement: exactly one node owns the
+                // row, chosen by hash(pk) for an even spread and sticky-reused
+                // if the row is already placed. Mirrors the dispatcher.
+                let existing = self
                     .store
                     .get_placement(&table, &row_id)
                     .await?
                     .map(|(replicas, _)| replicas)
                     .unwrap_or_default();
-                for provider in &providers {
-                    if replicas.len() >= target_count {
-                        break;
-                    }
-                    if !replicas.contains(&provider.npub) {
-                        replicas.push(provider.npub.clone());
-                    }
-                }
-                if replicas.is_empty() {
-                    return Err(GatewayError::NoProviders);
-                }
+                let replicas = match crate::registry::select_owner(&row_id, &providers, &existing) {
+                    Some(owner) => vec![owner],
+                    None => return Err(GatewayError::NoProviders),
+                };
                 let op_name = match kind {
                     StatementKind::Insert => "INSERT",
                     StatementKind::Update => "UPDATE",

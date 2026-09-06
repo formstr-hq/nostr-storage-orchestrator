@@ -66,7 +66,9 @@ services:
       POSTGRES_USER: orchestrator
       POSTGRES_PASSWORD: orchestrator
       POSTGRES_DB: orchestrator
-      PG_DEFAULT_REPLICA_COUNT: "2"
+      # Exclusive database-node mode: each row lands on exactly one node
+      # (chosen by hash(pk)); this value is no longer used for placement.
+      PG_DEFAULT_REPLICA_COUNT: "1"
       PG_GATEWAY_PASSWORD: "x"
       PG_ENABLE_BROAD_WRITES: "1"
     ports:
