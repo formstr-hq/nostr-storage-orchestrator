@@ -55,6 +55,17 @@ function decodeValue(value: unknown, dataType: string | undefined): unknown {
       return bytes;
     }
   }
+  // json/jsonb arrive as their JSON *text* (the gateway captures rows via
+  // simple_query). Parse so the driver re-encodes once — otherwise the string
+  // is double-encoded into a jsonb scalar and consumers like nostream's
+  // process_event_tags trigger fail with "cannot extract elements from a scalar".
+  if ((dataType === "jsonb" || dataType === "json") && typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
   return value;
 }
 
@@ -71,6 +82,13 @@ export function buildApplyRouter(sql: postgres.Sql) {
 
     try {
       await sql.begin(async (tx) => {
+        // A fresh provider may receive a RAW DDL op (e.g. CREATE EXTENSION,
+        // migration #1) before any /pg/schema call has bootstrapped the
+        // idempotency table. Ensure it exists so the gate below never faults.
+        await tx`CREATE TABLE IF NOT EXISTS _mesh_pg_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )`;
         for (const op of ops) {
           const table = op.table;
           // Idempotency gate: skip ops already applied.

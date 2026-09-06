@@ -992,16 +992,16 @@ fn payload_row_to_wire(payload: &Option<Value>, table: &crate::central::MeshTabl
 fn is_catalog_statement(sql: &str) -> bool {
     let lower = sql.to_ascii_lowercase();
     let trimmed = lower.trim().trim_end_matches(';').trim();
-    // Catalog-schema references, ORM bookkeeping tables, and extension DDL
-    // (uuid-ossp etc.) are catalog-domain: they run on the local catalog
-    // database only.
-    trimmed.starts_with("create extension")
-        || trimmed.starts_with("drop extension")
-        || trimmed.starts_with("create function")
-        || trimmed.starts_with("create or replace function")
-        || trimmed.starts_with("drop function")
-        // knex bookkeeping DDL: creates/drops of its own bookkeeping tables.
-        || ((trimmed.starts_with("create table")
+    // Only genuine gateway-internal bookkeeping is catalog-only: knex's
+    // migration tables and pg_catalog/information_schema introspection.
+    // Extensions, functions, and triggers all operate on mesh tables and MUST
+    // live on every provider — providers run real SQL (column defaults like
+    // uuid_generate_v4(), and triggers that derive dependent rows on apply,
+    // e.g. nostream's process_event_tags -> event_tags). Routing any of those
+    // catalog-only left providers unable to apply rows. They now fall through
+    // to the verbatim DDL path (fallback_ddl -> all providers + catalog mirror).
+    // knex bookkeeping DDL: creates/drops of its own bookkeeping tables.
+    ((trimmed.starts_with("create table")
             || trimmed.starts_with("drop table")
             || trimmed.starts_with("create index")
             || trimmed.starts_with("create unique index"))

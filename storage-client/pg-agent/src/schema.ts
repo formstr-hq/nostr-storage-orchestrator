@@ -94,8 +94,11 @@ export function stripServerGenerators(ddl: string): string {
     .replace(/\bGENERATED\s+(ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY(\s*\([^)]*\))?/gi, "")
     // DEFAULT nextval('...') -> drop the DEFAULT clause
     .replace(/DEFAULT\s+nextval\s*\(\s*'[^']*'\s*(::[^)\s]+)?\s*\)/gi, "")
-    // DEFAULT gen_random_uuid() / uuid_generate_v4()
-    .replace(/DEFAULT\s+(?:pg_catalog\.)?(?:gen_random_uuid|uuid_generate_v4)\s*\(\s*\)/gi, "")
+    // NOTE: uuid defaults (gen_random_uuid / uuid_generate_v4) are intentionally
+    // KEPT. The gateway supplies full rows (RETURNING *), so the default never
+    // fires for gateway-applied rows; but locally-derived rows — e.g. those a
+    // propagated trigger inserts (nostream's event_tags) — need it to generate
+    // a local pk. A random uuid per provider is fine for such derived tables.
     // DEFAULT now() / CURRENT_TIMESTAMP / clock_timestamp()
     .replace(/DEFAULT\s+(?:pg_catalog\.)?(?:now|clock_timestamp)\s*\(\s*\)|DEFAULT\s+CURRENT_TIMESTAMP(\(\d*\))?|DEFAULT\s+'now'::text::timestamp(\s+with\s+time\s+zone)?/gi, "DEFAULT NULL")
     ;
