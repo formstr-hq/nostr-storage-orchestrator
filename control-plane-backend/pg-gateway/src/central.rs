@@ -446,6 +446,38 @@ impl CentralStore {
         Ok(())
     }
 
+    /// Executes a write statement against the orchestrator PG — which owns the
+    /// mesh tables (mirrored DDL) — and returns the affected rows as JSON
+    /// objects, every value text-encoded. Postgres resolves ids, defaults,
+    /// sequences and now(), so the captured row is the authoritative image
+    /// replicated to every provider. Replaces gateway-side row materialization.
+    pub async fn execute_capture(&self, sql: &str) -> Result<Vec<Value>> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("central pg client is initialized");
+        let messages = client
+            .simple_query(sql)
+            .await
+            .map_err(|error| GatewayError::central(format!("central execute: {error:?}")))?;
+        let mut out: Vec<Value> = Vec::new();
+        for message in messages {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = message {
+                let mut object = serde_json::Map::new();
+                for index in 0..row.columns().len() {
+                    let name = row.columns()[index].name();
+                    let value = match row.get(index) {
+                        Some(text) => Value::String(text.to_owned()),
+                        None => Value::Null,
+                    };
+                    object.insert(name.to_string(), value);
+                }
+                out.push(Value::Object(object));
+            }
+        }
+        Ok(out)
+    }
+
     // ── placement index ─────────────────────────────────────────────────────
 
     pub async fn upsert_placement(
@@ -538,37 +570,6 @@ impl CentralStore {
             .collect())
     }
 
-    // ── central id allocation ───────────────────────────────────────────────
-
-    /// Allocates the next value of a per-table sequence (bigserial-style).
-    /// Sequences live in the orchestrator PG so every replica receives the
-    /// same value — providers never run their own generators for mesh tables.
-    pub async fn next_sequence_value(&self, table_name: &str, column_name: &str) -> Result<i64> {
-        let mut client = self.connect().await?;
-        let client = client
-            .as_mut()
-            .expect("central pg client is initialized");
-        // Identifier must be inlined (sequence names are dynamic), but the
-        // table name was validated as an identifier by the analyzer, so this
-        // is safe.
-        let sequence: String = format!("mesh_pg_seq_{table_name}_{column_name}")
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        client
-            .execute(
-                &format!("CREATE SEQUENCE IF NOT EXISTS {sequence}"),
-                &[],
-            )
-            .await
-            .map_err(|error| GatewayError::central(format!("sequence create: {error:?}")))?;
-        let sql = format!("SELECT nextval('{sequence}')");
-        let row = client
-            .query_one(&sql, &[])
-            .await
-            .map_err(|error| GatewayError::central(format!("sequence alloc: {error:?}")))?;
-        Ok(row.get::<_, i64>(0))
-    }
 }
 
 /// Shadow catalog: mirrors mesh DDL on a real local schema so that

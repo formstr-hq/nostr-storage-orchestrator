@@ -972,92 +972,19 @@ pub fn write_or_read_table(sql: &str) -> Option<String> {
     }
 }
 
-/// Full row payload for a single-tuple INSERT, as {column: value} JSON with
-/// values wire-serialized as strings (gateway serves them back as TEXT).
-pub fn insert_row_payload(sql: &str) -> Result<serde_json::Value> {
-    let statements = Parser::parse_sql(&GenericDialect {}, sql)
+/// Rewrites an INSERT to force `RETURNING *`, so executing it against the
+/// authoritative Postgres yields the complete, resolved row image. The gateway
+/// no longer reconstructs rows from the statement — Postgres does, which is why
+/// column mapping (and its col0/col1 fallback) is gone.
+pub fn insert_capture_sql(sql: &str) -> Result<String> {
+    let mut statements = Parser::parse_sql(&GenericDialect {}, sql)
         .map_err(|error| GatewayError::UnsupportedSql(normalize_parse_error(&error)))?;
-    for statement in statements {
-        if let Statement::Insert(insert) = statement {
-            let source = insert
-                .source
-                .ok_or_else(|| GatewayError::UnsupportedSql("INSERT ... VALUES is required".to_string()))?;
-            let rows = match source.body.as_ref() {
-                sqlparser::ast::SetExpr::Values(values) => &values.rows,
-                _ => {
-                    return Err(GatewayError::UnsupportedSql(
-                        "INSERT with plain VALUES is required".to_string(),
-                    ))
-                }
-            };
-            let row = &rows[0];
-            let mut payload = serde_json::Map::new();
-            if insert.columns.is_empty() {
-                for (index, value) in row.iter().enumerate() {
-                    payload.insert(format!("col{index}"), json_value(value));
-                }
-            } else {
-                for (index, name) in insert.columns.iter().enumerate() {
-                    let value = row
-                        .get(index)
-                        .ok_or_else(|| GatewayError::UnsupportedSql("INSERT tuple width mismatch".to_string()))?;
-                    payload.insert(object_name_string(name), json_value(value));
-                }
-            }
-            return Ok(serde_json::Value::Object(payload));
-        }
-    }
-    Err(GatewayError::UnsupportedSql("could not re-parse INSERT".to_string()))
+    let Some(Statement::Insert(insert)) = statements.get_mut(0) else {
+        return Err(GatewayError::UnsupportedSql("expected INSERT".to_string()));
+    };
+    insert.returning = Some(vec![sqlparser::ast::SelectItem::Wildcard(
+        sqlparser::ast::WildcardAdditionalOptions::default(),
+    )]);
+    Ok(statements[0].to_string())
 }
 
-fn object_name_string(name: &ObjectName) -> String {
-    name.0
-        .last()
-        .and_then(|part| part.as_ident().map(|ident| ident.value.clone()))
-        .unwrap_or_default()
-}
-
-fn json_value(expr: &Expr) -> serde_json::Value {
-    match expr {
-        Expr::Value(vws) => match &vws.value {
-            Value::Null => serde_json::Value::Null,
-            Value::Boolean(flag) => serde_json::Value::Bool(*flag),
-            Value::Number(number, _) => {
-                serde_json::Value::Number(number.parse().unwrap_or(serde_json::Number::from(0)))
-            }
-            Value::SingleQuotedString(text) | Value::DoubleQuotedString(text) => {
-                serde_json::Value::String(text.clone())
-            }
-            // E'...' escape strings: keep the *raw* text (unescaped form the
-            // parser stored); bytea values ride as hex without the prefix.
-            Value::EscapedStringLiteral(text) => serde_json::Value::String(text.clone()),
-            other => serde_json::Value::String(other.to_string()),
-        },
-        // Unwrap `decode('<hex>','hex')::bytea` from param inlining: the
-        // payload stores the hex text; pg-agent writes it as a bytea value.
-        Expr::Cast { expr: inner, .. } => json_value(inner),
-        Expr::Function(function) => {
-            let is_decode = function
-                .name
-                .0
-                .last()
-                .and_then(|part| part.as_ident())
-                .map(|ident| ident.value.eq_ignore_ascii_case("decode"))
-                .unwrap_or(false);
-            if is_decode {
-                if let sqlparser::ast::FunctionArguments::List(list) = &function.args {
-                    if let Some(sqlparser::ast::FunctionArg::Unnamed(
-                        sqlparser::ast::FunctionArgExpr::Expr(Expr::Value(vws)),
-                    )) = list.args.first()
-                    {
-                        if let Value::SingleQuotedString(hex) = &vws.value {
-                            return serde_json::Value::String(hex.clone());
-                        }
-                    }
-                }
-            }
-            serde_json::Value::String(expr.to_string())
-        },
-        _ => serde_json::Value::String(expr.to_string()),
-    }
-}

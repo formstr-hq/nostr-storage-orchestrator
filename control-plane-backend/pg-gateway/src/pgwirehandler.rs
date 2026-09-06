@@ -272,33 +272,36 @@ impl GatewayHandlers {
                 // materialization, placement key, conflict target, reads.
                 let pk_name = sqlanalyze::pk_column_of(&table_def);
 
-                // Build the full row image (gateway-materialized values):
-                // supplied columns from the statement, generated columns from
-                // the central allocator. This is what makes every replica
-                // receive an identical row.
-                let materialized = match kind {
+                // Authoritative execution: run the INSERT against the
+                // orchestrator PG, which owns the mesh tables (mirrored DDL) and
+                // resolves ids/defaults/sequences/now(). The returned row is the
+                // image replicated verbatim to every provider — no gateway-side
+                // row materialization, no column mapping.
+                let captured = match kind {
                     StatementKind::Insert => {
-                        Some(
-                            materialize_insert_row(
-                                sql.as_str(),
-                                &table_def,
-                                generate_row_id && !is_bound_placeholder,
-                                &row_id,
-                                self.store.as_ref(),
-                            )
-                            .await?,
-                        )
+                        if is_bound_placeholder {
+                            return Err(GatewayError::UnsupportedSql(
+                                "bound-parameter writes are not supported yet; inline the values".to_string(),
+                            ));
+                        }
+                        let capture_sql = sqlanalyze::insert_capture_sql(sql.as_str())?;
+                        let mut rows = self.store.execute_capture(&capture_sql).await?;
+                        if rows.is_empty() {
+                            // ON CONFLICT DO NOTHING and friends: nothing written.
+                            return Ok(Outcome::Command("INSERT".to_string(), 0));
+                        }
+                        Some(rows.remove(0))
                     }
                     _ => None,
                 };
-                let row_id = match (&materialized, generate_row_id, is_bound_placeholder) {
-                    (Some(row), true, false) => row
+                let row_id = match &captured {
+                    Some(row) => row
                         .get(&pk_name)
                         .and_then(value_to_wire_text)
                         .ok_or_else(|| GatewayError::UnsupportedSql(format!(
                             "table has no primary-key column; expected \"{pk_name}\""
                         )))?,
-                    _ => {
+                    None => {
                         if is_bound_placeholder {
                             return Err(GatewayError::UnsupportedSql(
                                 "bound-parameter writes are not supported yet; inline the values".to_string(),
@@ -338,7 +341,7 @@ impl GatewayHandlers {
                 // INSERTs buffer the full materialized row (read-your-writes +
                 // identical replicas); UPDATE/DELETE apply by row id on
                 // providers, so the payload keeps the statement.
-                let mut payload = materialized
+                let mut payload = captured
                     .or_else(|| Some(serde_json::json!({ "sql": sql })));
                 // Carry the conflict target for the provider's upsert.
                 // Default: the table's declared pk — the upsert must key on
@@ -982,89 +985,6 @@ fn payload_row_to_wire(payload: &Option<Value>, table: &crate::central::MeshTabl
                 .and_then(value_to_wire_text)
         })
         .collect()
-}
-
-/// Builds the complete INSERT row: literal columns from the statement plus
-/// gateway-materialized generated columns (SERIAL -> central sequence,
-/// UUID -> uuid v4, NOW -> gateway clock). Providers never generate values
-/// for mesh tables, so every replica receives an identical row.
-async fn materialize_insert_row(
-    sql: &str,
-    table: &crate::central::MeshTable,
-    generate_row_id: bool,
-    row_id: &str,
-    store: &CentralStore,
-) -> Result<Value, GatewayError> {
-    let serde_json::Value::Object(mut row) = sqlanalyze::insert_row_payload(sql)? else {
-        return Err(GatewayError::UnsupportedSql(
-            "INSERT row payload must be an object".to_string(),
-        ));
-    };
-    let columns = table
-        .columns
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    // Supplied-but-generated check: a client-provided value always wins.
-    for column in &columns {
-        let name = column.get("name").and_then(|value| value.as_str()).unwrap_or_default();
-        let default = column.get("default");
-        let is_generated = matches!(
-            default.map(|value| value.as_str().unwrap_or_default()),
-            Some("SERIAL") | Some("UUID") | Some("NOW")
-        );
-        if row.get(name).map(|value| !value.is_null()).unwrap_or(false) {
-            continue;
-        }
-        if !is_generated {
-            // Nullable / literal-default columns stay absent (provider's
-            // column default applies; it is deterministic).
-            continue;
-        }
-        let generated = match default.and_then(|value| value.as_str()).unwrap_or_default() {
-            "SERIAL" => {
-                let value = store
-                    .next_sequence_value(&table.name, name)
-                    .await?;
-                serde_json::json!(value)
-            }
-            "UUID" => serde_json::json!(uuid::Uuid::new_v4().to_string()),
-            "NOW" => serde_json::json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-            _ => continue,
-        };
-        row.insert(name.to_string(), generated);
-    }
-    let pk_column = columns
-        .iter()
-        .find(|column| column.get("primaryKey").and_then(|value| value.as_bool()).unwrap_or(false))
-        .and_then(|column| column.get("name").and_then(|name| name.as_str()))
-        .map(|name| name.to_string());
-    if generate_row_id && pk_column.as_deref().map(|pk| row.get(pk).map(|value| value.is_null()).unwrap_or(true)).unwrap_or(false) {
-        // The pk column itself is generated: allocate per its descriptor
-        // (serial -> sequence, else uuid v4).
-        let pk_name = pk_column.as_deref().unwrap_or(sqlanalyze::PK_COLUMN);
-        let generated = match pk_column
-            .as_deref()
-            .and_then(|name| {
-                columns.iter().find(|column| {
-                    column.get("name").and_then(|value| value.as_str()) == Some(name)
-                })
-            })
-            .and_then(|column| column.get("default"))
-            .map(|value| value.as_str().unwrap_or_default())
-        {
-            Some("SERIAL") => {
-                let value = store
-                    .next_sequence_value(&table.name, pk_name)
-                    .await?;
-                serde_json::json!(value)
-            }
-            _ => serde_json::json!(uuid::Uuid::new_v4().to_string()),
-        };
-        row.insert(pk_name.to_string(), generated);
-    }
-    let _ = row_id;
-    Ok(serde_json::Value::Object(row))
 }
 
 /// True for statements that reference catalogs or ORM bookkeeping tables and

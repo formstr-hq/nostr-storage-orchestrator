@@ -156,12 +156,18 @@ fn pk_placeholder_detection() {
 }
 
 #[test]
-fn insert_payload_extraction() {
-    let payload =
-        pg_gateway::sqlanalyze::insert_row_payload("INSERT INTO notes (id, body) VALUES ('a1', 'hello')")
-            .unwrap();
-    assert_eq!(payload["id"], "a1");
-    assert_eq!(payload["body"], "hello");
+fn insert_capture_forces_returning_star() {
+    // Column-less INSERT: the gateway no longer maps columns — it just forces
+    // RETURNING * and lets the authoritative Postgres produce the row.
+    let sql = pg_gateway::sqlanalyze::insert_capture_sql("INSERT INTO notes VALUES ('a1', 'hello')")
+        .unwrap();
+    assert!(sql.to_uppercase().contains("RETURNING *"), "got: {sql}");
+    // An existing RETURNING clause is normalized to RETURNING *.
+    let sql = pg_gateway::sqlanalyze::insert_capture_sql(
+        "INSERT INTO notes (id, body) VALUES ('a1', 'hello') RETURNING id",
+    )
+    .unwrap();
+    assert!(sql.to_uppercase().contains("RETURNING *"), "got: {sql}");
 }
 
 #[test]
