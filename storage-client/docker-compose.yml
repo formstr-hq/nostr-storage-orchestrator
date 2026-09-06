@@ -14,7 +14,7 @@ services:
       service: nvpn
     environment:
       NVPN_ROLE: client
-      NVPN_MESH_INPUT_PORTS: "3000,7777"
+      NVPN_MESH_INPUT_PORTS: "3000,7777,3300"
     volumes:
       - nvpn_data:/data
 
@@ -29,6 +29,49 @@ services:
     volumes:
       - ${RELAY_DATA_PATH}:/db
     command: ["chown", "-R", "1000:1000", "/db"]
+
+  # Mesh-PG data plane: postgres holds mesh_pg_* tables; pg-agent exposes the
+  # /pg/* API the orchestrator's pg-gateway calls over the NVPN mesh. Postgres
+  # itself is never exposed — only pg-agent's port is.
+  mesh-postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${MESH_PG_USER:-mesh}
+      POSTGRES_PASSWORD: ${MESH_PG_PASSWORD:-mesh}
+      POSTGRES_DB: ${MESH_PG_DATABASE:-mesh}
+    volumes:
+      - ${MESH_PG_DATA_PATH:-./data/mesh-pg}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${MESH_PG_USER:-mesh}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pg-agent:
+    build: ./pg-agent
+    restart: unless-stopped
+    network_mode: "service:nvpn"
+    depends_on:
+      nvpn:
+        condition: service_healthy
+        restart: true
+      mesh-postgres:
+        condition: service_healthy
+    environment:
+      PG_AGENT_PORT: "${PG_AGENT_PORT:-3300}"
+      PG_AGENT_TOKEN: "${PG_AGENT_TOKEN:-}"
+      MESH_PG_HOST: mesh-postgres
+      MESH_PG_PORT: "5432"
+      MESH_PG_DATABASE: ${MESH_PG_DATABASE:-mesh}
+      MESH_PG_USER: ${MESH_PG_USER:-mesh}
+      MESH_PG_PASSWORD: ${MESH_PG_PASSWORD:-mesh}
+    healthcheck:
+      test: ["CMD", "deno", "eval", "const r = await fetch('http://localhost:' + (Deno.env.get('PG_AGENT_PORT') ?? '3300') + '/pg/health'); if (!r.ok) Deno.exit(1);"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   relay:
     # Pinned by digest: upstream publishes only a `latest` tag and retags it,
