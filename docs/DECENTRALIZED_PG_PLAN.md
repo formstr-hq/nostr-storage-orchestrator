@@ -6,7 +6,7 @@ Implementation - 04.09.2026
 
 Implemented (v0):
 
-- `pg-gateway` (Rust, `control-plane-backend/pg-gateway`): pgwire server
+- `pg-gateway` (Rust, `pg-gateway`): pgwire server
   (simple + extended query), SQL subset analysis, write buffer + dispatcher,
   placement index, fan-out read engine, schema manager with late-joiner
   catch-up.

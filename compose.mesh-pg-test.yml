@@ -51,7 +51,7 @@ services:
 
   pg-gateway:
     build:
-      context: ./control-plane-backend/pg-gateway
+      context: ./pg-gateway
     container_name: test_pg_gateway
     depends_on:
       postgres:
