@@ -44,6 +44,13 @@ impl SchemaManager {
                 tracing::info!("registered mesh table {table}");
             }
             StatementKind::Alter | StatementKind::Drop => {
+                // Keep the registry descriptor in sync with ADD COLUMNs:
+                // describe builds RowDescription from it, so a stale
+                // descriptor desyncs column counts on the wire.
+                let added = sqlanalyze::extract_add_columns(sql)?;
+                if !added.is_empty() {
+                    self.store.add_table_columns(table, &added).await?;
+                }
                 // Bump the registry version with a new PENDING migration.
                 self.store.append_migration(sql, &migration_id).await?;
             }

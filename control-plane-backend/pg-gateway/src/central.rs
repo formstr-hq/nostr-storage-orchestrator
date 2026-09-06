@@ -206,6 +206,55 @@ impl CentralStore {
         Ok(())
     }
 
+    /// Appends ADD COLUMN descriptors to a registered table's columns.
+    /// Keeps the registry descriptor in sync with propagated ALTERs —
+    /// describe/RowDescription are built from it, so a stale descriptor
+    /// desyncs column counts (observed with node-pg).
+    pub async fn add_table_columns(&self, name: &str, added: &[Value]) -> Result<()> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("central pg client is initialized");
+        let row = client
+            .query_opt(
+                "SELECT columns FROM pg_table WHERE name = $1 FOR UPDATE",
+                &[&name],
+            )
+            .await
+            .map_err(|error| GatewayError::central(format!("{error:?}")))?;
+        let Some(row) = row else {
+            return Err(GatewayError::UnknownTable(name.to_string()));
+        };
+        let mut columns: Value = row.get("columns");
+        if let serde_json::Value::Array(ref mut array) = columns {
+            for column in added {
+                let name = column
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if array.iter().any(|existing| {
+                    existing
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.eq_ignore_ascii_case(&name))
+                        .unwrap_or(false)
+                }) {
+                    continue;
+                }
+                array.push(column.clone());
+            }
+        }
+        client
+            .execute(
+                "UPDATE pg_table SET columns = $2, version = version + 1, \"updatedAt\" = now() WHERE name = $1",
+                &[&name, &columns],
+            )
+            .await
+            .map_err(|error| GatewayError::central(format!("{error:?}")))?;
+        Ok(())
+    }
+
     pub async fn pending_migrations(&self) -> Result<Vec<PendingMigration>> {
         let mut client = self.connect().await?;
         let client = client

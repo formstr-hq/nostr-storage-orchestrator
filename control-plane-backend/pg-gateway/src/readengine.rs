@@ -11,7 +11,11 @@ use crate::central::{CentralStore, MeshTable};
 use crate::error::{GatewayError, Result};
 use crate::provider::ProviderClient;
 use crate::registry::ProviderRegistry;
-use crate::sqlanalyze::PK_COLUMN;
+
+/// Per-provider read timeout: a slow/hung provider drops out of a fan-out
+/// (the query returns partial) instead of stalling the client. Point reads
+/// fall through to the next replica on timeout.
+const PROVIDER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct ReadEngine {
     store: Arc<CentralStore>,
@@ -40,15 +44,15 @@ impl ReadEngine {
             .ok_or_else(|| GatewayError::UnknownTable(name.to_string()))
     }
 
-    /// Executes a read. `row_id` is Some for point queries (WHERE id = ...).
-    pub async fn execute(&self, sql: &str, row_id: Option<&str>) -> Result<ReadResult> {
+    /// Executes a read. `row_id` is Some for point queries (WHERE pk = ...).
+    pub async fn execute(&self, sql: &str, row_id: Option<&str>, pk_column: &str) -> Result<ReadResult> {
         match row_id {
-            Some(row_id) => self.point_read(sql, row_id).await,
-            None => self.fanout_read(sql).await,
+            Some(row_id) => self.point_read(sql, row_id, pk_column).await,
+            None => self.fanout_read(sql, pk_column).await,
         }
     }
 
-    pub async fn point_read(&self, sql: &str, row_id: &str) -> Result<ReadResult> {
+    pub async fn point_read(&self, sql: &str, row_id: &str, pk_column: &str) -> Result<ReadResult> {
         // The read-your-writes overlay: a pending INSERT/UPDATE in the buffer
         // is authoritative until the dispatcher flushes it.
         let table_name = sql_table_name(sql)?;
@@ -60,13 +64,12 @@ impl ReadEngine {
         let Some((replicas, _)) = self.store.get_placement(&table_name, row_id).await? else {
             // Row never placed: fall through to a fan-out read, which also
             // covers tables whose placement entries predate this gateway.
-            let result = self.fanout_read(sql).await?;
-            let pk = PK_COLUMN;
+            let result = self.fanout_read(sql, pk_column).await?;
             let rows = result
                 .rows
                 .into_iter()
                 .filter(|row| {
-                    row.get(pk).and_then(value_as_string).as_deref() == Some(row_id)
+                    row.get(pk_column).and_then(value_as_string).as_deref() == Some(row_id)
                 })
                 .collect();
             return Ok(ReadResult { rows, partial: result.partial, columns: result.columns });
@@ -76,25 +79,33 @@ impl ReadEngine {
             let Some(provider) = self.registry.resolve(replica) else {
                 continue;
             };
-            match self.provider.query(&provider.url, sql).await {
-                Ok(rows) => {
+            match tokio::time::timeout(
+                PROVIDER_READ_TIMEOUT,
+                self.provider.query_with_columns(&provider.url, sql),
+            )
+            .await
+            {
+                Ok(Ok((rows, columns))) => {
                     let rows = rows
                         .into_iter()
                         .filter(|row| {
-                            row.get(PK_COLUMN).and_then(value_as_string).as_deref() == Some(row_id)
+                            row.get(pk_column).and_then(value_as_string).as_deref() == Some(row_id)
                         })
                         .collect();
-                    return Ok(ReadResult { rows, partial: false, columns: vec![] });
+                    return Ok(ReadResult { rows, partial: false, columns });
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::warn!("point read from {replica} failed: {error}");
+                }
+                Err(_) => {
+                    tracing::warn!("point read from {replica} timed out after {PROVIDER_READ_TIMEOUT:?}");
                 }
             }
         }
         Err(GatewayError::NoProviders)
     }
 
-    pub async fn fanout_read(&self, sql: &str) -> Result<ReadResult> {
+    pub async fn fanout_read(&self, sql: &str, pk_column: &str) -> Result<ReadResult> {
         let providers = self.registry.providers();
         if providers.is_empty() {
             return Err(GatewayError::NoProviders);
@@ -107,7 +118,13 @@ impl ReadEngine {
             let sql = sql.to_string();
             handles.push(tokio::spawn(async move {
                 let npub = provider.npub.clone();
-                (npub, client.query_with_columns(&url, &sql).await)
+                let result = tokio::time::timeout(
+                    PROVIDER_READ_TIMEOUT,
+                    client.query_with_columns(&url, &sql),
+                )
+                .await
+                .unwrap_or_else(|_| Err(GatewayError::provider("read timed out")));
+                (npub, result)
             }));
         }
         let mut merged_index: HashMap<String, Value> = HashMap::new();
@@ -121,7 +138,7 @@ impl ReadEngine {
                         columns_out = columns;
                     }
                     for row in rows {
-                        let pk = row.get(PK_COLUMN).and_then(value_as_string).unwrap_or_default();
+                        let pk = row.get(pk_column).and_then(value_as_string).unwrap_or_default();
                         merged_index
                             .entry(pk)
                             .or_insert(row);
@@ -144,7 +161,7 @@ impl ReadEngine {
             for (row_id, pending_row) in self.store.pending_rows(&table_name).await? {
                 let Some(row) = pending_row else { continue };
                 rows.retain(|existing| {
-                    existing.get(PK_COLUMN).and_then(value_as_string).as_deref() != Some(row_id.as_str())
+                    existing.get(pk_column).and_then(value_as_string).as_deref() != Some(row_id.as_str())
                 });
                 rows.push(row);
             }
@@ -182,9 +199,22 @@ fn sql_table_name(sql: &str) -> crate::error::Result<String> {
 
 fn value_as_string(value: &Value) -> Option<String> {
     match value {
-        Value::String(text) => Some(text.clone()),
+        Value::String(text) => {
+            // pg-agent serializes bytea as "\\x<hex>"; row ids (and wire
+            // literals) carry the bare hex, so strip the prefix.
+            text.strip_prefix("\\x").map(|rest| rest.to_string()).or_else(|| Some(text.clone()))
+        }
         Value::Number(number) => Some(number.to_string()),
         Value::Bool(flag) => Some(flag.to_string()),
+        // pg-agent used to serialize bytea as an array of byte ints;
+        // tolerate both forms.
+        Value::Array(items) => {
+            let hex: Option<String> = items
+                .iter()
+                .map(|item| item.as_u64().map(|byte| format!("{byte:02x}")))
+                .collect();
+            hex
+        }
         _ => None,
     }
 }

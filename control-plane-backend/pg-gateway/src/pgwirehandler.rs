@@ -66,7 +66,25 @@ pub struct Column {
     pub type_oid: u32,
 }
 
+/// Describe-timeout: the shape probe must never hang a client on slow
+/// providers. Cheap by design (registry metadata + catalog prepare only).
+const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl GatewayHandlers {
+    /// Column shape for a SELECT without touching providers: the registry's
+    /// declared columns. Fully async — must never block the runtime.
+    async fn describe_columns_for_read(&self, sql: &str) -> Vec<Column> {
+        match sqlanalyze::read_table_name(sql) {
+            Some(table) => {
+                let deadline = tokio::time::timeout(DESCRIBE_TIMEOUT, self.read.table(&table)).await;
+                match deadline {
+                    Ok(Ok(table_def)) => table_columns_as_columns(&table_def),
+                    _ => vec![],
+                }
+            }
+            None => vec![],
+        }
+    }
     fn error(&self, error: &GatewayError) -> PgWireError {
         let code = match error {
             GatewayError::UnknownTable(_) => "42P01",
@@ -105,7 +123,19 @@ impl GatewayHandlers {
         if let Some(outcome) = self.catalog_request(sql, params).await? {
             return Ok(outcome);
         }
-        let analyzed = match sqlanalyze::analyze(sql) {
+        // pk-aware analysis: resolve the table's declared pk (registry) so
+        // point-write/read detection and conflict targets use the real pk
+        // (e.g. users.pubkey), falling back to `id` for unregistered tables.
+        let table_name_for_pk = sqlanalyze::write_or_read_table(sql)
+            .or_else(|| sqlanalyze::read_table_name(sql));
+        let pk_column: Option<String> = match table_name_for_pk.as_deref() {
+            Some(table) => match self.store.get_table(table).await {
+                Ok(Some(table_def)) => Some(sqlanalyze::pk_column_of(&table_def)),
+                _ => None,
+            },
+            None => None,
+        };
+        let analyzed = match sqlanalyze::analyze_with_pk(sql, pk_column.as_deref()) {
             Ok(analyzed) => analyzed,
             Err(parse_error) => {
                 // Multi-statement / exotic DDL batches (e.g. knex ALTER
@@ -126,9 +156,26 @@ impl GatewayHandlers {
             AnalyzedStatement::Read { .. } => {
                 // Point reads (single equality on pk) route to one provider;
                 // everything else fans out.
-                let point = bound_row_id
-                    .map(|id| id.to_string())
-                    .or_else(|| sqlanalyze::point_read_row_id(sql).ok().flatten());
+                //
+                // Prefer the analyzer's literal extraction over `bound_row_id`
+                // when params were inlined: the bound value is the raw wire
+                // bytes (binary pks are not UTF-8) while the inlined SQL
+                // carries the canonical hex form — they must match for the
+                // placement lookup.
+                let point = if !params.is_empty() {
+                    sqlanalyze::point_read_row_id_with_pk(sql, pk_column.as_deref().unwrap_or(sqlanalyze::PK_COLUMN))
+                        .ok()
+                        .flatten()
+                } else {
+                    bound_row_id
+                        .map(|id| id.to_string())
+                        .or_else(|| {
+                            sqlanalyze::point_read_row_id_with_pk(sql, pk_column.as_deref().unwrap_or(sqlanalyze::PK_COLUMN))
+                                .ok()
+                                .flatten()
+                        })
+                };
+                let pk_name = pk_column.clone().unwrap_or_else(|| sqlanalyze::PK_COLUMN.to_string());
                 let result = match point {
                     Some(row_id) => {
                         let effective_sql = if params.is_empty() {
@@ -136,7 +183,7 @@ impl GatewayHandlers {
                         } else {
                             inline_params(sql, params)?
                         };
-                        self.read.point_read(&effective_sql, &row_id).await
+                        self.read.point_read(&effective_sql, &row_id, &pk_name).await
                     }
                     None => {
                         let effective_sql = if params.is_empty() {
@@ -144,7 +191,7 @@ impl GatewayHandlers {
                         } else {
                             inline_params(sql, params)?
                         };
-                        self.read.fanout_read(&effective_sql).await
+                        self.read.fanout_read(&effective_sql, &pk_name).await
                     },
                 }?;
                 let table = sqlanalyze::read_table_name(sql).unwrap_or_default();
@@ -221,6 +268,9 @@ impl GatewayHandlers {
 
                 let _guard = self.write_lock.lock().await;
                 let table_def = self.read.table(&table).await?;
+                // The table's declared pk governs everything downstream:
+                // materialization, placement key, conflict target, reads.
+                let pk_name = sqlanalyze::pk_column_of(&table_def);
 
                 // Build the full row image (gateway-materialized values):
                 // supplied columns from the statement, generated columns from
@@ -243,11 +293,11 @@ impl GatewayHandlers {
                 };
                 let row_id = match (&materialized, generate_row_id, is_bound_placeholder) {
                     (Some(row), true, false) => row
-                        .get(sqlanalyze::PK_COLUMN)
+                        .get(&pk_name)
                         .and_then(value_to_wire_text)
-                        .ok_or_else(|| GatewayError::UnsupportedSql(
-                            "table has no primary-key column; add an `id` column".to_string(),
-                        ))?,
+                        .ok_or_else(|| GatewayError::UnsupportedSql(format!(
+                            "table has no primary-key column; expected \"{pk_name}\""
+                        )))?,
                     _ => {
                         if is_bound_placeholder {
                             return Err(GatewayError::UnsupportedSql(
@@ -291,17 +341,17 @@ impl GatewayHandlers {
                 let mut payload = materialized
                     .or_else(|| Some(serde_json::json!({ "sql": sql })));
                 // Carry the conflict target for the provider's upsert.
-                if let Some(columns) = conflict_columns.as_ref() {
-                    if !columns.is_empty() {
-                        if let Some(object) =
-                            payload.as_mut().and_then(|value| value.as_object_mut())
-                        {
-                            object.insert(
-                                "_conflictColumns".to_string(),
-                                serde_json::json!(columns),
-                            );
-                        }
-                    }
+                // Default: the table's declared pk — the upsert must key on
+                // the real pk (e.g. users.pubkey), not an assumed `id`.
+                let conflict_target = conflict_columns
+                    .clone()
+                    .filter(|columns| !columns.is_empty())
+                    .unwrap_or_else(|| vec![pk_name.clone()]);
+                if let Some(object) = payload.as_mut().and_then(|value| value.as_object_mut()) {
+                    object.insert(
+                        "_conflictColumns".to_string(),
+                        serde_json::json!(conflict_target),
+                    );
                 }
                 let op_id = ulid::Ulid::new().to_string();
                 self.store
@@ -507,9 +557,27 @@ fn rows_response(columns: &[Column], rows: Vec<Vec<Option<String>>>, _count: usi
     let schema_ref = schema.clone();
     let stream = futures::stream::iter(rows).map(move |row| {
         let mut encoder = pgwire::api::results::DataRowEncoder::new(schema_ref.clone());
-        for value in &row {
+        for (index, value) in row.iter().enumerate() {
+            let declared_type = schema_ref
+                .get(index)
+                .map(|field| field.datatype().clone())
+                .unwrap_or(Type::TEXT);
             match value {
-                Some(text) => encoder.encode_field(&text)?,
+                Some(text) => {
+                    // A TEXT-declared field must not encode a str as bytea
+                    // (node-pg's text parser would read the raw length byte
+                    // as data). Encode per declared type.
+                    match declared_type {
+                        Type::BYTEA => {
+                            let hex = text.trim_start_matches("\\x");
+                            let bytes: Vec<u8> = (0..hex.len() / 2)
+                                .filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+                                .collect();
+                            encoder.encode_field(&bytes)?;
+                        }
+                        _ => encoder.encode_field(&text)?,
+                    }
+                }
                 None => encoder.encode_field(&None::<String>)?,
             }
         }
@@ -636,7 +704,7 @@ impl ExtendedQueryHandler for GatewayHandlers {
                 Err(error) => return Err(self.error(&error)),
             }
         };
-        match self.execute_sql_bound(&effective_sql, row_id.as_deref(), &[]).await {
+        match self.execute_sql_bound(&effective_sql, row_id.as_deref(), &portal.parameters.iter().map(|_| None::<String>).collect::<Vec<_>>()).await {
             Ok(Outcome::Session) => Ok(Response::Execution(pgwire::api::results::Tag::new("OK"))),
             Ok(Outcome::Command(tag, count)) => {
                 Ok(Response::Execution(pgwire::api::results::Tag::new(&tag).with_rows(count)))
@@ -671,35 +739,34 @@ impl ExtendedQueryHandler for GatewayHandlers {
                 Err(_) => vec![],
             }
         } else {
-            // Shape probe: column names only. Binary literals in the real
-            // query (bytea pubkeys) can't survive a text dry-run, so probe
-            // the table shape directly.
-            let dry_sql = match sqlanalyze::read_table_name(sql) {
-                Some(table) => format!("select * from {table} limit 0"),
-                None => {
-                    let param_count = sql.matches('$').count();
-                    let params: Vec<Option<String>> = vec![Some("NULL".to_string()); param_count];
-                    inline_params(sql, &params).unwrap_or_else(|_| sql.to_string())
+            match sqlanalyze::select_projection(sql) {
+                // `select *`: registry columns are the exact projection.
+                Some(None) => {
+                    let columns = self.describe_columns_for_read(sql).await;
+                    text_fields(&columns)
                 }
-            };
-            let dry_columns = match self.execute_sql_bound(&dry_sql, None, &[]).await {
-                Ok(Outcome::Rows(columns, _, _)) => columns,
-                _ => vec![],
-            };
-            // Zero-row dry-runs yield no shape from data — fall back to the
-            // registry's declared columns for the target table.
-            let columns = if dry_columns.is_empty() {
-                match sqlanalyze::read_table_name(sql) {
-                    Some(table) => match futures::executor::block_on(self.read.table(&table)) {
-                        Ok(table_def) => table_columns_as_columns(&table_def),
-                        Err(_) => vec![],
-                    },
-                    None => vec![],
+                // Named column projection: map to registry types so the
+                // Describe arity matches Execute's DataRow.
+                Some(Some(names)) => {
+                    let table = sqlanalyze::read_table_name(sql).unwrap_or_default();
+                    let all = match self.store.get_table(&table).await {
+                        Ok(Some(table_def)) => table_columns_as_columns(&table_def),
+                        _ => vec![],
+                    };
+                    let fields: Vec<Column> = names
+                        .iter()
+                        .map(|name| {
+                            all.iter()
+                                .find(|column| column.name.eq_ignore_ascii_case(name))
+                                .cloned()
+                                .unwrap_or(Column { name: name.clone(), type_oid: Type::TEXT.oid() })
+                        })
+                        .collect();
+                    text_fields(&fields)
                 }
-            } else {
-                dry_columns
-            };
-            text_fields(&columns)
+                // Unparseable: NoData (drivers use Execute's description).
+                None => vec![],
+            }
         };
         let param_types: Vec<Type> = target
             .parameter_types
@@ -737,37 +804,29 @@ impl ExtendedQueryHandler for GatewayHandlers {
                 Err(_) => return Ok(DescribePortalResponse::new(vec![])),
             }
         }
-        // Shape probe: column names only. Binary literals in the real query
-        // (bytea pubkeys) can't survive a text dry-run, so probe the table
-        // shape directly.
-        let dry_sql = match sqlanalyze::read_table_name(sql) {
-            Some(table) => format!("select * from {table} limit 0"),
-            None => {
-                let params: Vec<Option<String>> = target
-                    .parameters
+        // Projection-aware shape: `select *` maps to the registry columns;
+        // named projections map each name to its registry type. The Describe
+        // answer must match Execute's DataRow arity — node-pg parses
+        // positionally.
+        let columns = match sqlanalyze::select_projection(sql) {
+            Some(None) => self.describe_columns_for_read(sql).await,
+            Some(Some(names)) => {
+                let table = sqlanalyze::read_table_name(sql).unwrap_or_default();
+                let all = match self.store.get_table(&table).await {
+                    Ok(Some(table_def)) => table_columns_as_columns(&table_def),
+                    _ => vec![],
+                };
+                names
                     .iter()
-                    .map(|raw| raw.as_ref().map(|bytes| String::from_utf8_lossy(bytes).to_string()))
-                    .collect();
-                match inline_params(sql, &params) {
-                    Ok(inlined) => format!("{inlined} LIMIT 0"),
-                    Err(_) => format!("{sql} LIMIT 0"),
-                }
+                    .map(|name| {
+                        all.iter()
+                            .find(|column| column.name.eq_ignore_ascii_case(name))
+                            .cloned()
+                            .unwrap_or(Column { name: name.clone(), type_oid: Type::TEXT.oid() })
+                    })
+                    .collect()
             }
-        };
-        let dry_columns = match self.execute_sql_bound(&dry_sql, None, &[]).await {
-            Ok(Outcome::Rows(columns, _, _)) => columns,
-            _ => vec![],
-        };
-        let columns = if dry_columns.is_empty() {
-            match sqlanalyze::read_table_name(sql) {
-                Some(table) => match futures::executor::block_on(self.read.table(&table)) {
-                    Ok(table_def) => table_columns_as_columns(&table_def),
-                    Err(_) => vec![],
-                },
-                None => vec![],
-            }
-        } else {
-            dry_columns
+            None => vec![],
         };
         Ok(DescribePortalResponse::new(text_fields(&columns)))
     }
@@ -859,6 +918,43 @@ impl PgWireServerHandlers for GatewayHandlers {
 
 }
 
+/// Maps a registry column descriptor's PG type name to its wire type OID.
+/// node-pg (and every driver) parses RowDescription by OID; declaring
+/// everything TEXT crashes clients on real types (bytea, timestamptz...).
+fn pg_type_oid(declared: &str) -> Option<u32> {
+    let name = declared.trim().to_ascii_uppercase();
+    let base = name
+        .split(|c: char| c == '(' || c == ')')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    match base.as_str() {
+        "BOOLEAN" | "BOOL" => Some(Type::BOOL.oid()),
+        "BYTEA" => Some(Type::BYTEA.oid()),
+        "CHAR" | "BPCHAR" => Some(Type::BPCHAR.oid()),
+        "NAME" => Some(Type::NAME.oid()),
+        "INT8" | "BIGINT" | "BIGSERIAL" => Some(Type::INT8.oid()),
+        "INT2" | "SMALLINT" | "SMALLSERIAL" => Some(Type::INT2.oid()),
+        "INT4" | "INTEGER" | "INT" | "SERIAL" => Some(Type::INT4.oid()),
+        "TEXT" => Some(Type::TEXT.oid()),
+        "VARCHAR" => Some(Type::VARCHAR.oid()),
+        "FLOAT4" | "REAL" => Some(Type::FLOAT4.oid()),
+        "FLOAT8" | "DOUBLE PRECISION" => Some(Type::FLOAT8.oid()),
+        "NUMERIC" | "DECIMAL" => Some(Type::NUMERIC.oid()),
+        "TIMESTAMP" => Some(Type::TIMESTAMP.oid()),
+        "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE" => Some(Type::TIMESTAMPTZ.oid()),
+        "DATE" => Some(Type::DATE.oid()),
+        "TIME" => Some(Type::TIME.oid()),
+        "JSON" => Some(Type::JSON.oid()),
+        "JSONB" => Some(Type::JSONB.oid()),
+        "UUID" => Some(Type::UUID.oid()),
+        "INET" => Some(Type::INET.oid()),
+        "OID" => Some(Type::OID.oid()),
+        _ => None,
+    }
+}
+
 fn table_columns_as_columns(table: &crate::central::MeshTable) -> Vec<Column> {
     table
         .columns
@@ -866,9 +962,13 @@ fn table_columns_as_columns(table: &crate::central::MeshTable) -> Vec<Column> {
         .map(|array| {
             array
                 .iter()
-                .filter_map(|column| column.get("name").and_then(|name| name.as_str()))
-                .map(|name| Column { name: name.to_string(), type_oid: Type::TEXT.oid() })
-                .collect()
+                .filter_map(|column| {
+                    let name = column.get("name").and_then(|name| name.as_str())?;
+                    let declared = column.get("type").and_then(|value| value.as_str()).unwrap_or("");
+                    let type_oid = pg_type_oid(declared).unwrap_or(Type::TEXT.oid());
+                    Some(Column { name: name.to_string(), type_oid })
+                })
+                .collect::<Vec<Column>>()
         })
         .unwrap_or_default()
 }
@@ -934,25 +1034,34 @@ async fn materialize_insert_row(
         };
         row.insert(name.to_string(), generated);
     }
-    if generate_row_id && row.get(sqlanalyze::PK_COLUMN).map(|value| value.is_null()).unwrap_or(true) {
+    let pk_column = columns
+        .iter()
+        .find(|column| column.get("primaryKey").and_then(|value| value.as_bool()).unwrap_or(false))
+        .and_then(|column| column.get("name").and_then(|name| name.as_str()))
+        .map(|name| name.to_string());
+    if generate_row_id && pk_column.as_deref().map(|pk| row.get(pk).map(|value| value.is_null()).unwrap_or(true)).unwrap_or(false) {
         // The pk column itself is generated: allocate per its descriptor
-        // (serial -> sequence, else ULID).
-        let pk_column = columns
-            .iter()
-            .find(|column| column.get("primaryKey").and_then(|value| value.as_bool()).unwrap_or(false));
+        // (serial -> sequence, else uuid v4).
+        let pk_name = pk_column.as_deref().unwrap_or(sqlanalyze::PK_COLUMN);
         let generated = match pk_column
+            .as_deref()
+            .and_then(|name| {
+                columns.iter().find(|column| {
+                    column.get("name").and_then(|value| value.as_str()) == Some(name)
+                })
+            })
             .and_then(|column| column.get("default"))
             .map(|value| value.as_str().unwrap_or_default())
         {
             Some("SERIAL") => {
                 let value = store
-                    .next_sequence_value(&table.name, sqlanalyze::PK_COLUMN)
+                    .next_sequence_value(&table.name, pk_name)
                     .await?;
                 serde_json::json!(value)
             }
             _ => serde_json::json!(uuid::Uuid::new_v4().to_string()),
         };
-        row.insert(sqlanalyze::PK_COLUMN.to_string(), generated);
+        row.insert(pk_name.to_string(), generated);
     }
     let _ = row_id;
     Ok(serde_json::Value::Object(row))
@@ -1085,8 +1194,11 @@ pub fn inline_params_bytes(sql: &str, params: &[Option<bytes::Bytes>]) -> Result
             Some(bytes) => match std::str::from_utf8(bytes) {
                 Ok(text) => format!("'{}'", text.replace('\'', "''")),
                 Err(_) => {
+                    // decode('\x..','hex') is unambiguous for both Postgres
+                    // and sqlparser (E-string escapes mangle multi-byte hex
+                    // sequences; observed with \x79be.. pubkeys).
                     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-                    format!("E'\\\\x{hex}'::bytea")
+                    format!("decode('{hex}','hex')::bytea")
                 }
             },
             None => "NULL".to_string(),

@@ -5,8 +5,8 @@
 //! providers verbatim.
 
 use sqlparser::ast::{
-    BinaryOperator, ColumnOption, DataType, Expr, GeneratedAs, ObjectName, Query, Statement,
-    TableConstraint, TableFactor, Value,
+    AlterTableOperation, BinaryOperator, ColumnOption, DataType, Expr, GeneratedAs, ObjectName,
+    Query, Statement, TableConstraint, TableFactor, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::keywords::Keyword;
@@ -53,10 +53,44 @@ pub enum AnalyzedStatement {
     Read { sql: String },
 }
 
-/// Single supported primary-key column name.
+/// Default primary-key column when the registry has no descriptor
+/// (pre-registration writes, tests). Registered tables always resolve
+/// their declared pk via `analyze_with_pk`.
 pub const PK_COLUMN: &str = "id";
 
+/// Resolves the pk column of `table` from the registry descriptor, falling
+/// back to the default pk name when unregistered or pk-less.
+pub fn pk_column_of(table: &crate::central::MeshTable) -> String {
+    pk_from_columns(&table.columns).unwrap_or_else(|| PK_COLUMN.to_string())
+}
+
+/// Extracts the primary-key column name from a columns descriptor
+/// ([{name, type, primaryKey: bool}, ...]).
+pub fn pk_from_columns(columns: &serde_json::Value) -> Option<String> {
+    columns
+        .as_array()
+        .and_then(|array| {
+            array
+                .iter()
+                .find(|column| column.get("primaryKey").and_then(|value| value.as_bool()).unwrap_or(false))
+                .and_then(|column| column.get("name").and_then(|name| name.as_str()))
+                .map(|name| name.to_string())
+        })
+}
+
+/// Like `analyze`, but pk-aware: writes/point-reads are detected against the
+/// table's *declared* pk (e.g. `users.pubkey`), not the hardcoded `id`.
+/// Unregistered tables keep the default pk.
+pub fn analyze_with_pk(sql: &str, pk_column: Option<&str>) -> Result<AnalyzedStatement> {
+    let pk = pk_column.unwrap_or(PK_COLUMN);
+    analyze_pk(sql, pk)
+}
+
 pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
+    analyze_pk(sql, PK_COLUMN)
+}
+
+fn analyze_pk(sql: &str, pk_column: &str) -> Result<AnalyzedStatement> {
     // sqlparser's GenericDialect accepts PostgreSQL syntax for everything in
     // our subset; statements are forwarded verbatim so dialect quirks never
     // change what a provider sees.
@@ -128,7 +162,7 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
             let pk_index = insert
                 .columns
                 .iter()
-                .position(|ident| object_name_eq(ident, PK_COLUMN));
+                .position(|ident| object_name_eq(ident, pk_column));
             let pk_value = match pk_index {
                 Some(index) => row.get(index),
                 None => {
@@ -181,7 +215,7 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
         }
         Statement::Update(update) => {
             let table = extract_table_factor_name(&update.table.relation)?;
-            let pk_result = update.selection.as_ref().map(extract_pk_equality);
+            let pk_result = update.selection.as_ref().map(|expr| extract_pk_equality(expr, pk_column));
             let (row_id, broad) = match pk_result {
                 Some(Ok(row_id)) => (row_id, false),
                 Some(Err(_)) | None => (String::new(), true),
@@ -200,7 +234,7 @@ pub fn analyze(sql: &str) -> Result<AnalyzedStatement> {
         }
         Statement::Delete(delete) => {
             let table = extract_delete_table(delete.from.clone())?;
-            let pk_result = delete.selection.as_ref().map(extract_pk_equality);
+            let pk_result = delete.selection.as_ref().map(|expr| extract_pk_equality(expr, pk_column));
             let (row_id, broad) = match pk_result {
                 Some(Ok(row_id)) => (row_id, false),
                 Some(Err(_)) | None => (String::new(), true),
@@ -387,23 +421,23 @@ fn extract_delete_table(from: sqlparser::ast::FromTable) -> Result<String> {
 /// Walks a WHERE clause and requires the shape `<pk> = <literal>` or
 /// `<literal> = <pk>` (AND-chains are accepted as long as one conjunct
 /// constrains the pk).
-fn extract_pk_equality(expr: &Expr) -> Result<String> {
+fn extract_pk_equality(expr: &Expr, pk_column: &str) -> Result<String> {
     match expr {
-        Expr::BinaryOp { left, op: BinaryOperator::And, right } => extract_pk_equality(left)
-            .or_else(|_| extract_pk_equality(right)),
+        Expr::BinaryOp { left, op: BinaryOperator::And, right } => extract_pk_equality(left, pk_column)
+            .or_else(|_| extract_pk_equality(right, pk_column)),
         Expr::BinaryOp { left, op: BinaryOperator::Eq, right } => {
             match (identifier_name(left), literal_to_string_expr(right)) {
-                (Some(name), Some(value)) if name.eq_ignore_ascii_case(PK_COLUMN) => Ok(value),
+                (Some(name), Some(value)) if name.eq_ignore_ascii_case(pk_column) => Ok(value),
                 _ => match (identifier_name(right), literal_to_string_expr(left)) {
-                    (Some(name), Some(value)) if name.eq_ignore_ascii_case(PK_COLUMN) => Ok(value),
+                    (Some(name), Some(value)) if name.eq_ignore_ascii_case(pk_column) => Ok(value),
                     _ => Err(GatewayError::WriteRequiresPk(format!(
-                        "WHERE must constrain \"{PK_COLUMN}\" to a literal"
+                        "WHERE must constrain \"{pk_column}\" to a literal"
                     ))),
                 },
             }
         }
         _ => Err(GatewayError::WriteRequiresPk(format!(
-            "WHERE must constrain \"{PK_COLUMN}\" to a literal"
+            "WHERE must constrain \"{pk_column}\" to a literal"
         ))),
     }
 }
@@ -427,6 +461,35 @@ fn literal_to_string(expr: &Expr) -> Result<String> {
 fn literal_to_string_expr(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Value(value) => value_to_string(&value.value),
+        // Param inlining emits `decode('<hex>','hex')::bytea` for binary
+        // values; unwrap cast + function to reach the inner hex literal.
+        Expr::Cast { expr: inner, .. } => literal_to_string_expr(inner),
+        Expr::Function(function) => {
+            let is_decode = function
+                .name
+                .0
+                .last()
+                .and_then(|part| part.as_ident())
+                .map(|ident| ident.value.eq_ignore_ascii_case("decode"))
+                .unwrap_or(false);
+            if !is_decode {
+                return None;
+            }
+            let args = match &function.args {
+                sqlparser::ast::FunctionArguments::List(list) => &list.args,
+                _ => return None,
+            };
+            let first = args.first()?;
+            match first {
+                sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
+                    match expr {
+                        Expr::Value(vws) => value_to_string(&vws.value),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
         Expr::Identifier(ident) => Some(ident.value.clone()),
         Expr::CompoundIdentifier(parts) => parts.last().map(|ident| ident.value.clone()),
         _ => None,
@@ -436,6 +499,8 @@ fn literal_to_string_expr(expr: &Expr) -> Option<String> {
 pub fn value_to_string(value: &Value) -> Option<String> {
     match value {
         Value::SingleQuotedString(text) | Value::DoubleQuotedString(text) => Some(text.clone()),
+        // PostgreSQL E'...' escape strings (bytea hex literals etc.).
+        Value::EscapedStringLiteral(text) => Some(text.clone()),
         Value::Number(number, _) => Some(number.clone()),
         Value::Boolean(flag) => Some(flag.to_string()),
         Value::Null => Some("\u{0}null".to_string()),
@@ -604,6 +669,46 @@ fn describe_column_type(data_type: &DataType) -> String {
 }
 
 /// Returns true when a DDL statement is inside the additive-only subset.
+/// Column descriptors ([{name, type, ...}, ...]) for every ADD COLUMN in an
+/// ALTER statement, merged into an existing registry descriptor. Empty when
+/// the ALTER adds no plain columns (constraints only).
+pub fn extract_add_columns(sql: &str) -> Result<Vec<serde_json::Value>> {
+    let statements = Parser::parse_sql(&GenericDialect {}, sql)
+        .map_err(|error| GatewayError::UnsupportedSql(normalize_parse_error(&error)))?;
+    let mut columns = Vec::new();
+    for statement in statements {
+        if let Statement::AlterTable(alter) = statement {
+            for operation in alter.operations {
+                if let AlterTableOperation::AddColumn { column_def, .. } = operation {
+                    // Reuse the CREATE-table descriptor shape for one column.
+                    let mut default = serde_json::Value::Null;
+                    let mut not_null = false;
+                    let mut primary_key = false;
+                    for option in &column_def.options {
+                        match &option.option {
+                            ColumnOption::Default(expr) => {
+                                default = default_to_descriptor(&column_def.data_type, expr);
+                            }
+                            ColumnOption::NotNull => not_null = true,
+                            ColumnOption::PrimaryKey(_) => primary_key = true,
+                            _ => {}
+                        }
+                    }
+                    let name = column_def.name.value.clone();
+                    columns.push(serde_json::json!({
+                        "name": name,
+                        "type": describe_column_type(&column_def.data_type),
+                        "default": default,
+                        "notNull": not_null,
+                        "primaryKey": primary_key,
+                    }));
+                }
+            }
+        }
+    }
+    Ok(columns)
+}
+
 pub fn is_additive_ddl(kind: &StatementKind, sql: &str) -> Result<bool> {
     let statements = Parser::parse_sql(&GenericDialect {}, sql)
         .map_err(|error| GatewayError::UnsupportedSql(normalize_parse_error(&error)))?;
@@ -669,6 +774,11 @@ pub fn is_session_command(sql: &str) -> bool {
 /// Row-id literal for point reads: Some when the WHERE clause is exactly one
 /// `<pk> = <literal>` (or reversed) equality.
 pub fn point_read_row_id(sql: &str) -> Result<Option<String>> {
+    point_read_row_id_with_pk(sql, PK_COLUMN)
+}
+
+/// Point-read detection against a declared pk column.
+pub fn point_read_row_id_with_pk(sql: &str, pk_column: &str) -> Result<Option<String>> {
     let statements = Parser::parse_sql(&GenericDialect {}, sql)
         .map_err(|error| GatewayError::UnsupportedSql(normalize_parse_error(&error)))?;
     for statement in statements {
@@ -678,7 +788,7 @@ pub fn point_read_row_id(sql: &str) -> Result<Option<String>> {
                     return Ok(None);
                 }
                 return Ok(match select.selection.as_ref() {
-                    Some(where_clause) => extract_pk_equality(where_clause).ok(),
+                    Some(where_clause) => extract_pk_equality(where_clause, pk_column).ok(),
                     None => None,
                 });
             }
@@ -690,6 +800,10 @@ pub fn point_read_row_id(sql: &str) -> Result<Option<String>> {
 /// Placeholder name (e.g. "$1") when a statement's WHERE constrains the pk
 /// to a parameter marker instead of a literal.
 pub fn pk_placeholder(sql: &str) -> Option<String> {
+    // Any `ident = $N` equality can be the pk placeholder; the analyzer
+    // narrows it to the declared pk at execute time (extended protocol
+    // inlines params before analysis anyway, so this only feeds row-id
+    // binding for point reads).
     let statements = Parser::parse_sql(&GenericDialect {}, sql).ok()?;
     for statement in statements {
         let selection = match statement {
@@ -702,12 +816,37 @@ pub fn pk_placeholder(sql: &str) -> Option<String> {
             _ => None,
         };
         if let Some(where_clause) = selection {
-            if let Some(name) = placeholder_in_equality(&where_clause) {
+            // Any `x = $N` equality in the WHERE clause can be the pk
+            // placeholder; the analyzer narrows it to the real pk later.
+            if let Some(name) = any_placeholder_equality(&where_clause) {
                 return Some(name);
             }
         }
     }
     None
+}
+
+/// Placeholder of ANY `<ident> = $N` equality (pk or not): point-read
+/// detection refines it against the declared pk at execute time.
+fn any_placeholder_equality(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::BinaryOp { left, op: BinaryOperator::And, right } => {
+            any_placeholder_equality(left).or_else(|| any_placeholder_equality(right))
+        }
+        Expr::BinaryOp { left, op: BinaryOperator::Eq, right } => {
+            for (a, b) in [(left, right), (right, left)] {
+                if identifier_name(a).is_some() {
+                    if let Expr::Value(vws) = b.as_ref() {
+                        if let Value::Placeholder(name) = &vws.value {
+                            return Some(name.clone());
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn placeholder_in_equality(expr: &Expr) -> Option<String> {
@@ -748,6 +887,89 @@ pub fn read_table_name(sql: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// True when the read projects `*` (its DataRow arity equals the full table
+/// column list, so a registry-backed describe is safe to answer).
+pub fn is_select_star(sql: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&GenericDialect {}, sql) else {
+        return false;
+    };
+    for statement in statements {
+        if let Statement::Query(query) = statement {
+            if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
+                return select
+                    .projection
+                    .iter()
+                    .any(|item| matches!(item, sqlparser::ast::SelectItem::Wildcard(_)));
+            }
+        }
+    }
+    false
+}
+
+/// Projection of a SELECT as (name, is_identifier) pairs, in output order.
+/// Plain `*` yields None (the whole table). Unsupported expressions are
+/// filtered; describe falls back to TEXT for anything it cannot resolve.
+pub fn select_projection(sql: &str) -> Option<Option<Vec<String>>> {
+    let Ok(statements) = Parser::parse_sql(&GenericDialect {}, sql) else {
+        return None;
+    };
+    for statement in statements {
+        if let Statement::Query(query) = statement {
+            if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
+                let mut columns = Vec::new();
+                for item in &select.projection {
+                    match item {
+                        sqlparser::ast::SelectItem::Wildcard(_) => {
+                            return Some(None);
+                        }
+                        sqlparser::ast::SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                            columns.push(ident.value.clone());
+                        }
+                        sqlparser::ast::SelectItem::ExprWithAlias {
+                            alias, ..
+                        } => {
+                            columns.push(alias.value.clone());
+                        }
+                        sqlparser::ast::SelectItem::ExprWithAliases {
+                            aliases, ..
+                        } => {
+                            for alias in aliases.iter() {
+                                columns.push(alias.value.clone());
+                            }
+                        }
+                        sqlparser::ast::SelectItem::UnnamedExpr(_) => {
+                            // Expression projection: shape unknown here.
+                            return Some(Some(Vec::new()));
+                        }
+                        sqlparser::ast::SelectItem::QualifiedWildcard(_, _) => {
+                            return Some(Some(Vec::new()));
+                        }
+                    }
+                }
+                return Some(Some(columns));
+            }
+        }
+    }
+    None
+}
+
+/// Best-effort table name of a write statement (INSERT/UPDATE/DELETE);
+/// used to resolve the declared pk before analysis. None for non-writes.
+pub fn write_or_read_table(sql: &str) -> Option<String> {
+    let statements = Parser::parse_sql(&GenericDialect {}, sql).ok()?;
+    let statement = statements.into_iter().next()?;
+    match statement {
+        Statement::Insert(insert) => match &insert.table {
+            sqlparser::ast::TableObject::TableName(name) => extract_table_name(name).ok(),
+            _ => None,
+        },
+        Statement::Update(update) => extract_table_factor_name(&update.table.relation).ok(),
+        Statement::Delete(delete) => extract_delete_table(delete.from.clone()).ok(),
+        Statement::Query(_) => read_table_name(sql),
+        _ => None,
+    }
 }
 
 /// Full row payload for a single-tuple INSERT, as {column: value} JSON with
@@ -806,7 +1028,35 @@ fn json_value(expr: &Expr) -> serde_json::Value {
             Value::SingleQuotedString(text) | Value::DoubleQuotedString(text) => {
                 serde_json::Value::String(text.clone())
             }
+            // E'...' escape strings: keep the *raw* text (unescaped form the
+            // parser stored); bytea values ride as hex without the prefix.
+            Value::EscapedStringLiteral(text) => serde_json::Value::String(text.clone()),
             other => serde_json::Value::String(other.to_string()),
+        },
+        // Unwrap `decode('<hex>','hex')::bytea` from param inlining: the
+        // payload stores the hex text; pg-agent writes it as a bytea value.
+        Expr::Cast { expr: inner, .. } => json_value(inner),
+        Expr::Function(function) => {
+            let is_decode = function
+                .name
+                .0
+                .last()
+                .and_then(|part| part.as_ident())
+                .map(|ident| ident.value.eq_ignore_ascii_case("decode"))
+                .unwrap_or(false);
+            if is_decode {
+                if let sqlparser::ast::FunctionArguments::List(list) = &function.args {
+                    if let Some(sqlparser::ast::FunctionArg::Unnamed(
+                        sqlparser::ast::FunctionArgExpr::Expr(Expr::Value(vws)),
+                    )) = list.args.first()
+                    {
+                        if let Value::SingleQuotedString(hex) = &vws.value {
+                            return serde_json::Value::String(hex.clone());
+                        }
+                    }
+                }
+            }
+            serde_json::Value::String(expr.to_string())
         },
         _ => serde_json::Value::String(expr.to_string()),
     }

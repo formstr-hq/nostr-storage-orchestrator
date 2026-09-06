@@ -63,7 +63,9 @@ function serializeValue(value: unknown): unknown {
   if (value === null || value === undefined) return null;
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "bigint") return value.toString();
-  if (value instanceof Uint8Array) return Array.from(value);
+  // bytea -> hex text ("\\x79be..."). Row ids and pk filters at the gateway
+  // compare value_as_string against hex; arrays of ints lose round-trips.
+  if (value instanceof Uint8Array) return "\\x" + Array.from(value).map((b) => b.toString(16).padStart(2, "0")).join("");
   if (Array.isArray(value)) return value.map(serializeValue);
   if (typeof value === "object") return value;
   return value;

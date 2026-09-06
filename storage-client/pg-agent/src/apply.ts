@@ -23,6 +23,41 @@ const OpSchema = z.object({
 
 const ApplySchema = z.object({ ops: z.array(OpSchema).max(500) });
 
+type PgSql = postgres.Sql & { unsafe: (text: string) => Promise<Array<Record<string, unknown>>> };
+
+/// Column name -> data type (lower-cased), from information_schema. Cached
+/// per statement batch; bytea columns need hex->bytes decoding.
+async function columnTypeMap(
+  sql: PgSql,
+  table: string,
+): Promise<Map<string, string>> {
+  const rows = await sql`
+    SELECT lower(column_name) AS name, data_type
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND lower(table_name) = ${table.toLowerCase()}
+  `;
+  const map = new Map<string, string>();
+  for (const row of rows as unknown as Array<{ name: string; data_type: string }>) {
+    map.set(row.name, row.data_type);
+  }
+  return map;
+}
+
+function decodeValue(value: unknown, dataType: string | undefined): unknown {
+  if (value === null || value === undefined) return value;
+  if (dataType === "bytea" && typeof value === "string") {
+    const hex = value.startsWith("\\x") ? value.slice(2) : value;
+    if (/^[0-9a-fA-F]*$/.test(hex) && hex.length % 2 === 0) {
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      }
+      return bytes;
+    }
+  }
+  return value;
+}
+
 export function buildApplyRouter(sql: postgres.Sql) {
   const app = new Hono();
 
@@ -71,8 +106,16 @@ export function buildApplyRouter(sql: postgres.Sql) {
             if (columns.length === 0) {
               throw new Error("empty insert row");
             }
+            // Column descriptors (from /pg/schema propagation) drive value
+            // decoding: bytea columns carry hex text in the JSON payload and
+            // must be written as bytes, not strings.
+            const columnTypes = await columnTypeMap(tx, table);
+            const row2: Record<string, unknown> = {};
+            for (const column of columns) {
+              row2[column] = decodeValue(row[column], columnTypes.get(column.toLowerCase()));
+            }
             const values = tx(
-              Object.fromEntries(columns.map((column) => [column, row[column]])),
+              Object.fromEntries(columns.map((column) => [column, row2[column]])),
             );
             const conflict = declaredConflict ?? [];
             if (conflict.length > 0) {
