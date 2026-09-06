@@ -36,6 +36,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env().map_err(|message| format!("configuration error: {message}"))?;
+    // Fail closed: without a gateway password, cleartext auth would accept an
+    // empty password (i.e. anyone). Refuse to start rather than run open.
+    if config.gateway_password.is_none() {
+        return Err("PG_GATEWAY_PASSWORD is unset or empty: refusing to start without gateway authentication".into());
+    }
     tracing::info!(listen = %config.listen_addr, "pg-gateway starting");
 
     let store = Arc::new(central::CentralStore::new(config.central_database_url.clone()));

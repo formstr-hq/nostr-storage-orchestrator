@@ -538,7 +538,13 @@ pub struct FixedAuthSource {
 #[async_trait]
 impl AuthSource for FixedAuthSource {
     async fn get_password(&self, _login: &LoginInfo) -> PgWireResult<Password> {
-        Ok(Password::new(None, Vec::from(self.password.clone().unwrap_or_default())))
+        match &self.password {
+            Some(password) => Ok(Password::new(None, Vec::from(password.clone()))),
+            // No password configured: return an unmatchable secret so auth
+            // always fails instead of accepting an empty password. Startup also
+            // refuses to run without PG_GATEWAY_PASSWORD; this is defense in depth.
+            None => Ok(Password::new(None, ulid::Ulid::new().to_string().into_bytes())),
+        }
     }
 }
 
