@@ -1305,6 +1305,14 @@ impl GatewayHandlers {
             }
         }
         if answered == 0 {
+            // Registry-only table (lives in the central DB, never replicated
+            // to providers): run the plan's partial against the central DB as
+            // a single "provider" so pgweb counts/inspects these tables too.
+            if self.catalog.has_table(&plan.table).await.unwrap_or(false) {
+                let central_rows = self.catalog.read_qualified(&plan.partial_sql()).await?;
+                let merged = crate::aggregate::merge_partials(&plan, &[central_rows]);
+                return self.aggregate_outcome(&plan, merged);
+            }
             return Err(GatewayError::NoProviders);
         }
         // Known limitation: pending (unflushed) buffer rows are not visible to
@@ -1321,6 +1329,15 @@ impl GatewayHandlers {
             duration_ms = started.elapsed().as_millis() as u64,
             "aggregate merged"
         );
+        self.aggregate_outcome(&plan, merged)
+    }
+
+    /// Builds the wire Outcome for merged aggregate rows.
+    fn aggregate_outcome(
+        &self,
+        plan: &crate::aggregate::AggregatePlan,
+        merged: Vec<Value>,
+    ) -> Result<Outcome, GatewayError> {
         // Output columns: plain outputs, bare group keys, then aggregates —
         // in the plan's projection order.
         let mut columns: Vec<Column> = Vec::new();
