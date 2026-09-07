@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """E2E test for the mesh-PG gateway: DDL, writes, point/broad reads."""
+import os
 import socket
 import struct
 import sys
@@ -8,8 +9,9 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 55432
 
 
 class PgConn:
-    def __init__(self, port):
+    def __init__(self, port, password=""):
         self.s = socket.create_connection(("localhost", port), timeout=60)
+        password_b = os.environ.get("PG_GATEWAY_PASSWORD", "").encode()
         params = b"user\x00test\x00database\x00meshdb\x00\x00"
         self.s.sendall(struct.pack("!ii", 8 + len(params), 196608) + params)
         # Startup exchange: server answers with AuthenticationCleartext ('R'),
@@ -17,7 +19,7 @@ class PgConn:
         # ReadyForQuery. Reading past 'R' before sending the password blocks
         # until pgwire's 60s startup timeout kills the socket.
         self._read_one_message()
-        pw = b"\x00"
+        pw = password_b + b"\x00"
         self.s.sendall(b"p" + struct.pack("!i", 4 + len(pw)) + pw)
         self._read_until_ready()
 

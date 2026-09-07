@@ -246,6 +246,8 @@ services:
       # Exclusive database-node placement: each row lands on exactly one
       # provider (hash-distributed). Raise only with a second pg provider.
       PG_DEFAULT_REPLICA_COUNT: "1"
+      # Dispatch/apply diagnostics are debug-level; raise via RUST_LOG.
+      RUST_LOG: "${RUST_LOG:-info,pg_gateway=debug}"
     restart: unless-stopped
 
 volumes:
