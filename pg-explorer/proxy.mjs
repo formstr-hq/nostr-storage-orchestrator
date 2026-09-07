@@ -15,6 +15,7 @@
 // possible at the SQL layer, so pgweb's readonly flag is the real guard).
 
 import { createServer } from 'node:http'
+import { Readable } from 'node:stream'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { verifyEvent } from 'nostr-tools/pure'
@@ -250,7 +251,10 @@ const server = createServer(async (req, res) => {
   })
   res.writeHead(proxyReq.status, Object.fromEntries(outHeaders))
   if (proxyReq.body) {
-    proxyReq.body.pipeTo(res).catch(() => {})
+    // res is a Node Writable, not a web WritableStream, so `body.pipeTo(res)`
+    // silently rejects and the response never ends (assets/pages hang forever).
+    // Bridge the web ReadableStream to the Node stream the correct way.
+    Readable.fromWeb(proxyReq.body).pipe(res)
     return
   }
   return res.end()
