@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Formstr Signer",
+  "version": "0.1.0",
+  "description": "NIP-07 signer for Formstr. Keys stay on-device as NIP-49 ncryptsec; decrypted in memory only. Per-site opt-in.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Formstr Signer"
+  },
+  "options_page": "popup.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inpage.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root { color-scheme: dark; }
+    body { width: 340px; margin: 0; padding: 14px; font: 13px/1.45 system-ui, sans-serif; background: #14161a; color: #e6e8ec; }
+    h1 { font-size: 14px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+    h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #8a93a3; margin: 16px 0 6px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #5a6272; }
+    .dot.on { background: #3ecf6f; }
+    .row { display: flex; gap: 6px; margin: 6px 0; }
+    input, select { flex: 1; background: #1d2027; border: 1px solid #333947; color: #e6e8ec; border-radius: 6px; padding: 6px 8px; font: inherit; }
+    button { background: #2c3140; border: 1px solid #3a4052; color: #e6e8ec; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
+    button.primary { background: #3b6df0; border-color: #3b6df0; }
+    button.danger { color: #ff7b7b; }
+    button:disabled { opacity: .5; cursor: default; }
+    .muted { color: #8a93a3; font-size: 12px; }
+    .err { color: #ff7b7b; font-size: 12px; min-height: 16px; margin: 4px 0; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; border-bottom: 1px solid #23262e; }
+    .npub { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1><span class="dot" id="dot"></span>Formstr Signer <span class="muted" id="stateLabel"></span></h1>
+  <div class="npub" id="activeNpub"></div>
+  <div class="err" id="err"></div>
+
+  <div id="lockedView" class="hidden">
+    <h2>Unlock</h2>
+    <div class="row"><select id="profileSel"></select></div>
+    <div class="row"><input id="passInput" type="password" placeholder="Passphrase" /></div>
+    <div class="row"><button class="primary" id="unlockBtn">Unlock</button></div>
+
+    <h2>Add key</h2>
+    <div class="row"><input id="nsecInput" type="password" placeholder="nsec1... (leave empty to generate)" /></div>
+    <div class="row"><input id="labelInput" type="text" placeholder="Label (optional)" /></div>
+    <div class="row"><input id="newPassInput" type="password" placeholder="New passphrase" /></div>
+    <div class="row">
+      <button id="importBtn">Import</button>
+      <button id="generateBtn">Generate</button>
+    </div>
+    <p class="muted">Keys are stored NIP-49-encrypted (ncryptsec). The passphrase never persists; the decrypted key lives in memory only and clears on lock or after 5 minutes idle.</p>
+  </div>
+
+  <div id="unlockedView" class="hidden">
+    <div class="row"><button class="danger" id="lockBtn">Lock</button></div>
+    <h2>Enabled sites</h2>
+    <ul id="allowlist"></ul>
+    <div class="row"><input id="originInput" placeholder="https://storage.stg.formstr.app" /></div>
+    <div class="row"><button id="allowBtn">Enable origin</button></div>
+    <p class="muted">Deny-all by default: pages cannot sign until enabled here. Exposes only NIP-07 getPublicKey + signEvent (NIP-98).</p>
+  </div>
+
+  <script type="module" src="./popup.js"></script>
+</body>
+</html>
