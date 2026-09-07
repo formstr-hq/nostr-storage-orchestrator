@@ -669,24 +669,22 @@ pub fn merge_partials(plan: &AggregatePlan, partials: &[Vec<Value>]) -> Vec<Valu
                 // AVG/VARIANCE inputs ride on __-prefixed helper columns.
                 match spec.kind {
                     AggregateKind::Avg => {
-                        if let Some(Value::Number(n)) = row.get(&format!("__c_{}_{}", spec.output, spec.arg)) {
-                            *acc.counts.entry(spec.output.clone()).or_insert(0.0) += n.as_f64().unwrap_or(0.0);
+                        let count_col = &format!("__c_{}_{}", spec.output, spec.arg);
+                        let sum_col = &format!("__s_{}_{}", spec.output, spec.arg);
+                        if let Some(n) = value_of(row, count_col).as_ref().and_then(json_num) {
+                            *acc.counts.entry(spec.output.clone()).or_insert(0.0) += n;
                         }
-                        if let Some(Value::Number(n)) = row.get(&format!("__s_{}_{}", spec.output, spec.arg)) {
-                            *acc.sums.entry(spec.output.clone()).or_insert(0.0) += n.as_f64().unwrap_or(0.0);
+                        if let Some(n) = value_of(row, sum_col).as_ref().and_then(json_num) {
+                            *acc.sums.entry(spec.output.clone()).or_insert(0.0) += n;
                         }
                     }
                     AggregateKind::Variance { .. } | AggregateKind::StdDev { .. } => {
-                        let n_partial = row
-                            .get(&format!("__n_{}_{}", spec.output, spec.arg))
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0);
-                        let m_partial = row
-                            .get(&format!("__m_{}_{}", spec.output, spec.arg))
-                            .and_then(|v| v.as_f64());
-                        let q_partial = row
-                            .get(&format!("__q_{}_{}", spec.output, spec.arg))
-                            .and_then(|v| v.as_f64());
+                        let n_col = &format!("__n_{}_{}", spec.output, spec.arg);
+                        let m_col = &format!("__m_{}_{}", spec.output, spec.arg);
+                        let q_col = &format!("__q_{}_{}", spec.output, spec.arg);
+                        let n_partial = value_of(row, n_col).as_ref().and_then(json_num).unwrap_or(0.0);
+                        let m_partial = value_of(row, m_col).as_ref().and_then(json_num);
+                        let q_partial = value_of(row, q_col).as_ref().and_then(json_num);
                         if n_partial > 0.0 {
                             if let Some(mean) = m_partial {
                                 // Reconstruct the partial's sum and stash the
@@ -696,13 +694,6 @@ pub fn merge_partials(plan: &AggregatePlan, partials: &[Vec<Value>]) -> Vec<Valu
                                 *acc.sums.entry(format!("__q_{}_{}", spec.output, spec.arg)).or_insert(0.0) +=
                                     q_partial.unwrap_or(0.0);
                                 *acc.counts.entry(spec.output.clone()).or_insert(0.0) += n_partial;
-                                acc.lists
-                                    .entry(format!("__means_{}", spec.output))
-                                    .or_default()
-                                    .push(Value::Number(
-                                        serde_json::Number::from_f64(mean)
-                                            .unwrap_or(serde_json::Number::from(0)),
-                                    ));
                             }
                         }
                     }
@@ -722,13 +713,13 @@ pub fn merge_partials(plan: &AggregatePlan, partials: &[Vec<Value>]) -> Vec<Valu
                         }
                     }
                     AggregateKind::Count => {
-                        if let Some(Value::Number(n)) = value_of(row, &spec.output) {
-                            *acc.counts.entry(spec.output.clone()).or_insert(0.0) += n.as_f64().unwrap_or(0.0);
+                        if let Some(n) = value_of(row, &spec.output).as_ref().and_then(json_num) {
+                            *acc.counts.entry(spec.output.clone()).or_insert(0.0) += n;
                         }
                     }
                     AggregateKind::Sum => {
-                        if let Some(Value::Number(n)) = value_of(row, &spec.output) {
-                            *acc.sums.entry(spec.output.clone()).or_insert(0.0) += n.as_f64().unwrap_or(0.0);
+                        if let Some(n) = value_of(row, &spec.output).as_ref().and_then(json_num) {
+                            *acc.sums.entry(spec.output.clone()).or_insert(0.0) += n;
                         }
                     }
                     AggregateKind::Min => {
@@ -831,30 +822,53 @@ fn as_bool(value: Value) -> Option<bool> {
     match value {
         Value::Bool(flag) => Some(flag),
         Value::String(text) => match text.as_str() {
-            "t" | "true" => Some(true),
-            "f" | "false" => Some(false),
+            "t" | "true" | "1" => Some(true),
+            "f" | "false" | "0" => Some(false),
             _ => None,
         },
+        Value::Number(flag) => Some(flag.as_f64().unwrap_or(0.0) != 0.0),
         _ => None,
     }
 }
 
 fn json_num(value: &Value) -> Option<f64> {
-    value.as_f64()
+    // Providers serialize numeric columns as JSON strings (pg-agent returns
+    // everything as text) — coerce numeric strings so count/sum merge works.
+    match value {
+        Value::Number(n) => n.as_f64(),
+        Value::String(text) => text.parse::<f64>().ok(),
+        _ => None,
+    }
 }
 
 fn json_le(a: &Value, b: &Value) -> bool {
     if let (Some(x), Some(y)) = (json_num(a), json_num(b)) {
         return x <= y;
     }
-    a.to_string() <= b.to_string()
+    let sa = match a {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let sb = match b {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    sa <= sb
 }
 
 fn json_ge(a: &Value, b: &Value) -> bool {
     if let (Some(x), Some(y)) = (json_num(a), json_num(b)) {
         return x >= y;
     }
-    a.to_string() >= b.to_string()
+    let sa = match a {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let sb = match b {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    sa >= sb
 }
 
 fn num_or_null(sum: f64) -> Value {
@@ -1145,7 +1159,8 @@ mod tests {
         let partial = plan.partial_sql();
         assert!(partial.contains("count(*)"));
         assert!(!partial.contains("GROUP BY"));
-        let partials = rows(r#"[[{"count": 10}], [{"count": 5}]]"#);
+        // Providers encode numerics as strings (pg-agent bigint serialization).
+        let partials = rows(r#"[[{"count": "10"}], [{"count": "5"}]]"#);
         let merged = merge_partials(&plan, &partials);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0]["count"], serde_json::json!(15));
