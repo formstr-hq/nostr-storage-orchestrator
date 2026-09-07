@@ -209,7 +209,12 @@ impl GatewayHandlers {
                             // table it sees in information_schema, so these
                             // must read somewhere.
                             let text = format!("{error}");
-                            if text.contains("does not exist") {
+                            // Fan-out converts per-provider "does not exist"
+                            // into NoProviders, so both shapes fall back.
+                            let missing_on_providers =
+                                text.contains("does not exist")
+                                    || text.contains("no healthy providers");
+                            if missing_on_providers {
                                 if let Some(table) = sqlanalyze::read_table_name(sql) {
                                     if self.catalog.has_table(&table).await.unwrap_or(false) {
                                         let effective_sql = if params.is_empty() {
