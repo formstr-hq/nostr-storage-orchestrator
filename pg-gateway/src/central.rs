@@ -200,6 +200,9 @@ impl CentralStore {
 
     /// Creates the table row and the baseline migration in one transaction.
     /// `columns` is the canonical column list derived from the parsed DDL.
+    /// Version is monotonically derived from the max existing migration
+    /// version — hardcoding 1 made every CREATE TABLE share a version, so
+    /// `migrations_since(1)` skipped later migrations on catch-up.
     pub async fn create_table(
         &self,
         name: &str,
@@ -216,15 +219,20 @@ impl CentralStore {
             .transaction()
             .await
             .map_err(|error| GatewayError::central(format!("{error:?}")))?;
+        let next_version: i32 = tx
+            .query_one("SELECT COALESCE(MAX(version), 0) + 1 FROM pg_migration", &[])
+            .await
+            .map_err(|error| GatewayError::central(format!("{error:?}")))?
+            .get(0);
         tx.execute(
-            "INSERT INTO pg_table (name, columns, version, \"replicaN\", \"updatedAt\") VALUES ($1, $2, 1, $3, now())",
-            &[&name, &columns, &replica_count],
+            "INSERT INTO pg_table (name, columns, version, \"replicaN\", \"updatedAt\") VALUES ($1, $2, $4, $3, now()) ON CONFLICT (name) DO UPDATE SET columns = EXCLUDED.columns, version = EXCLUDED.version, \"updatedAt\" = now()",
+            &[&name, &columns, &replica_count, &next_version],
         )
         .await
         .map_err(|error| GatewayError::central(format!("{error:?}")))?;
         tx.execute(
-            "INSERT INTO pg_migration (id, ddl, version, state) VALUES ($1, $2, 1, 'PENDING')",
-            &[&migration_id, &ddl],
+            "INSERT INTO pg_migration (id, ddl, version, state) VALUES ($1, $2, $3, 'PENDING')",
+            &[&migration_id, &ddl, &next_version],
         )
         .await
         .map_err(|error| GatewayError::central(format!("{error:?}")))?;
