@@ -216,10 +216,11 @@ impl GatewayHandlers {
                             // must read somewhere.
                             let text = format!("{error}");
                             // Fan-out converts per-provider "does not exist"
-                            // into NoProviders, so both shapes fall back.
+                            // into NoProviders ("no healthy mesh-PG providers
+                            // are available" via to_wire_message), so match
+                            // both shapes loosely.
                             let missing_on_providers =
-                                text.contains("does not exist")
-                                    || text.contains("no healthy providers");
+                                text.contains("does not exist") || text.contains("no healthy");
                             if missing_on_providers {
                                 if let Some(table) = sqlanalyze::read_table_name(sql) {
                                     if self.catalog.has_table(&table).await.unwrap_or(false) {
