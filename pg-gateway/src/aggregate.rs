@@ -537,7 +537,7 @@ impl AggregatePlan {
                 .map(|(expr, alias)| format!("{expr} AS \"{alias}\""))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let mut sql = format!("SELECT DISTINCT {projections} FROM {}", self.table);
+            let mut sql = format!("SELECT DISTINCT {projections} FROM \"{}\"", self.table);
             if !self.filter.is_empty() {
                 sql.push_str(" WHERE ");
                 sql.push_str(&self.filter);
@@ -579,7 +579,7 @@ impl AggregatePlan {
                 }
             }
         }
-        let mut sql = format!("SELECT {} FROM {}", projections.join(", "), self.table);
+        let mut sql = format!("SELECT {} FROM \"{}\"", projections.join(", "), self.table);
         if !self.filter.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&self.filter);
