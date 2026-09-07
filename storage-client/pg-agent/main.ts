@@ -35,7 +35,11 @@ app.onError((error, ctx) => {
 
 app.use("*", corsMiddleware());
 
-// Mesh-PG endpoints sit under /pg/* and are mounted first.
+// Mesh-PG endpoints sit under /pg/* and are mounted first. The health
+// router is mounted BEFORE the auth middleware: /pg/health must be
+// probeable without credentials (Docker healthcheck, operators). All other
+// /pg/* routes sit behind the bearer token.
+app.route("/pg/health", buildHealthRouter(sql));
 app.route(
   "/pg",
   new Hono()
@@ -46,7 +50,6 @@ app.route(
       }
       await next();
     })
-    .route("/", buildHealthRouter(sql))
     .route("/", buildApplyRouter(sql))
     .route("/", buildSchemaRouter(sql))
     .route("/", buildQueryRouter(sql)),

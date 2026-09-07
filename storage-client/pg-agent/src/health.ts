@@ -8,6 +8,10 @@ import { currentSchemaVersion } from "./middleware.ts";
 export function buildHealthRouter(sql: postgres.Sql) {
   const app = new Hono();
 
+  // Unauthenticated: the Docker healthcheck (deno eval fetch, no headers)
+  // and operators probe this endpoint. It carries no secrets — only the
+  // schema version and public table names. Data endpoints (apply/schema/
+  // query) stay bearer-protected.
   app.get("/health", async (ctx) => {
     try {
       const version = await currentSchemaVersion(sql);
