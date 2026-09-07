@@ -143,12 +143,47 @@ docker compose ps   # storage-agent Up, not Restarting
 > nvpn0; set CONTROL_PLANE_HOST_TUNNEL_IP`, that env is missing — the
 > orchestrator's tunnel IP is in its `nvpn status --json` (`peers[].tunnel_ip`).
 
-If the storage npub is not yet authorized/linked, do it in admin-app
-(`<ADMIN_PUBLIC_URL>` from the orchestrator `.env`): authorize the
-provider's operator npub, then **Link a storage** with the provider's
-storage npub.
-(If the Member table was wiped by the redeploy, re-seed the bootstrap
-admin via `ADMIN_ALLOWED_PUBKEYS` in the orchestrator `.env`.)
+### Control-plane enrollment (required before pings succeed)
+
+The storage agent's ping requires BOTH: its signing npub is an **active
+Member**, and the **Storage** row is linked to that member. On a fresh DB
+(empty `"Member"` and `"Storage"` tables — verify:
+
+```bash
+docker exec nso_postgres psql -U orchestrator -d orchestrator \
+  -c 'SELECT * FROM "Member"; SELECT * FROM "Storage";'
+```
+
+on the orchestrator host), do the full enrollment from admin-app; do not
+assume an earlier deployment's roster survived:
+
+1. **Bootstrap admin.** The seed creates a Member from
+   `ADMIN_ALLOWED_PUBKEYS` only while the table is empty. Confirm the env
+   lists your admin npub, then open admin-app at `<ADMIN_PUBLIC_URL>` (from
+   the orchestrator `.env`) and verify `GET /v1/me` resolves your role.
+2. **Get the provider's identities** (on the provider):
+
+```bash
+docker exec storage-client-nvpn-1 sh -c \
+  'nvpn status --config "$XDG_CONFIG_HOME/nvpn/config.toml" --json' \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print("storage npub:", d["npub"])'
+```
+
+   The operator npub is the key the agent signs pings with; the storage npub
+   is the mesh identity above. In this deployment both are the same nVPN
+   identity — use it for both roles.
+3. **In admin-app:** authorize the provider's operator npub as a member,
+   then **Link a storage** with the provider's storage npub.
+4. Watch the agent's ping succeed (within ~15s):
+
+```bash
+docker logs storage-client-storage-agent-1 --tail 5   # no more ping WARNs
+```
+
+> Symptom reference: agent pings failing with `HTTP 404 Not Found` =
+> storage not linked (empty `"Storage"` table). Other ping failures:
+> connection refused = wrong `CONTROL_PLANE_API_PORT`; 401 = signing
+> identity not an authorized member or URL mismatch.
 
 The agent's ping does **not** carry `pgAgentPort`, so seed it once (agent
 liveness keeps the row fresh afterwards):
