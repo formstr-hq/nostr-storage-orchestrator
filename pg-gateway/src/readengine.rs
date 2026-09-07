@@ -89,6 +89,7 @@ impl ReadEngine {
             let Some(provider) = self.registry.resolve(replica) else {
                 continue;
             };
+            let replica_started = std::time::Instant::now();
             match tokio::time::timeout(
                 PROVIDER_READ_TIMEOUT,
                 self.provider.query_with_columns(&provider.url, &effective_sql),
@@ -96,6 +97,14 @@ impl ReadEngine {
             .await
             {
                 Ok(Ok((rows, columns))) => {
+                    tracing::info!(
+                        target: "query_metrics",
+                        route = "point_read",
+                        provider = %replica,
+                        rows = rows.len(),
+                        duration_ms = replica_started.elapsed().as_millis() as u64,
+                        "provider read"
+                    );
                     let rows = rows
                         .into_iter()
                         .filter(|row| {
@@ -105,10 +114,23 @@ impl ReadEngine {
                     return Ok(ReadResult { rows, partial: false, columns });
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!("point read from {replica} failed: {error}");
+                    tracing::warn!(
+                        target: "query_metrics",
+                        route = "point_read",
+                        provider = %replica,
+                        duration_ms = replica_started.elapsed().as_millis() as u64,
+                        error = %error,
+                        "provider read failed"
+                    );
                 }
                 Err(_) => {
-                    tracing::warn!("point read from {replica} timed out after {PROVIDER_READ_TIMEOUT:?}");
+                    tracing::warn!(
+                        target: "query_metrics",
+                        route = "point_read",
+                        provider = %replica,
+                        duration_ms = replica_started.elapsed().as_millis() as u64,
+                        "provider read timed out"
+                    );
                 }
             }
         }
@@ -116,6 +138,7 @@ impl ReadEngine {
     }
 
     pub async fn fanout_read(&self, sql: &str, pk_column: &str) -> Result<ReadResult> {
+        let fanout_started = std::time::Instant::now();
         let providers = self.registry.providers();
         if providers.is_empty() {
             return Err(GatewayError::NoProviders);
@@ -128,13 +151,14 @@ impl ReadEngine {
             let sql = sql.to_string();
             handles.push(tokio::spawn(async move {
                 let npub = provider.npub.clone();
+                let provider_started = std::time::Instant::now();
                 let result = tokio::time::timeout(
                     PROVIDER_READ_TIMEOUT,
                     client.query_with_columns(&url, &sql),
                 )
                 .await
                 .unwrap_or_else(|_| Err(GatewayError::provider("read timed out")));
-                (npub, result)
+                (npub, result, provider_started.elapsed())
             }));
         }
         // Dedup by pk *when the projection includes it* — a JOIN's `events.*`
@@ -148,7 +172,15 @@ impl ReadEngine {
         let mut columns_out: Vec<crate::provider::QueryColumn> = Vec::new();
         for handle in handles {
             match handle.await {
-                Ok((_npub, Ok((rows, columns)))) => {
+                Ok((npub, Ok((rows, columns)), provider_elapsed)) => {
+                    tracing::info!(
+                        target: "query_metrics",
+                        route = "fanout_read",
+                        provider = %npub,
+                        rows = rows.len(),
+                        duration_ms = provider_elapsed.as_millis() as u64,
+                        "provider read"
+                    );
                     answered += 1;
                     if columns_out.is_empty() {
                         columns_out = columns;
@@ -162,8 +194,15 @@ impl ReadEngine {
                         }
                     }
                 }
-                Ok((npub, Err(error))) => {
-                    tracing::warn!("fan-out read failed (sql={sql}): {error}");
+                Ok((npub, Err(error), provider_elapsed)) => {
+                    tracing::warn!(
+                        target: "query_metrics",
+                        route = "fanout_read",
+                        provider = %npub,
+                        duration_ms = provider_elapsed.as_millis() as u64,
+                        error = %error,
+                        "provider read failed"
+                    );
                 }
                 Err(join_error) => {
                     tracing::warn!("fan-out read task failed: {join_error}");
@@ -189,6 +228,16 @@ impl ReadEngine {
             }
         }
         }
+        tracing::info!(
+            target: "query_metrics",
+            route = "fanout_read",
+            providers_answered = answered,
+            providers_total = provider_count,
+            rows = rows.len(),
+            partial = answered < provider_count,
+            duration_ms = fanout_started.elapsed().as_millis() as u64,
+            "fan-out read merged"
+        );
         Ok(ReadResult { rows, partial: answered < provider_count, columns: columns_out })
     }
 }

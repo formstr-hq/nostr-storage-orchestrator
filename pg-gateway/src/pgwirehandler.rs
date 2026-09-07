@@ -646,7 +646,10 @@ impl SimpleQueryHandler for GatewayHandlers {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        match self.execute_sql(query, None).await {
+        let started = std::time::Instant::now();
+        let outcome = self.execute_sql(query, None).await;
+        query_metrics(query, "simple", started, &outcome);
+        match outcome {
             Ok(Outcome::Session) => {
                 // BEGIN/COMMIT/SET etc. ack as a no-op statement.
                 Ok(vec![Response::Execution(pgwire::api::results::Tag::new("OK"))])
@@ -658,6 +661,70 @@ impl SimpleQueryHandler for GatewayHandlers {
                 Ok(vec![rows_response(&columns, rows, count)?])
             }
             Err(error) => Err(self.error(&error)),
+        }
+    }
+}
+
+/// One-line per-statement metrics log: sql, wire protocol, routing outcome,
+/// row count and wall duration — the analysis feed for query behavior.
+fn query_metrics(
+    sql: &str,
+    protocol: &str,
+    started: std::time::Instant,
+    outcome: &Result<Outcome, GatewayError>,
+) {
+    let elapsed = started.elapsed();
+    let millis = elapsed.as_millis() as u64;
+    let truncated: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let truncated = if truncated.len() > 160 {
+        format!("{}…", &truncated[..160])
+    } else {
+        truncated
+    };
+    match outcome {
+        Ok(Outcome::Rows(_columns, rows, _count)) => {
+            tracing::info!(
+                target: "query_metrics",
+                protocol,
+                route = "read",
+                rows = rows.len(),
+                duration_ms = millis,
+                sql = %truncated,
+                "query executed"
+            );
+        }
+        Ok(Outcome::Command(tag, count)) => {
+            tracing::info!(
+                target: "query_metrics",
+                protocol,
+                route = "write",
+                tag = %tag,
+                affected = count,
+                duration_ms = millis,
+                sql = %truncated,
+                "query executed"
+            );
+        }
+        Ok(Outcome::Session) => {
+            tracing::debug!(
+                target: "query_metrics",
+                protocol,
+                route = "session",
+                duration_ms = millis,
+                sql = %truncated,
+                "query executed"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "query_metrics",
+                protocol,
+                route = "error",
+                duration_ms = millis,
+                error = %error,
+                sql = %truncated,
+                "query failed"
+            );
         }
     }
 }
@@ -755,7 +822,10 @@ impl ExtendedQueryHandler for GatewayHandlers {
                 Err(error) => return Err(self.error(&error)),
             }
         };
-        match self.execute_sql_bound(&effective_sql, row_id.as_deref(), &portal.parameters.iter().map(|_| None::<String>).collect::<Vec<_>>()).await {
+        let started = std::time::Instant::now();
+        let outcome = self.execute_sql_bound(&effective_sql, row_id.as_deref(), &portal.parameters.iter().map(|_| None::<String>).collect::<Vec<_>>()).await;
+        query_metrics(&effective_sql, "extended", started, &outcome);
+        match outcome {
             Ok(Outcome::Session) => Ok(Response::Execution(pgwire::api::results::Tag::new("OK"))),
             Ok(Outcome::Command(tag, count)) => {
                 Ok(Response::Execution(command_tag(&tag, count)))
