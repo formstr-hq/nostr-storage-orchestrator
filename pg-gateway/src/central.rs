@@ -688,6 +688,32 @@ impl CatalogStore {
             .collect())
     }
 
+    /// True when the catalog schema holds a table with this name (mirrored
+    /// DDL). Used to serve reads for registry-only tables that providers
+    /// never received.
+    pub async fn has_table(&self, table: &str) -> Result<bool> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("catalog pg client is initialized");
+        let row = client
+            .query_opt(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema = 'mesh_catalog' AND table_name = $1",
+                &[&table],
+            )
+            .await
+            .map_err(|error| GatewayError::central(format!("catalog has_table: {error:?}")))?;
+        Ok(row.is_some())
+    }
+
+    /// Executes a read against the catalog mirror with bare table names
+    /// qualified into mesh_catalog. Returns rows as JSON objects.
+    pub async fn read_qualified(&self, sql: &str) -> Result<Vec<Value>> {
+        // Qualify bare FROM/JOIN targets: `FROM events` -> `FROM mesh_catalog.events`.
+        let qualified = qualify_bare_tables(sql);
+        self.query(&qualified).await
+    }
+
     pub async fn query(&self, sql: &str) -> Result<Vec<Value>> {
         let mut client = self.connect().await?;
         let client = client
@@ -760,6 +786,54 @@ impl CatalogStore {
 /// catalog mirrors the mesh without colliding with gateway bookkeeping.
 fn qualify_ddl(ddl: &str) -> String {
     ddl.to_string()
+}
+
+/// Qualifies bare table references after FROM/JOIN with the catalog schema.
+/// Conservative: only unqualified identifiers immediately after FROM/JOIN
+/// keywords are touched.
+fn qualify_bare_tables(sql: &str) -> String {
+    let mut result = sql.to_string();
+    for keyword in ["from", "join"] {
+        let mut search_from = 0usize;
+        loop {
+            let lower = result.to_ascii_lowercase();
+            let Some(offset) = lower[search_from..].find(&format!("{keyword} ")) else { break };
+            let start = search_from + offset + keyword.len();
+            // skip whitespace
+            let bytes = result.as_bytes();
+            let mut cursor = start;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            // identifier start?
+            let is_ident_start = cursor < bytes.len()
+                && (bytes[cursor].is_ascii_alphabetic() || bytes[cursor] == b'_');
+            if is_ident_start {
+                // check not already qualified (next non-ident char isn't '.')
+                let mut end = cursor;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'$')
+                {
+                    end += 1;
+                }
+                let already = end < bytes.len() && bytes[end] == b'.';
+                if !already {
+                    let name = result[cursor..end].to_string();
+                    let qualified_name = format!("mesh_catalog.{name}");
+                    result = format!(
+                        "{}{}{}",
+                        &result[..cursor],
+                        qualified_name,
+                        &result[end..]
+                    );
+                    search_from = cursor + qualified_name.len();
+                    continue;
+                }
+            }
+            search_from = start;
+        }
+    }
+    result
 }
 
 fn mesh_table_from_row(row: &Row) -> MeshTable {

@@ -181,24 +181,57 @@ impl GatewayHandlers {
                         })
                 };
                 let pk_name = pk_column.clone().unwrap_or_else(|| sqlanalyze::PK_COLUMN.to_string());
-                let result = match point {
-                    Some(row_id) => {
-                        let effective_sql = if params.is_empty() {
-                            sql.to_string()
-                        } else {
-                            inline_params(sql, params)?
-                        };
-                        self.read.point_read(&effective_sql, &row_id, &pk_name).await
+                let read_outcome = async {
+                    match match point {
+                        Some(row_id) => {
+                            let effective_sql = if params.is_empty() {
+                                sql.to_string()
+                            } else {
+                                inline_params(sql, params)?
+                            };
+                            self.read.point_read(&effective_sql, &row_id, &pk_name).await
+                        }
+                        None => {
+                            let effective_sql = if params.is_empty() {
+                                sql.to_string()
+                            } else {
+                                inline_params(sql, params)?
+                            };
+                            self.read.fanout_read(&effective_sql, &pk_name).await
+                        },
+                    } {
+                        Ok(result) => Ok(result),
+                        Err(error) => {
+                            // Registry-only tables (mirrored DDL lives in the
+                            // catalog but providers never got them — e.g.
+                            // legacy Prisma tables): serve from the catalog
+                            // mirror instead of failing. pgweb browses every
+                            // table it sees in information_schema, so these
+                            // must read somewhere.
+                            let text = format!("{error}");
+                            if text.contains("does not exist") {
+                                if let Some(table) = sqlanalyze::read_table_name(sql) {
+                                    if self.catalog.has_table(&table).await.unwrap_or(false) {
+                                        let effective_sql = if params.is_empty() {
+                                            sql.to_string()
+                                        } else {
+                                            inline_params(sql, params)?
+                                        };
+                                        let rows = self.catalog.read_qualified(&effective_sql).await?;
+                                        return Ok(crate::readengine::ReadResult {
+                                            rows,
+                                            partial: false,
+                                            columns: vec![],
+                                        });
+                                    }
+                                }
+                            }
+                            Err(error)
+                        }
                     }
-                    None => {
-                        let effective_sql = if params.is_empty() {
-                            sql.to_string()
-                        } else {
-                            inline_params(sql, params)?
-                        };
-                        self.read.fanout_read(&effective_sql, &pk_name).await
-                    },
-                }?;
+                }
+                .await?;
+                let result = read_outcome;
                 let table = sqlanalyze::read_table_name(sql).unwrap_or_default();
                 let columns = apply_provider_oids(
                     infer_columns(&result.rows, &table),
@@ -568,6 +601,28 @@ fn apply_provider_oids(mut columns: Vec<Column>, provider: &[crate::provider::Qu
     columns
 }
 
+/// Rewrites JS toISOString output ("2026-09-07T14:19:36.633Z") into the
+/// Postgres text format lib/pq expects ("2026-09-07 14:19:36.633+00").
+/// Values already in Postgres form pass through unchanged.
+fn normalize_timestamp(text: &str) -> String {
+    let trimmed = text.trim();
+    // Only touch ISO-8601 shape: yyyy-mm-ddThh:mm...
+    let looks_iso = trimmed.len() >= 11
+        && trimmed.as_bytes().get(10) == Some(&b'T')
+        && trimmed.as_bytes().get(4) == Some(&b'-')
+        && trimmed.as_bytes().get(7) == Some(&b'-');
+    if !looks_iso {
+        return text.to_string();
+    }
+    let mut normalized = trimmed.replacen('T', " ", 1);
+    // Zone suffix: 'Z' -> "+00"; keep explicit offsets as-is.
+    if normalized.ends_with('Z') {
+        normalized.pop();
+        normalized.push_str("+00");
+    }
+    normalized
+}
+
 fn value_to_wire_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
@@ -621,7 +676,7 @@ fn rows_response(columns: &[Column], rows: Vec<Vec<Option<String>>>, _count: usi
             match value {
                 Some(text) => {
                     // A TEXT-declared field must not encode a str as bytea
-                    // (node-pg's text parser would read the raw length byte
+                    // (node-pq's text parser would read the raw length byte
                     // as data). Encode per declared type.
                     match declared_type {
                         Type::BYTEA => {
@@ -630,6 +685,14 @@ fn rows_response(columns: &[Column], rows: Vec<Vec<Option<String>>>, _count: usi
                                 .filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
                                 .collect();
                             encoder.encode_field(&bytes)?;
+                        }
+                        // Providers serialize timestamps via JS toISOString
+                        // ("2026-09-07T14:19:36.633Z"); lib/pq's timestamp
+                        // layouts reject the ISO 'T' separator and a 'Z' on a
+                        // timestamp-without-time-zone — normalize to Postgres
+                        // text form ("2026-09-07 14:19:36.633+00").
+                        Type::TIMESTAMP | Type::TIMESTAMPTZ => {
+                            encoder.encode_field(&normalize_timestamp(text))?;
                         }
                         _ => encoder.encode_field(&text)?,
                     }
@@ -1419,4 +1482,43 @@ fn is_ddl_text(sql: &str) -> bool {
     lower.starts_with("create")
         || lower.starts_with("alter")
         || lower.starts_with("drop")
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::normalize_timestamp;
+
+    #[test]
+    fn iso_z_to_pg_text() {
+        assert_eq!(
+            normalize_timestamp("2026-09-07T14:19:36.633Z"),
+            "2026-09-07 14:19:36.633+00"
+        );
+    }
+
+    #[test]
+    fn pg_form_untouched() {
+        assert_eq!(
+            normalize_timestamp("2026-09-07 14:19:36.633"),
+            "2026-09-07 14:19:36.633"
+        );
+        assert_eq!(
+            normalize_timestamp("2026-09-07 14:19:36.633+00"),
+            "2026-09-07 14:19:36.633+00"
+        );
+    }
+
+    #[test]
+    fn offset_kept() {
+        assert_eq!(
+            normalize_timestamp("2026-09-07T14:19:36.633+05:30"),
+            "2026-09-07 14:19:36.633+05:30"
+        );
+    }
+
+    #[test]
+    fn non_timestamp_untouched() {
+        assert_eq!(normalize_timestamp("hello world"), "hello world");
+        assert_eq!(normalize_timestamp(""), "");
+    }
 }
