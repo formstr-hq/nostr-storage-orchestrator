@@ -1,0 +1,45 @@
+# mesh-PG explorer: pgweb (read-only) over the mesh-PG gateway's meshdb,
+# gated by a NIP-98 admin-only auth proxy (pg-explorer).
+#
+#   dbase.stg.formstr.app (nginx) -> pg-explorer :8090 -> pgweb :8081 -> gateway
+#
+# pgweb is never exposed; only the auth proxy is. Front with nginx:
+#   dbase.stg.formstr.app -> 127.0.0.1:8090  (websocket-friendly, see nginx vhost)
+#
+# Required env (compose reads a .env or the shell):
+#   PG_GATEWAY_PASSWORD   gateway password
+#   GATEWAY_HOST          how pgweb reaches the gateway (default host.docker.internal)
+#   GATEWAY_PORT          gateway port on that host (default 55432)
+#   EXPLORER_URL          https://dbase.stg.formstr.app/  (NIP-98 u-tag must match)
+#   ALLOWED_NPUBS         comma/space separated admin npubs (fail-closed if empty)
+
+services:
+  pgweb:
+    image: sosedoff/pgweb:latest
+    container_name: pgx-pgweb
+    restart: unless-stopped
+    command:
+      - "--bind=0.0.0.0"
+      - "--listen=8081"
+      - "--readonly"
+      - "--url=postgres://admin:${PG_GATEWAY_PASSWORD}@${GATEWAY_HOST:-host.docker.internal}:${GATEWAY_PORT:-55432}/meshdb?sslmode=disable"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # no published ports: only pg-explorer reaches it on the compose network
+
+  pg-explorer:
+    build: ./pg-explorer
+    container_name: pg-explorer
+    restart: unless-stopped
+    depends_on:
+      - pgweb
+    environment:
+      PROXY_PORT: "8090"
+      PROXY_BIND: "0.0.0.0"
+      PGWEB_URL: "http://pgweb:8081"
+      EXPLORER_URL: "${EXPLORER_URL}"
+      ALLOWED_NPUBS: "${ALLOWED_NPUBS}"
+      SESSION_TTL_HOURS: "8"
+      NIP98_WINDOW_SECONDS: "300"
+    ports:
+      - "127.0.0.1:8090:8090"

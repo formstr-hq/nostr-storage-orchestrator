@@ -1,0 +1,9 @@
+{
+  "name": "pg-explorer-proxy",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "nostr-tools": "^2.23.5"
+  }
+}
