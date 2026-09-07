@@ -890,10 +890,21 @@ impl ExtendedQueryHandler for GatewayHandlers {
                 None => vec![],
             }
         };
-        let param_types: Vec<Type> = target
-            .parameter_types
-            .iter()
-            .map(|pt| pt.clone().unwrap_or(Type::UNKNOWN))
+        // Merge client-declared types with server-inferred ones (same as
+        // pgwire's default impl): lib/pq Parses without type hints and relies
+        // on ParameterDescription to report every `$N`, so the count must come
+        // from the SQL, not from the (empty) client declaration.
+        let server_param_types = self.query_parser().get_parameter_types(&target.statement)?;
+        let param_types: Vec<Type> = (0..std::cmp::max(target.parameter_types.len(), server_param_types.len()))
+            .map(|idx| {
+                target
+                    .parameter_types
+                    .get(idx)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| server_param_types.get(idx).cloned())
+                    .unwrap_or(Type::UNKNOWN)
+            })
             .collect();
         Ok(DescribeStatementResponse::new(param_types, schema))
     }
