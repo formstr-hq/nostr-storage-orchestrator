@@ -665,6 +665,29 @@ impl CatalogStore {
         Ok(statement.columns().iter().map(|column| column.name().to_string()).collect())
     }
 
+    /// Column names AND real type OIDs from a prepare(). Used by the catalog
+    /// read path so numeric results (pg_class.reltuples, counts) are declared
+    /// as their actual types — text-only declaration crashes lib/pq clients
+    /// that type-assert numeric values.
+    pub async fn describe_typed_columns(&self, sql: &str) -> Result<Vec<crate::pgwirehandler::Column>> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("catalog pg client is initialized");
+        let statement = client
+            .prepare(sql)
+            .await
+            .map_err(|error| GatewayError::central(format!("catalog describe: {error:?}")))?;
+        Ok(statement
+            .columns()
+            .iter()
+            .map(|column| crate::pgwirehandler::Column {
+                name: column.name().to_string(),
+                type_oid: column.type_().oid(),
+            })
+            .collect())
+    }
+
     pub async fn query(&self, sql: &str) -> Result<Vec<Value>> {
         let mut client = self.connect().await?;
         let client = client

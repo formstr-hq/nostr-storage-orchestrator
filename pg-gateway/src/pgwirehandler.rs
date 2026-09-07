@@ -1203,7 +1203,13 @@ impl GatewayHandlers {
         }
         tracing::debug!("catalog read effective_sql={}", effective_sql);
         let rows = self.catalog.query(&effective_sql).await?;
-        let columns = infer_columns(&rows, "");
+        // Real column types from a prepare(): clients like pgweb (lib/pq)
+        // assert numeric catalog results (reltuples, counts) — declaring
+        // everything TEXT crashes them even when the text itself is numeric.
+        let columns = match self.catalog.describe_typed_columns(&effective_sql).await {
+            Ok(typed) if !typed.is_empty() => typed,
+            _ => infer_columns(&rows, ""),
+        };
         let count = rows.len();
         let wire_rows = rows
             .iter()
