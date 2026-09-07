@@ -50,7 +50,7 @@ export function buildSchemaRouter(sql: postgres.Sql) {
           // the migration as applied rather than wedging the provider. Any
           // other error is fatal (real schema drift).
           const message = error instanceof Error ? error.message : String(error);
-          if (!ALREADY_EXISTS.test(message)) {
+          if (!ALREADY_EXISTS.test(message) && !DOES_NOT_EXIST.test(message)) {
             throw error;
           }
           await sql`
@@ -119,3 +119,12 @@ export function stripServerGenerators(ddl: string): string {
 /// named indexes via duplicate_table semantics).
 const ALREADY_EXISTS =
   /42P07|42710|42723|42701|42P06|42P04|already exists/i;
+
+/// PG error classes for "object does not exist": undefined_object (42P01),
+/// undefined_column (42703), undefined_parameter (42P02),
+/// undefined_function (42883), invalid_name (42602). Catch-up replays may
+/// re-send DROPs whose target is already gone (the DDL ran directly or the
+/// provider replayed it before the ack was recorded) — the end state is the
+/// intended one, so record the migration instead of wedging the provider.
+const DOES_NOT_EXIST =
+  /42P01|42703|42P02|42704|42602|42883|does not exist/i;
