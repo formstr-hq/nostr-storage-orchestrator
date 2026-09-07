@@ -35,21 +35,25 @@ app.onError((error, ctx) => {
 
 app.use("*", corsMiddleware());
 
-// Mesh-PG endpoints sit under /pg/* and are mounted first. The health
-// router is mounted BEFORE the auth middleware: /pg/health must be
-// probeable without credentials (Docker healthcheck, operators). All other
-// /pg/* routes sit behind the bearer token.
-app.route("/pg/health", buildHealthRouter(sql));
+// Mesh-PG endpoints under /pg/*. The auth middleware exempts /pg/health:
+// it must be probeable without credentials (Docker healthcheck sends a
+// bare fetch, operators probe directly), and it exposes nothing sensitive
+// (schema version + public table names). Note Hono's route() mounting has
+// no precedence — an earlier "/pg/health" mount would still be caught by
+// this "/pg" middleware, so the exemption lives here, in the middleware
+// itself (verified: /pg/health -> 200, /pg/apply -> 401).
 app.route(
   "/pg",
   new Hono()
     .use("*", async (ctx, next) => {
+      if (ctx.req.path === "/pg/health") return next();
       const token = ctx.req.header("authorization")?.replace(/^Bearer\s+/i, "");
       if (config.token && token !== config.token) {
         return errorResponse(ctx, 401, "invalid_token");
       }
       await next();
     })
+    .route("/", buildHealthRouter(sql))
     .route("/", buildApplyRouter(sql))
     .route("/", buildSchemaRouter(sql))
     .route("/", buildQueryRouter(sql)),
