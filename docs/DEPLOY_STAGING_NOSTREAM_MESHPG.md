@@ -108,8 +108,7 @@ git fetch origin && git checkout decentralized-pg && git status --short
 ```
 
 Add to `storage-client/.env` (same token as the orchestrator's
-`PG_PROVIDER_TOKEN`;
-data goes on the 2 TB disk):
+`PG_PROVIDER_TOKEN`; data goes on the 2 TB disk):
 
 ```bash
 MESH_PG_DATA_PATH=/mnt/blossom/mesh-pg-data
@@ -118,6 +117,9 @@ MESH_PG_PASSWORD=<random>
 MESH_PG_DATABASE=mesh
 PG_AGENT_PORT=3300
 PG_AGENT_TOKEN=<same as PG_PROVIDER_TOKEN>
+# The reporting agent resolves the control plane's tunnel IP from nvpn0
+# routes; with more than one /32 peer route it needs it explicitly:
+CONTROL_PLANE_HOST_TUNNEL_IP=<orchestrator tunnel ip, 10.44.x.y>
 ```
 
 ```bash
@@ -134,7 +136,12 @@ Start the reporting agent (keeps `lastPingAt` fresh — the active window is
 
 ```bash
 docker compose --profile agent up -d --build storage-agent
+docker compose ps   # storage-agent Up, not Restarting
 ```
+
+> If storage-agent crash-loops with `more than one /32 peer route exists on
+> nvpn0; set CONTROL_PLANE_HOST_TUNNEL_IP`, that env is missing — the
+> orchestrator's tunnel IP is in its `nvpn status --json` (`peers[].tunnel_ip`).
 
 If the storage npub is not yet authorized/linked, do it in admin-app
 (`<ADMIN_PUBLIC_URL>` from the orchestrator `.env`): authorize the
