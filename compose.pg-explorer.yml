@@ -18,10 +18,12 @@ services:
     image: sosedoff/pgweb:latest
     container_name: pgx-pgweb
     restart: unless-stopped
+    # NOTE: no --readonly. pgweb's read-only mode runs a startup check that
+    # returns no rows through the gateway and crash-loops it; read-only is
+    # enforced in the pg-explorer proxy instead (rejects non-SELECT SQL).
     command:
       - "--bind=0.0.0.0"
       - "--listen=8081"
-      - "--readonly"
       - "--url=postgres://admin:${PG_GATEWAY_PASSWORD}@${GATEWAY_HOST:-host.docker.internal}:${GATEWAY_PORT:-55432}/meshdb?sslmode=disable"
     extra_hosts:
       - "host.docker.internal:host-gateway"
