@@ -724,30 +724,59 @@ impl CatalogStore {
             .collect())
     }
 
-    /// True when the catalog schema holds a table with this name (mirrored
-    /// DDL). Used to serve reads for registry-only tables that providers
-    /// never received.
+    /// True when the central database holds a table with this name — either a
+    /// mesh-catalog mirror (`mesh_catalog.<table>`) or a legacy orchestrator
+    /// table in `public` (pre-mesh tables like the Prisma set that providers
+    /// never received). Used to serve reads for registry-only tables.
     pub async fn has_table(&self, table: &str) -> Result<bool> {
         let mut client = self.connect().await?;
         let client = client
             .as_mut()
-            .expect("catalog pg client is initialized");
+            .expect("central pg client is initialized");
+        let row = client
+            .query_opt(
+                "SELECT 1 FROM information_schema.tables WHERE (table_schema = 'mesh_catalog' OR table_schema = 'public') AND table_name = $1",
+                &[&table],
+            )
+            .await
+            .map_err(|error| GatewayError::central(format!("central has_table: {error:?}")))?;
+        Ok(row.is_some())
+    }
+
+    /// Executes a read against the central database. Bare table names are
+    /// qualified into mesh_catalog only when ALL referenced tables live there
+    /// (mirrored DDL); legacy orchestrator tables run on the default public
+    /// search path unchanged.
+    pub async fn read_qualified(&self, sql: &str) -> Result<Vec<Value>> {
+        let mut all_mesh = true;
+        for name in bare_tables(sql) {
+            if !self.mesh_catalog_has(&name).await.unwrap_or(false) {
+                all_mesh = false;
+                break;
+            }
+        }
+        if all_mesh && !bare_tables(sql).is_empty() {
+            let qualified = qualify_bare_tables(sql);
+            self.query(&qualified).await
+        } else {
+            self.query(sql).await
+        }
+    }
+
+    /// True when `table` exists in the mesh_catalog schema.
+    async fn mesh_catalog_has(&self, table: &str) -> Result<bool> {
+        let mut client = self.connect().await?;
+        let client = client
+            .as_mut()
+            .expect("central pg client is initialized");
         let row = client
             .query_opt(
                 "SELECT 1 FROM information_schema.tables WHERE table_schema = 'mesh_catalog' AND table_name = $1",
                 &[&table],
             )
             .await
-            .map_err(|error| GatewayError::central(format!("catalog has_table: {error:?}")))?;
+            .map_err(|error| GatewayError::central(format!("central has_table: {error:?}")))?;
         Ok(row.is_some())
-    }
-
-    /// Executes a read against the catalog mirror with bare table names
-    /// qualified into mesh_catalog. Returns rows as JSON objects.
-    pub async fn read_qualified(&self, sql: &str) -> Result<Vec<Value>> {
-        // Qualify bare FROM/JOIN targets: `FROM events` -> `FROM mesh_catalog.events`.
-        let qualified = qualify_bare_tables(sql);
-        self.query(&qualified).await
     }
 
     pub async fn query(&self, sql: &str) -> Result<Vec<Value>> {
@@ -822,6 +851,47 @@ impl CatalogStore {
 /// catalog mirrors the mesh without colliding with gateway bookkeeping.
 fn qualify_ddl(ddl: &str) -> String {
     ddl.to_string()
+}
+
+/// Extracts bare (unqualified) table identifiers following FROM/JOIN.
+fn bare_tables(sql: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let lower = sql.to_ascii_lowercase();
+    for keyword in ["from", "join"] {
+        let mut offset = 0usize;
+        while let Some(idx) = lower[offset..].find(&format!("{keyword} ")) {
+            let start = offset + idx + keyword.len();
+            let bytes = sql.as_bytes();
+            let mut pos = start;
+            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_') {
+                let mut end = pos;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'$')
+                {
+                    end += 1;
+                }
+                // Skip schema-qualified names and keyword-shaped tokens
+                // (e.g. "from" of a subquery, "join" aliases are handled by
+                // the identifier rule above).
+                if end == bytes.len() || bytes[end] != b'.' {
+                    let name = sql[pos..end].to_string();
+                    if !matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "only" | "lateral" | "unnest" | "generate_series" | "dual" | "values"
+                    ) {
+                        names.push(name);
+                    }
+                }
+                offset = end;
+            } else {
+                offset = start;
+            }
+        }
+    }
+    names
 }
 
 /// Qualifies bare table references after FROM/JOIN with the catalog schema.
