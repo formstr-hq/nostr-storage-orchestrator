@@ -29,8 +29,11 @@ Two hard rules while executing:
 - Never run `scripts/nvpn-mesh-e2e.sh` / `control-plane-e2e.sh` against a
   real deployment — they wipe the `nvpn_data` volumes (mesh identity +
   invites).
-- Recreating the `nvpn` sidecar is expected once (provider, step 3) — mesh
-  identity survives; brief blossom/strfry outage only.
+- Recreating the `nvpn` sidecar (steps 1 and 3) requires recreating every
+  container that shares its network namespace (`blossom relay admin` on the
+  orchestrator; `blossom relay mesh-postgres pg-agent` on the provider) —
+  `docker restart` of those fails once the old sidecar is gone. Mesh
+  identity survives in the `nvpn_data` volume; outage is brief.
 
 ---
 
@@ -71,7 +74,12 @@ docker exec nso_postgres psql -U orchestrator -d orchestrator -c '\dt'
 # expect: Blob, RelayEvent, User, Member, Storage, PgTable, PgMigration,
 #         PgMigrationState, PgWriteOp, PgPlacement
 
-docker compose up -d pg-gateway nvpn
+# IMPORTANT: recreating the nvpn sidecar destroys its network namespace,
+# and blossom/relay/admin live inside that namespace (network_mode:
+# "service:nvpn"). They must be recreated together with it — `docker restart`
+# of a namespace-sharing container fails with "No such container" against
+# the replaced sidecar.
+docker compose up -d --force-recreate nvpn blossom relay admin pg-gateway
 swapoff /swapfile && rm /swapfile   # build done; reclaim disk
 ```
 
@@ -114,8 +122,10 @@ PG_AGENT_TOKEN=<same as PG_PROVIDER_TOKEN>
 
 ```bash
 cd storage-client
-docker compose up -d --build
-# recreates nvpn (NVPN_MESH_INPUT_PORTS gains 3300) + starts mesh-postgres, pg-agent
+# nvpn is recreated (NVPN_MESH_INPUT_PORTS gains 3300) — recreate its
+# namespace-mates together with it (docker restart will NOT work, see the
+# hard rule above):
+docker compose up -d --force-recreate nvpn blossom relay mesh-postgres pg-agent
 docker compose ps   # all healthy
 ```
 
