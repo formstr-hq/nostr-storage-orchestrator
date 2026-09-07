@@ -755,10 +755,11 @@ impl QueryParser for StatementParser {
     }
 
     fn get_parameter_types(&self, stmt: &Self::Statement) -> PgWireResult<Vec<Type>> {
-        match stmt.placeholder {
-            Some(_) => Ok(vec![Type::TEXT]),
-            None => Ok(vec![]),
-        }
+        // Report one TEXT slot per `$N` in the statement. Params are inlined as
+        // text literals before execution, so TEXT is the right advertised type;
+        // the count must match what the client will Bind (e.g. pgweb's
+        // `LIMIT $1 OFFSET $2`), or the Bind is rejected.
+        Ok(vec![Type::TEXT; sqlanalyze::max_param_index(&stmt.sql)])
     }
 
     fn get_result_schema(

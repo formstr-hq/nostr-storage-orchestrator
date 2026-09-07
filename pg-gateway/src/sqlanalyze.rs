@@ -563,14 +563,30 @@ fn object_name_eq(name: &ObjectName, expected: &str) -> bool {
 }
 
 fn extract_table_name(name: &ObjectName) -> Result<String> {
-    if name.0.len() != 1 {
-        return Err(GatewayError::UnsupportedSql(
-            "qualified table names (schema.table) are not supported".to_string(),
-        ));
-    }
-    let first = &name.0[0];
-    let ident = first
-        .as_ident()
+    // Accept an optional `public.` schema qualifier. Tools like pgweb (and many
+    // ORMs) emit schema-qualified names; the mesh only manages the public
+    // schema, so `public.<t>` is just `<t>`. Any other schema is rejected.
+    let ident = match name.0.as_slice() {
+        [table] => table.as_ident(),
+        [schema, table] => {
+            let schema_ok = schema
+                .as_ident()
+                .map(|ident| ident.value.eq_ignore_ascii_case("public"))
+                .unwrap_or(false);
+            if !schema_ok {
+                return Err(GatewayError::UnsupportedSql(
+                    "only tables in the public schema are supported".to_string(),
+                ));
+            }
+            table.as_ident()
+        }
+        _ => {
+            return Err(GatewayError::UnsupportedSql(
+                "qualified table names deeper than schema.table are not supported".to_string(),
+            ));
+        }
+    };
+    let ident = ident
         .ok_or_else(|| GatewayError::UnsupportedSql("table name must be an identifier".to_string()))?;
     Ok(ident.value.clone())
 }
@@ -976,6 +992,38 @@ pub fn point_read_row_id_with_pk(sql: &str, pk_column: &str) -> Result<Option<St
 
 /// Placeholder name (e.g. "$1") when a statement's WHERE constrains the pk
 /// to a parameter marker instead of a literal.
+/// Highest `$N` parameter index referenced in the SQL (0 if none). Postgres
+/// numbers bind parameters `$1..$N`, so this is the parameter count reported in
+/// Describe. Counts the same way `inline_params` substitutes (naive `$N` scan),
+/// so the two stay consistent. Clients (pgweb sends `LIMIT $1 OFFSET $2`) reject
+/// a Bind whose count disagrees with the Describe.
+pub fn max_param_index(sql: &str) -> usize {
+    let bytes = sql.as_bytes();
+    let mut max = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            let mut j = i + 1;
+            let mut num = 0usize;
+            let mut has_digit = false;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                num = num * 10 + (bytes[j] - b'0') as usize;
+                has_digit = true;
+                j += 1;
+            }
+            if has_digit {
+                if num > max {
+                    max = num;
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    max
+}
+
 pub fn pk_placeholder(sql: &str) -> Option<String> {
     // Any `ident = $N` equality can be the pk placeholder; the analyzer
     // narrows it to the declared pk at execute time (extended protocol
