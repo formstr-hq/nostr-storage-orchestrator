@@ -98,6 +98,26 @@ dispatch:
    too): attach the adapter synchronously first, then run the connection
    rate-limit check and terminate if limited. Upstream-worthy.
 
+   **Upstream note (2026-09-07):** the fix is fork-only for now —
+   `cameri/nostream` restricts PR/issue creation to prior contributors, so
+   `abh3po/nostream` (fresh fork of upstream `main`) carries
+   `fix/ws-adapter-race` but no PR is open. The fix lives in fork `main`
+   (`d55a72c`). **Maintenance: rebase the fork on upstream regularly**:
+
+   ```
+   cd ~/Dev/nostream
+   git remote add upstream https://github.com/cameri/nostream.git   # once
+   git fetch upstream main
+   git checkout main && git rebase upstream/main
+   # resolve conflicts; if web-socket-server-adapter.ts conflicts, re-verify
+   # the fix is present: adapter attached BEFORE any await in onConnection
+   git push --force-with-lease origin main
+   # rebuild the image we deploy (nostream-mesh-nostream) afterwards
+   ```
+   The zero-listener drop re-silently-eats publishes if a rebase loses the
+   fix — after every rebase, re-run the `nak event` publish check from
+   DEPLOY_STAGING_NOSTREAM_MESHPG.md before deploying.
+
 2. **Mesh schema a generation behind the image.** nostream v3.0.0 ships 33
    migrations (local checkout only had 25); the mesh DB was migrated with the
    old set, so `users.is_vanished` was missing — every publish died inside
