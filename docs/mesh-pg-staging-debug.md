@@ -244,3 +244,37 @@ ssh dobby@<ygg> "docker exec storage-client-mesh-postgres-1 psql -U mesh -d mesh
 # provider health
 ssh root@72.61.138.38 'docker run --rm --network container:nso_nvpn postgres:16-alpine sh -c "wget -qO- http://10.44.160.190:3300/pg/health"'
 ```
+
+## 2026-09-08 session — pgweb "no records" root cause + aggregations live
+
+**Why `select * from events` showed rows not found (and event_tags worked):**
+lib/pq (pgweb's driver) decodes DataRows by declared OID. Providers serialize
+timestamps via JS `toISOString()` (`2026-09-07T14:19:36.633Z`); pq's timestamp
+layouts reject the ISO `T` and a `Z` on a timestamp-without-time-zone
+(OID 1114). Every row scan errored → pgweb rendered an empty result. Bisected
+by column: `first_seen` alone reproduced it; event_tags has no timestamp
+column, hence "worked". Fix: gateway normalizes timestamps to PG text form
+(`2026-09-07 14:19:36.633+00`) per declared type before encoding.
+
+**Sidepane 400/500 on some tables:** legacy Prisma tables (User/Storage/Blob/
+RelayEvent/Member/_prisma_migrations) live only in the orchestrator DB —
+providers never received them (pre-mesh DDL). pgweb browses everything it sees
+in information_schema. Fix: read fallback to the central DB (mesh_catalog or
+public), including for `COUNT(1)` via the aggregate engine; partial SQL now
+quotes table names (case-sensitive tables).
+
+**Describe/Execute arity (deferred #1):** Describe now prefers the live
+provider column snapshot (refreshed on every fan-out read) over the
+potentially-stale registry.
+
+**Migration versioning (deferred #2):** CREATE TABLE versions are now
+monotonic (MAX(version)+1) instead of hardcoded 1; pg-agent catch-up tolerates
+"does not exist" replays alongside "already exists".
+
+**Aggregations live (map-reduce):** providers compute partials over their
+exclusive slices; gateway merges. Verified values match psql exactly:
+sum/avg/min/max/count(distinct)/GROUP BY/HAVING/ORDER BY/LIMIT/DISTINCT.
+Aggregates over JOINs and aggregates inside expressions remain rejected.
+
+Commits: c67f77b, e2fe3d0, f778019, cc5a8c4, 61f5375, f8406e0, 7f19ff8,
+9f4bfe2, 128e11e. Provider onboarding runbook: docs/provider-onboarding.md.
