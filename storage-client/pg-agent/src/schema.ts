@@ -25,17 +25,9 @@ export function buildSchemaRouter(sql: postgres.Sql) {
     }
     const migrations = parsed.data.migrations;
     try {
-      await sql`CREATE TABLE IF NOT EXISTS _mesh_pg_meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )`;
-      // Track applied migration ids so replays are no-ops.
-      await sql`CREATE TABLE IF NOT EXISTS _mesh_pg_migrations (
-        id TEXT PRIMARY KEY,
-        version INTEGER NOT NULL,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      )`;
-
+      // _mesh_pg_meta / _mesh_pg_migrations are created once at startup
+      // (ensureMeshSchema); creating them here per-request raced on pg_type
+      // ("duplicate key ... pg_type_typname_nsp_index") and failed the apply.
       let version = await currentVersion(sql);
       for (const migration of migrations) {
         const known = await sql`

@@ -15,9 +15,13 @@ export function buildHealthRouter(sql: postgres.Sql) {
   app.get("/health", async (ctx) => {
     try {
       const version = await currentSchemaVersion(sql);
+      // Exclude gateway bookkeeping tables (leading underscore). Uses a POSIX
+      // regex, not LIKE: in a JS tagged template `'\_%'` collapses to `'_%'`
+      // (the backslash is dropped), so `NOT LIKE '_%'` silently excluded EVERY
+      // non-empty table name and health always reported an empty list.
       const tables = await sql`
         SELECT tablename FROM pg_tables
-        WHERE schemaname = 'public' AND tablename NOT LIKE '\_%'
+        WHERE schemaname = 'public' AND tablename !~ '^_'
       `;
       return ctx.json({
         status: "ok",

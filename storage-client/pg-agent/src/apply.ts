@@ -82,13 +82,8 @@ export function buildApplyRouter(sql: postgres.Sql) {
 
     try {
       await sql.begin(async (tx) => {
-        // A fresh provider may receive a RAW DDL op (e.g. CREATE EXTENSION,
-        // migration #1) before any /pg/schema call has bootstrapped the
-        // idempotency table. Ensure it exists so the gate below never faults.
-        await tx`CREATE TABLE IF NOT EXISTS _mesh_pg_meta (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL
-        )`;
+        // _mesh_pg_meta is created once at startup (ensureMeshSchema); creating
+        // it here inside the txn raced on pg_type and could poison the batch.
         for (const op of ops) {
           const table = op.table;
           // Idempotency gate: skip ops already applied.

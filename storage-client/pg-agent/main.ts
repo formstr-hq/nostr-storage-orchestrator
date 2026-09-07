@@ -26,6 +26,36 @@ const sql = postgres({
   connect_timeout: 10,
 });
 
+// Create the gateway bookkeeping tables ONCE at startup, before serving. Doing
+// this per-request from /pg/apply, /pg/schema and /pg/health raced: concurrent
+// `CREATE TABLE IF NOT EXISTS` is not atomic against pg_type and intermittently
+// failed with "duplicate key ... pg_type_typname_nsp_index", wedging schema
+// applies. A single startup create removes the concurrency entirely.
+async function ensureMeshSchema(db: postgres.Sql): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await db`CREATE TABLE IF NOT EXISTS _mesh_pg_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )`;
+      await db`CREATE TABLE IF NOT EXISTS _mesh_pg_migrations (
+        id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`;
+      return;
+    } catch (error) {
+      if (attempt >= 30) throw error;
+      console.error(
+        `mesh schema bootstrap attempt ${attempt} failed, retrying in 2s:`,
+        error instanceof Error ? error.message : error,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+}
+await ensureMeshSchema(sql);
+
 const app = new Hono<{ Variables: { token?: string } }>();
 
 app.onError((error, ctx) => {
