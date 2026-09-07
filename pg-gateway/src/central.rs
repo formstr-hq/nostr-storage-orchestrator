@@ -3,6 +3,7 @@
 //! are dynamic JSON payloads; Prisma/db-api owns the schema files only.
 
 use serde_json::Value;
+use std::collections::HashMap;
 use tokio_postgres::{NoTls, Row};
 
 use crate::error::{GatewayError, Result};
@@ -96,11 +97,38 @@ pub struct ActivePgStorage {
 pub struct CentralStore {
     client: tokio::sync::Mutex<Option<tokio_postgres::Client>>,
     url: String,
+    /// Provider-declared column snapshots per table, refreshed on every
+    /// fan-out read. Describe uses these (when present) so its arity always
+    /// matches what Execute actually returns — the registry can go stale
+    /// (e.g. a dropped column lingering after schema changes).
+    provider_columns: std::sync::RwLock<HashMap<String, Vec<crate::pgwirehandler::Column>>>,
 }
 
 impl CentralStore {
     pub fn new(database_url: String) -> Self {
-        Self { client: tokio::sync::Mutex::new(None), url: database_url }
+        Self {
+            client: tokio::sync::Mutex::new(None),
+            url: database_url,
+            provider_columns: std::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Records the live column set a provider returned for `table`.
+    pub fn remember_provider_columns(&self, table: &str, columns: &[crate::pgwirehandler::Column]) {
+        if columns.is_empty() {
+            return;
+        }
+        let mut guard = self
+            .provider_columns
+            .write()
+            .expect("provider columns lock");
+        guard.insert(table.to_ascii_lowercase(), columns.to_vec());
+    }
+
+    /// The last provider-declared columns for `table`, if any.
+    pub fn provider_columns(&self, table: &str) -> Option<Vec<crate::pgwirehandler::Column>> {
+        let guard = self.provider_columns.read().ok()?;
+        guard.get(&table.to_ascii_lowercase()).cloned()
     }
 
     pub async fn ensure_schema(&self) -> Result<()> {

@@ -76,6 +76,12 @@ impl GatewayHandlers {
     async fn describe_columns_for_read(&self, sql: &str) -> Vec<Column> {
         match sqlanalyze::read_table_name(sql) {
             Some(table) => {
+                // Prefer the live provider column snapshot (same source
+                // Execute builds DataRows from) over the possibly-stale
+                // registry — this is what keeps Describe/Execute arity equal.
+                if let Some(columns) = self.store.provider_columns(&table) {
+                    return columns;
+                }
                 let deadline = tokio::time::timeout(DESCRIBE_TIMEOUT, self.read.table(&table)).await;
                 match deadline {
                     Ok(Ok(table_def)) => table_columns_as_columns(&table_def),
@@ -238,6 +244,18 @@ impl GatewayHandlers {
                 .await?;
                 let result = read_outcome;
                 let table = sqlanalyze::read_table_name(sql).unwrap_or_default();
+                // Snapshot the live provider columns so Describe matches
+                // Execute's arity even when the registry goes stale.
+                if !table.is_empty() && !result.columns.is_empty() {
+                    self.store.remember_provider_columns(
+                        &table,
+                        &result
+                            .columns
+                            .iter()
+                            .map(|c| Column { name: c.name.clone(), type_oid: c.oid })
+                            .collect::<Vec<_>>(),
+                    );
+                }
                 let columns = apply_provider_oids(
                     infer_columns(&result.rows, &table),
                     &result.columns,
