@@ -98,7 +98,13 @@ DB_USER=nostr DB_PASSWORD=x DB_NAME=meshdb`, redis sidecar, `.nostr` config.
 
 Ruled out: worker count (tried cluster auto and `workers.count: 1`), redis
 reachability (PONG), DB reachability/auth, DB config source (nostream reads
-`process.env.DB_HOST`, set correctly).
+`process.env.DB_HOST`, set correctly), and `limits.event.createdAt.maxNegativeDelta`
+(bumped 0 -> 3600, no change). The event never gets a response at all (nak
+"context deadline exceeded"), and nostream logs nothing for it, so it is dropped
+before any handler — most likely in the cluster primary->worker WS message
+routing or the image build. Suggest running the image with a single non-clustered
+process and tracing the `onEvent`/message handler, or rebuilding nostream from a
+clean checkout.
 
 **DEFINITIVE ISOLATION:** ran the same `nostream-mesh-nostream` image + `.nostr`
 config against a **plain postgres** (its own `nostr_ts_relay` DB, migrations
