@@ -15,12 +15,12 @@ use crate::registry::ProviderRegistry;
 /// Per-provider read timeout: a slow/hung provider drops out of a fan-out
 /// (the query returns partial) instead of stalling the client. Point reads
 /// fall through to the next replica on timeout.
-const PROVIDER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const PROVIDER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct ReadEngine {
     store: Arc<CentralStore>,
     registry: Arc<ProviderRegistry>,
-    provider: ProviderClient,
+    pub(crate) provider: ProviderClient,
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,5 @@
 pub mod central;
+pub mod aggregate;
 mod config;
 mod dispatcher;
 pub mod error;

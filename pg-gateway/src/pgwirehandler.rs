@@ -153,6 +153,11 @@ impl GatewayHandlers {
             }
         };
         match analyzed {
+            AnalyzedStatement::Aggregate { plan } => {
+                // Map-reduce aggregate: providers compute partial aggregates
+                // over their exclusive slices; the gateway merges.
+                return self.execute_aggregate(plan, params).await;
+            }
             AnalyzedStatement::Read { .. } => {
                 // Point reads (single equality on pk) route to one provider;
                 // everything else fans out.
@@ -1145,7 +1150,125 @@ fn is_catalog_statement(sql: &str) -> bool {
 }
 
 impl GatewayHandlers {
-    /// Returns Some(outcome) when the statement was handled by the catalog.
+    /// Map-reduce aggregate execution: fan the partial (map-side) SQL to every
+    /// provider, then merge the partials into final rows. Params must already
+    /// be inlined into the plan (they arrive inlined in `sql`).
+    async fn execute_aggregate(
+        &self,
+        plan: crate::aggregate::AggregatePlan,
+        params: &[Option<String>],
+    ) -> Result<Outcome, GatewayError> {
+        let partial_sql = if params.is_empty() {
+            plan.partial_sql()
+        } else {
+            crate::aggregate::plan_aggregate_inline(&plan, params)?
+        };
+        let started = std::time::Instant::now();
+        let providers = self.registry.providers();
+        if providers.is_empty() {
+            return Err(GatewayError::NoProviders);
+        }
+        let provider_count = providers.len();
+        let mut handles = Vec::with_capacity(provider_count);
+        for provider in providers {
+            let client = self.read.provider.clone();
+            let url = provider.url.clone();
+            let sql = partial_sql.clone();
+            handles.push(tokio::spawn(async move {
+                let npub = provider.npub.clone();
+                let started = std::time::Instant::now();
+                let result: Result<Vec<Value>, GatewayError> = tokio::time::timeout(
+                    crate::readengine::PROVIDER_READ_TIMEOUT,
+                    client.query(&url, &sql),
+                )
+                .await
+                .unwrap_or_else(|_| Err(GatewayError::provider("aggregate read timed out")));
+                (npub, result, started.elapsed())
+            }));
+        }
+        let mut partials: Vec<Vec<Value>> = Vec::new();
+        let mut answered = 0usize;
+        for handle in handles {
+            match handle.await {
+                Ok((npub, Ok(rows), elapsed)) => {
+                    tracing::info!(
+                        target: "query_metrics",
+                        route = "aggregate_map",
+                        provider = %npub,
+                        rows = rows.len(),
+                        duration_ms = elapsed.as_millis() as u64,
+                        "provider aggregate partial"
+                    );
+                    answered += 1;
+                    partials.push(rows);
+                }
+                Ok((npub, Err(error), elapsed)) => {
+                    tracing::warn!(
+                        target: "query_metrics",
+                        route = "aggregate_map",
+                        provider = %npub,
+                        duration_ms = elapsed.as_millis() as u64,
+                        error = %error,
+                        "provider aggregate partial failed"
+                    );
+                }
+                Err(join_error) => {
+                    tracing::warn!("aggregate map task failed: {join_error}");
+                }
+            }
+        }
+        if answered == 0 {
+            return Err(GatewayError::NoProviders);
+        }
+        // Known limitation: pending (unflushed) buffer rows are not visible to
+        // aggregates until the dispatcher flushes them — provider partials are
+        // already aggregated, so raw rows cannot be folded in post-hoc. The
+        // flush interval makes this a sub-second window in practice.
+        let merged = crate::aggregate::merge_partials(&plan, &partials);
+        tracing::info!(
+            target: "query_metrics",
+            route = "aggregate_reduce",
+            providers_answered = answered,
+            providers_total = provider_count,
+            rows = merged.len(),
+            duration_ms = started.elapsed().as_millis() as u64,
+            "aggregate merged"
+        );
+        // Output columns: plain outputs, bare group keys, then aggregates —
+        // in the plan's projection order.
+        let mut columns: Vec<Column> = Vec::new();
+        for (_, alias) in &plan.plain_columns {
+            columns.push(Column { name: alias.clone(), type_oid: Type::TEXT.oid() });
+        }
+        for key in &plan.group_keys {
+            if !plan.plain_columns.iter().any(|(e, _)| e.eq_ignore_ascii_case(key)) {
+                columns.push(Column { name: key.clone(), type_oid: Type::TEXT.oid() });
+            }
+        }
+        for spec in &plan.aggregates {
+            columns.push(Column { name: spec.output.clone(), type_oid: Type::TEXT.oid() });
+        }
+        if let Some(items) = &plan.distinct_only {
+            columns = items
+                .iter()
+                .map(|(_, alias)| Column { name: alias.clone(), type_oid: Type::TEXT.oid() })
+                .collect();
+        }
+        let count = merged.len();
+        let rows = merged
+            .iter()
+            .map(|row| {
+                columns
+                    .iter()
+                    .map(|column| row.get(&column.name).and_then(value_to_wire_text))
+                    .collect::<Vec<Option<String>>>()
+            })
+            .collect();
+        Ok(Outcome::Rows(columns, rows, count))
+    }
+}
+
+impl GatewayHandlers {
     async fn catalog_request(&self, sql: &str, params: &[Option<String>]) -> Result<Option<Outcome>, GatewayError> {
         if !is_catalog_statement(sql) {
             tracing::debug!("not catalog: {}", sql);

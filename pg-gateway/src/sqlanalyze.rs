@@ -56,6 +56,10 @@ pub enum AnalyzedStatement {
         conflict_predicate: Option<String>,
     },
     Read { sql: String },
+    /// Aggregate/DISTINCT read routed through the map-reduce engine: providers
+    /// compute partial aggregates over their exclusive slices, the gateway
+    /// merges (see aggregate::merge_partials).
+    Aggregate { plan: crate::aggregate::AggregatePlan },
 }
 
 /// Default primary-key column when the registry has no descriptor
@@ -484,14 +488,23 @@ fn analyze_select(query: Query, sql: &str) -> Result<AnalyzedStatement> {
             ))
         }
     };
-    if body.distinct.is_some() || !matches!(body.group_by, sqlparser::ast::GroupByExpr::Expressions(ref items, _) if items.is_empty()) || body.having.is_some() {
-        return Err(GatewayError::UnsupportedSql(
-            "DISTINCT/GROUP BY/HAVING are not supported yet".to_string(),
-        ));
-    }
     if body.from.is_empty() {
         // SELECT without FROM (e.g. `SELECT 1`): constant, no providers.
         return Ok(AnalyzedStatement::Read { sql: sql.to_string() });
+    }
+    // Aggregates / DISTINCT / GROUP BY / HAVING: plan a map-reduce execution
+    // (providers aggregate their exclusive slices, gateway merges). Falls
+    // through to the plain read path when the query has none of these.
+    let has_aggregate = query_has_aggregate(&query);
+    if has_aggregate || body.distinct.is_some() || body.having.is_some() || !matches!(body.group_by, sqlparser::ast::GroupByExpr::Expressions(ref items, _) if items.is_empty()) {
+        match crate::aggregate::plan_aggregate(sql) {
+            Ok(plan) => return Ok(AnalyzedStatement::Aggregate { plan }),
+            Err(error) => {
+                // Not every aggregate shape is supported yet; surface the
+                // plan error instead of the generic one.
+                return Err(error);
+            }
+        }
     }
     // A single FROM entry may carry JOINs: they are pushed down to each
     // provider and executed locally. This is correct only for co-located
@@ -505,7 +518,8 @@ fn analyze_select(query: Query, sql: &str) -> Result<AnalyzedStatement> {
         ));
     }
     // Validate the projection so we can reject expressions the merge layer
-    // cannot handle (star is fine, identifiers are fine, aggregates rejected).
+    // cannot handle (star is fine, identifiers are fine; aggregates were
+    // already planned above via the aggregate engine).
     for item in &body.projection {
         match item {
             sqlparser::ast::SelectItem::Wildcard(_) => {}
@@ -525,6 +539,25 @@ fn analyze_select(query: Query, sql: &str) -> Result<AnalyzedStatement> {
     }
     let _ = extract_table_factor_name(&body.from[0].relation)?;
     Ok(AnalyzedStatement::Read { sql: sql.to_string() })
+}
+
+/// True when any projection/order item is an aggregate function call.
+fn query_has_aggregate(query: &Query) -> bool {
+    if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
+        for item in &select.projection {
+            let expr = match item {
+                sqlparser::ast::SelectItem::UnnamedExpr(expr) => Some(expr),
+                sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => Some(expr),
+                _ => None,
+            };
+            if let Some(expr) = expr {
+                if expr_has_aggregate(expr) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn expr_has_aggregate(expr: &Expr) -> bool {
