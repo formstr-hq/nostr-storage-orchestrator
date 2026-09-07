@@ -1246,7 +1246,16 @@ impl GatewayHandlers {
             }
         }
         for spec in &plan.aggregates {
-            columns.push(Column { name: spec.output.clone(), type_oid: Type::TEXT.oid() });
+            // count() must be INT8: lib/pq clients (pgweb) type-assert the
+            // value as int64, which requires the int8 OID in RowDescription.
+            let oid = match spec.kind {
+                crate::aggregate::AggregateKind::Count => Type::INT8.oid(),
+                crate::aggregate::AggregateKind::Avg => Type::FLOAT8.oid(),
+                crate::aggregate::AggregateKind::Variance { .. } => Type::FLOAT8.oid(),
+                crate::aggregate::AggregateKind::StdDev { .. } => Type::FLOAT8.oid(),
+                _ => Type::TEXT.oid(),
+            };
+            columns.push(Column { name: spec.output.clone(), type_oid: oid });
         }
         if let Some(items) = &plan.distinct_only {
             columns = items
