@@ -80,7 +80,76 @@ docker exec storage-client-mesh-postgres-1 psql -U mesh -d mesh -c "SELECT * FRO
 GET 10.44.160.190:3300/pg/health -> {"status":"ok","version":1,"tables":[...,"meshok"]}
 ```
 
-## BLOCKER — nostream relay does not write  ❌ OPEN
+## BLOCKER — nostream relay does not write  ✅ RESOLVED (2026-09-07)
+
+Three stacked root causes, found by instrumenting nostream's ws layer
+(`receiverOnMessage` → `listeners= 0`) and the gateway's frontend-message
+dispatch:
+
+1. **nostream `onConnection` race (the publish hang).** The adapter — which
+   binds the `'message'` listener — was constructed *after*
+   `await isRateLimited(...)` (a redis round-trip) in
+   `web-socket-server-adapter.ts:95`. A client that publishes immediately on
+   open (`nak` sends `["EVENT",…]` the moment the handshake completes) has its
+   first message emitted while the adapter isn't attached: **zero listeners,
+   silently dropped** — no OK, no NOTICE, no logs. Probes that sent data a
+   second later worked, which is why manual probes looked fine while every
+   real client hung. Fix (in `/home/drogon/Dev/nostream`, applied to the image
+   too): attach the adapter synchronously first, then run the connection
+   rate-limit check and terminate if limited. Upstream-worthy.
+
+2. **Mesh schema a generation behind the image.** nostream v3.0.0 ships 33
+   migrations (local checkout only had 25); the mesh DB was migrated with the
+   old set, so `users.is_vanished` was missing — every publish died inside
+   `userRepository.findByPubkey` upsert (`column "is_vanished" of relation
+   "users" does not exist`), and nostream's error path for that (caught in
+   `onClientMessage`) only does `console.error` — **no NOTICE/OK is sent**, so
+   the client just times out. Fix: run the *image's* full migration set
+   (`npx knex migrate:latest` from inside the `nostream-mesh-nostream` image)
+   through the gateway — never the checkout's.
+
+3. **Gateway Describe/Execute arity mismatch (the REQ hang/crash).** The
+   gateway answers Describe from the **registry** (`pg_table.columns`, 14
+   columns including stale `event_delegator`) but builds DataRows from the
+   **provider's** live columns (13). node-pg parses positionally, so every
+   column after `first_seen` shifted one slot: `event_deduplication` (JSONB)
+   received `remote_address`'s text → `JSON.parse('::ffff:192.168.96.1')` →
+   uncaught error → worker crashed → connection closed → nak hung. Interim fix:
+   prune the stale column from `pg_table` (`UPDATE pg_table SET columns = …`).
+   Proper fix owed in the gateway: derive Describe from the same column list
+   Execute uses (or validate arity and fall back), and make registry columns
+   refresh from providers on catch-up.
+
+Also confirmed while instrumenting: the gateway handles pg-cursor's extended
+protocol (Parse→Bind→Describe→Execute→Flush→Sync, no Sync-until-later) fine —
+the earlier "streaming hangs" observation was a bug in my own test probe
+(cursor never submitted), not the gateway. And `requireAdmission` /
+`authentication.enabled` were ruled out: the on-connect AUTH challenge in
+nostream v3.0.0 is sent unconditionally at the end of the adapter constructor,
+independent of the `authentication.enabled` setting.
+
+### Public-relay settings (staging)
+
+```
+authentication:
+  enabled: false
+authorization:
+  requireAdmission: false
+```
+
+(Defaults in `resources/default-settings.yaml` enable both; the `.nostr`
+settings file must override them explicitly.)
+
+### Verification (local mesh, 2026-09-07)
+
+- `nak event … ws://localhost:8008` → `OK true`, row lands in mesh with full
+  row image (`_conflictColumns: ["id"]`), propagates to the hash-selected
+  provider.
+- `nak req` streams events back (synthetic probe rows report bad signature —
+  expected; real events pass).
+- Relay info doc reports `auth_required: false, payment_required: false`.
+
+## (historical) nostream relay does not write ❌ superseded by the above
 
 Ran nostream v3.0.0 (`nostream-mesh-nostream` image, `/home/drogon/Dev/nostream`)
 against the local mesh-PG (identical topology): DB via env `DB_HOST=<gateway>
