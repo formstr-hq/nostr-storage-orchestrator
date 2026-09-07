@@ -525,6 +525,19 @@ impl GatewayHandlers {
     }
 }
 
+/// Builds a CommandComplete tag. Postgres's INSERT tag on the wire is
+/// "INSERT <oid> <rows>" (oid is always 0 for ordinary tables); pgwire's
+/// with_rows renders "INSERT <rows>", which node-pg/knex fail to parse
+/// ("could not interpret result from server: INSERT 1") and then report no
+/// rowCount. nostream's event insert reads rowCount, so force the oid.
+fn command_tag(tag: &str, count: usize) -> pgwire::api::results::Tag {
+    if tag == "INSERT" {
+        pgwire::api::results::Tag::new("INSERT 0").with_rows(count)
+    } else {
+        pgwire::api::results::Tag::new(tag).with_rows(count)
+    }
+}
+
 fn infer_columns(rows: &[Value], _table: &str) -> Vec<Column> {
     let mut columns: Vec<Column> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -639,7 +652,7 @@ impl SimpleQueryHandler for GatewayHandlers {
                 Ok(vec![Response::Execution(pgwire::api::results::Tag::new("OK"))])
             }
             Ok(Outcome::Command(tag, count)) => Ok(vec![Response::Execution(
-                pgwire::api::results::Tag::new(&tag).with_rows(count),
+                command_tag(&tag, count),
             )]),
             Ok(Outcome::Rows(columns, rows, count)) => {
                 Ok(vec![rows_response(&columns, rows, count)?])
@@ -745,7 +758,7 @@ impl ExtendedQueryHandler for GatewayHandlers {
         match self.execute_sql_bound(&effective_sql, row_id.as_deref(), &portal.parameters.iter().map(|_| None::<String>).collect::<Vec<_>>()).await {
             Ok(Outcome::Session) => Ok(Response::Execution(pgwire::api::results::Tag::new("OK"))),
             Ok(Outcome::Command(tag, count)) => {
-                Ok(Response::Execution(pgwire::api::results::Tag::new(&tag).with_rows(count)))
+                Ok(Response::Execution(command_tag(&tag, count)))
             }
             Ok(Outcome::Rows(columns, rows, count)) => rows_response(&columns, rows, count),
             Err(error) => Err(self.error(&error)),
