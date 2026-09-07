@@ -61,10 +61,20 @@ impl ReadEngine {
             return Ok(ReadResult { rows: vec![row.clone()], partial: false, columns: vec![] });
         }
 
+        // The replica filter below needs the pk column in the result set to
+        // verify the returned row is the requested one. Providers return the
+        // statement verbatim, so a narrow projection (knex `first('col')`)
+        // would drop the pk — rewrite to fetch it alongside.
+        let effective_sql = if projection_has_column(sql, pk_column) {
+            sql.to_string()
+        } else {
+            add_column_to_projection(sql, pk_column)?
+        };
+
         let Some((replicas, _)) = self.store.get_placement(&table_name, row_id).await? else {
             // Row never placed: fall through to a fan-out read, which also
             // covers tables whose placement entries predate this gateway.
-            let result = self.fanout_read(sql, pk_column).await?;
+            let result = self.fanout_read(&effective_sql, pk_column).await?;
             let rows = result
                 .rows
                 .into_iter()
@@ -81,7 +91,7 @@ impl ReadEngine {
             };
             match tokio::time::timeout(
                 PROVIDER_READ_TIMEOUT,
-                self.provider.query_with_columns(&provider.url, sql),
+                self.provider.query_with_columns(&provider.url, &effective_sql),
             )
             .await
             {
@@ -208,6 +218,47 @@ fn sql_table_name(sql: &str) -> crate::error::Result<String> {
         }
         _ => Err(GatewayError::UnsupportedSql("expected a read statement".to_string())),
     }
+}
+
+/// True when the statement's projection already includes `column` (explicitly
+/// or via `*` / `table.*`). Conservative: unknown shapes return true so the
+/// statement is executed as-is.
+fn projection_has_column(sql: &str, column: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    let Some(select_pos) = lower.find("select") else { return true };
+    let Some(from_pos) = lower[select_pos..].find(" from ") else { return true };
+    let projection = &lower[select_pos + 6..select_pos + from_pos];
+    if projection.contains('*') {
+        return true;
+    }
+    projection
+        .split(',')
+        .any(|item| {
+            let item = item.trim();
+            let name = item.rsplit('.').next().unwrap_or(item);
+            name.trim() == column
+        })
+}
+
+/// Rewrites `SELECT <proj> FROM ...` to also project `column`, preserving
+/// the original projection so column order/shape stays client-visible.
+fn add_column_to_projection(sql: &str, column: &str) -> crate::error::Result<String> {
+    let lower = sql.to_ascii_lowercase();
+    let select_pos = lower
+        .find("select")
+        .ok_or_else(|| GatewayError::UnsupportedSql("expected SELECT".to_string()))?;
+    let from_offset = lower[select_pos..]
+        .find(" from ")
+        .ok_or_else(|| GatewayError::UnsupportedSql("expected FROM".to_string()))?
+        + select_pos;
+    let mut rewritten = String::with_capacity(sql.len() + column.len() + 3);
+    rewritten.push_str(&sql[..select_pos + 6]);
+    rewritten.push(' ');
+    rewritten.push_str(column);
+    rewritten.push_str(", ");
+    rewritten.push_str(sql[select_pos + 6..from_offset].trim());
+    rewritten.push_str(&sql[from_offset..]);
+    Ok(rewritten)
 }
 
 fn value_as_string(value: &Value) -> Option<String> {

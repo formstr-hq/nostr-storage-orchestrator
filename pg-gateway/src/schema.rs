@@ -69,6 +69,16 @@ impl SchemaManager {
         Ok(())
     }
 
+    /// Records a RAW DDL statement (fallback path: extensions, functions,
+    /// triggers, partition DDL — anything the strict analyzer rejects) as a
+    /// migration and pushes it to the active roster. Providers replay it
+    /// verbatim via /pg/schema on catch-up.
+    pub async fn record_raw_ddl(&self, sql: &str, migration_id: &str) -> Result<()> {
+        self.store.append_migration(sql, migration_id).await?;
+        self.propagate_now(migration_id).await?;
+        Ok(())
+    }
+
     /// Pushes PENDING migrations to every active provider immediately.
     async fn propagate_now(&self, migration_id: &str) -> Result<()> {
         let migrations = self.pending_migrations_from(migration_id).await?;

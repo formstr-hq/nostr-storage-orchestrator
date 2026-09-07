@@ -2,7 +2,7 @@
 // current schema version. Also called by the catch-up loop for late joiners.
 
 import { Hono } from "@hono/hono";
-import type { postgres } from "postgres";
+import type postgres from "postgres";
 import { z } from "zod";
 import { errorResponse } from "./middleware.ts";
 
@@ -43,12 +43,28 @@ export function buildSchemaRouter(sql: postgres.Sql) {
         `;
         if (known.length > 0) continue;
         const ddl = stripServerGenerators(migration.ddl);
-        await sql.begin(async (tx) => {
-          await tx.unsafe(ddl);
-          await tx`
+        try {
+          await sql.begin(async (tx) => {
+            await tx.unsafe(ddl);
+            await tx`
+              INSERT INTO _mesh_pg_migrations (id, version) VALUES (${migration.id}, ${migration.version})
+            `;
+          });
+        } catch (error) {
+          // Catch-up replays are not transactionally synchronized with the
+          // gateway's direct RAW applies (fallback DDL is both pushed here
+          // and applied via /pg/apply RAW ops). An "already exists" failure
+          // means the object is present — the intended end state — so record
+          // the migration as applied rather than wedging the provider. Any
+          // other error is fatal (real schema drift).
+          const message = error instanceof Error ? error.message : String(error);
+          if (!ALREADY_EXISTS.test(message)) {
+            throw error;
+          }
+          await sql`
             INSERT INTO _mesh_pg_migrations (id, version) VALUES (${migration.id}, ${migration.version})
           `;
-        });
+        }
         version = Math.max(version, migration.version);
       }
       await sql`
@@ -103,3 +119,11 @@ export function stripServerGenerators(ddl: string): string {
     .replace(/DEFAULT\s+(?:pg_catalog\.)?(?:now|clock_timestamp)\s*\(\s*\)|DEFAULT\s+CURRENT_TIMESTAMP(\(\d*\))?|DEFAULT\s+'now'::text::timestamp(\s+with\s+time\s+zone)?/gi, "DEFAULT NULL")
     ;
 }
+
+/// PG error classes for "object already exists": duplicate_table (42P07),
+/// duplicate_object (42710), duplicate_function (42723), duplicate_trigger
+/// (42701), duplicate_schema (42P06), duplicate_database (42P04),
+/// duplicate_index without a table (42P11 belongs to others; 42P07 covers
+/// named indexes via duplicate_table semantics).
+const ALREADY_EXISTS =
+  /42P07|42710|42723|42701|42P06|42P04|already exists/i;

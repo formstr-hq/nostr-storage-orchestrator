@@ -49,6 +49,11 @@ pub enum AnalyzedStatement {
         broad: bool,
         /// INSERT ... ON CONFLICT (cols) target columns; None = plain insert.
         conflict_columns: Option<Vec<String>>,
+        /// Verbatim predicate text of a partial-index conflict target
+        /// (`ON CONFLICT (cols) WHERE <pred> DO UPDATE`), rendered as
+        /// `WHERE <pred>`. Providers must replay it so the conflict hits
+        /// the same partial unique index it hit here.
+        conflict_predicate: Option<String>,
     },
     Read { sql: String },
 }
@@ -94,14 +99,144 @@ fn analyze_pk(sql: &str, pk_column: &str) -> Result<AnalyzedStatement> {
     // sqlparser's GenericDialect accepts PostgreSQL syntax for everything in
     // our subset; statements are forwarded verbatim so dialect quirks never
     // change what a provider sees.
-    let statements = Parser::parse_sql(&GenericDialect {}, sql)
+    //
+    // Exception: `INSERT ... ON CONFLICT (cols) WHERE <pred> DO UPDATE` —
+    // Postgres's partial-index conflict target. sqlparser cannot parse the
+    // predicate between the column list and DO. The predicate slice is
+    // excised (verbatim text is recovered for the provider op), the
+    // remainder parses normally, and analysis proceeds on the repaired SQL.
+    match Parser::parse_sql(&GenericDialect {}, sql) {
+        Err(raw_error) => {
+            if let Some(repaired) = strip_conflict_predicate(sql) {
+                if Parser::parse_sql(&GenericDialect {}, &repaired.stripped_sql).is_ok() {
+                    return analyze_pk_with_predicate(
+                        &repaired.stripped_sql,
+                        pk_column,
+                        Some(repaired.predicate),
+                        sql.to_string(),
+                    );
+                }
+            }
+            return Err(GatewayError::UnsupportedSql(normalize_parse_error(&raw_error)));
+        }
+        Ok(statements) => {
+            if statements.len() != 1 {
+                return Err(GatewayError::UnsupportedSql(
+                    "exactly one statement per request is supported".to_string(),
+                ));
+            }
+            analyze_statement(
+                statements.into_iter().next().unwrap(),
+                sql,
+                pk_column,
+                None,
+                None,
+            )
+        }
+    }
+}
+
+/// Result of excising a partial-index conflict-target predicate.
+struct RepairedConflict {
+    /// SQL with the `WHERE <pred>` slice removed (parses cleanly).
+    stripped_sql: String,
+    /// Verbatim `WHERE <pred>` text.
+    predicate: String,
+}
+
+/// Detects and excises `ON CONFLICT (...) WHERE <pred> DO` in an INSERT.
+/// Returns None when the statement does not carry the form. The predicate is
+/// located between the ON CONFLICT target's closing paren and the DO keyword;
+/// paren/quote depth is tracked so nested parens and quoted literals inside
+/// the predicate do not break the scan.
+fn strip_conflict_predicate(sql: &str) -> Option<RepairedConflict> {
+    let upper = sql.to_ascii_uppercase();
+    let on_pos = upper.find("ON CONFLICT")?;
+    let target_paren = sql[on_pos..].find('(')? + on_pos;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut target_end = 0usize;
+    for (offset, byte) in sql[target_paren..].bytes().enumerate() {
+        match byte {
+            b'\'' => in_string = !in_string,
+            b'(' if !in_string => depth += 1,
+            b')' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    target_end = target_paren + offset + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if target_end == 0 || in_string {
+        return None;
+    }
+    let after = sql[target_end..].trim_start();
+    let after_upper = after.to_ascii_uppercase();
+    // The predicate must start with WHERE and terminate at DO — otherwise
+    // this is a plain conflict target and needs no repair.
+    if !after_upper.starts_with("WHERE") {
+        return None;
+    }
+    let do_pos = after_upper.find(" DO ")?;
+    if do_pos == 0 {
+        // `WHERE` immediately followed by ` DO` — empty predicate, malformed.
+        return None;
+    }
+    let predicate = after[..do_pos].trim_end().to_string();
+    // Rebuild cleanly: `ON CONFLICT (cols) ` + everything from `DO` onward
+    // (verbatim), so the repaired SQL parses like an ordinary conflict form.
+    let tail_offset = after.len() - after[do_pos..].len();
+    let tail = after[tail_offset..].trim_start();
+    let mut stripped_sql = String::with_capacity(sql.len());
+    stripped_sql.push_str(&sql[..target_end]);
+    stripped_sql.push(' ');
+    stripped_sql.push_str(tail);
+    Some(RepairedConflict { stripped_sql, predicate })
+}
+
+/// Analyze an INSERT whose partial-index predicate was excised. The predicate
+/// rides on the resulting Write op; the op's SQL is the ORIGINAL text so
+/// providers replay the statement verbatim.
+fn analyze_pk_with_predicate(
+    stripped_sql: &str,
+    pk_column: &str,
+    predicate: Option<String>,
+    original_sql: String,
+) -> Result<AnalyzedStatement> {
+    let statements = Parser::parse_sql(&GenericDialect {}, stripped_sql)
         .map_err(|error| GatewayError::UnsupportedSql(normalize_parse_error(&error)))?;
     if statements.len() != 1 {
         return Err(GatewayError::UnsupportedSql(
             "exactly one statement per request is supported".to_string(),
         ));
     }
-    match statements.into_iter().next().unwrap() {
+    analyze_statement(
+        statements.into_iter().next().unwrap(),
+        &original_sql,
+        pk_column,
+        predicate,
+        Some(stripped_sql),
+    )
+}
+
+/// Statement dispatch used by both the plain and repaired-analysis paths.
+/// `predicate` is Some for the repaired partial-index conflict form;
+/// `stripped_sql` (when Some) replaces the original as the SQL text recorded
+/// in non-INSERT outcomes (the original never parses, so anything downstream
+/// would reject it — but the repaired form is exactly what providers can
+/// parse).
+fn analyze_statement(
+    statement: Statement,
+    sql: &str,
+    pk_column: &str,
+    predicate: Option<String>,
+    stripped_sql: Option<&str>,
+) -> Result<AnalyzedStatement> {
+    let _ = stripped_sql;
+    match statement {
         Statement::Query(query) => analyze_select(*query, sql),
         Statement::Insert(insert) => {
             // Only full-row single INSERT (one VALUES tuple) is supported;
@@ -123,6 +258,30 @@ fn analyze_pk(sql: &str, pk_column: &str) -> Result<AnalyzedStatement> {
             let source = insert.source.as_ref().unwrap();
             let rows = match source.body.as_ref() {
                 sqlparser::ast::SetExpr::Values(values) => &values.rows,
+                sqlparser::ast::SetExpr::Select(_) => {
+                    // INSERT INTO t (...) SELECT ... (no placeholders): used
+                    // by migration data-priming steps (e.g. nostream's
+                    // events_old -> events backfill). Routed verbatim to
+                    // every provider under the broad-write policy, like DDL
+                    // fallbacks — never buffered as row ops.
+                    if !sql.contains('$') {
+                        return Ok(AnalyzedStatement::Write {
+                            kind: StatementKind::Insert,
+                            table,
+                            row_id: String::new(),
+                            sql: sql.to_string(),
+                            row_id_placeholder: None,
+                            generate_row_id: false,
+                            returning: None,
+                            broad: true,
+                            conflict_columns: None,
+                            conflict_predicate: None,
+                        });
+                    }
+                    return Err(GatewayError::UnsupportedSql(
+                        "INSERT ... SELECT with placeholders is not supported".to_string(),
+                    ));
+                }
                 _ => {
                     return Err(GatewayError::UnsupportedSql(
                         "INSERT with plain VALUES is required".to_string(),
@@ -201,6 +360,9 @@ fn analyze_pk(sql: &str, pk_column: &str) -> Result<AnalyzedStatement> {
                     })
                     .collect::<Vec<String>>()
             });
+            // The partial-index predicate recovered during the pre-parse
+            // repair (None for ordinary conflict targets) rides with the
+            // buffered op so providers replay the identical conflict clause.
             Ok(AnalyzedStatement::Write {
                 kind: StatementKind::Insert,
                 table,
@@ -211,6 +373,7 @@ fn analyze_pk(sql: &str, pk_column: &str) -> Result<AnalyzedStatement> {
                 returning,
                 broad: false,
                 conflict_columns,
+                conflict_predicate: predicate,
             })
         }
         Statement::Update(update) => {
@@ -230,6 +393,7 @@ fn analyze_pk(sql: &str, pk_column: &str) -> Result<AnalyzedStatement> {
                 returning: None,
                 broad,
                 conflict_columns: None,
+                conflict_predicate: None,
             })
         }
         Statement::Delete(delete) => {
@@ -249,6 +413,7 @@ fn analyze_pk(sql: &str, pk_column: &str) -> Result<AnalyzedStatement> {
                 returning: None,
                 broad,
                 conflict_columns: None,
+                conflict_predicate: None,
             })
         }
         Statement::CreateTable(create) => {
@@ -1006,7 +1171,15 @@ pub fn write_or_read_table(sql: &str) -> Option<String> {
 /// no longer reconstructs rows from the statement — Postgres does, which is why
 /// column mapping (and its col0/col1 fallback) is gone.
 pub fn insert_capture_sql(sql: &str) -> Result<String> {
-    let mut statements = Parser::parse_sql(&GenericDialect {}, sql)
+    // Partial-index conflict targets do not parse (see strip_conflict_
+    // predicate): analyze the repaired form, then re-inject the predicate
+    // into the rendered capture SQL at the same spot.
+    let repaired = strip_conflict_predicate(sql);
+    let parse_sql = repaired
+        .as_ref()
+        .map(|repaired| repaired.stripped_sql.as_str())
+        .unwrap_or(sql);
+    let mut statements = Parser::parse_sql(&GenericDialect {}, parse_sql)
         .map_err(|error| GatewayError::UnsupportedSql(normalize_parse_error(&error)))?;
     let Some(Statement::Insert(insert)) = statements.get_mut(0) else {
         return Err(GatewayError::UnsupportedSql("expected INSERT".to_string()));
@@ -1014,6 +1187,47 @@ pub fn insert_capture_sql(sql: &str) -> Result<String> {
     insert.returning = Some(vec![sqlparser::ast::SelectItem::Wildcard(
         sqlparser::ast::WildcardAdditionalOptions::default(),
     )]);
-    Ok(statements[0].to_string())
+    let rendered = statements[0].to_string();
+    if let Some(repaired) = repaired {
+        // Re-insert `WHERE <pred>` after the conflict column list. The
+        // rendered form is `... ON CONFLICT (cols) DO UPDATE ...` — splice
+        // before the DO, tracking the column list's closing paren.
+        if let Some(position) = rendered.to_ascii_uppercase().find("ON CONFLICT") {
+            let after = &rendered[position..];
+            let paren = match after.find('(') {
+                Some(offset) => position + offset,
+                None => return Err(GatewayError::UnsupportedSql("malformed conflict target".to_string())),
+            };
+            let mut depth = 0usize;
+            let mut in_string = false;
+            let mut target_end = None;
+            for (offset, byte) in rendered[paren..].bytes().enumerate() {
+                match byte {
+                    b'\'' => in_string = !in_string,
+                    b'(' if !in_string => depth += 1,
+                    b')' if !in_string => {
+                        depth -= 1;
+                        if depth == 0 {
+                            target_end = Some(paren + offset + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let target_end = match target_end {
+                Some(end) => end,
+                None => return Err(GatewayError::UnsupportedSql("malformed conflict target".to_string())),
+            };
+            let mut capture = String::with_capacity(rendered.len() + repaired.predicate.len() + 1);
+            capture.push_str(&rendered[..target_end]);
+            capture.push(' ');
+            capture.push_str(&repaired.predicate);
+            capture.push(' ');
+            capture.push_str(rendered[target_end..].trim_start());
+            return Ok(capture);
+        }
+    }
+    Ok(rendered)
 }
 

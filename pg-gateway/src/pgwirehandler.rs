@@ -233,8 +233,13 @@ impl GatewayHandlers {
                     self.schema.propagate_ddl(&sql).await?;
                 }
                 // Mirror the DDL to the catalog schema so introspection sees it.
+                // A failed mirror is fatal for CREATE/ALTER/DROP: the capture
+                // path executes INSERTs against this mirror, so proceeding
+                // would silently break every subsequent write to the table.
                 if let Err(error) = self.catalog.apply_ddl(&sql).await {
-                    tracing::warn!("catalog ddl mirror failed: {error}");
+                    return Err(GatewayError::central(format!(
+                        "catalog ddl mirror failed: {error}"
+                    )));
                 }
                 let tag = match kind {
                     StatementKind::Create => "CREATE TABLE",
@@ -245,7 +250,7 @@ impl GatewayHandlers {
                 };
                 Ok(Outcome::Command(tag.to_string(), 0))
             }
-            AnalyzedStatement::Write { kind, table, row_id, sql, row_id_placeholder, generate_row_id, returning, broad, conflict_columns } => {
+            AnalyzedStatement::Write { kind, table, row_id, sql, row_id_placeholder, generate_row_id, returning, broad, conflict_columns, conflict_predicate } => {
                 // Bulk ops (migration backfills): apply the statement
                 // verbatim to EVERY active provider so replicas stay
                 // identical; no buffer, no placement bookkeeping.
@@ -348,6 +353,12 @@ impl GatewayHandlers {
                         "_conflictColumns".to_string(),
                         serde_json::json!(conflict_target),
                     );
+                    if let Some(predicate) = conflict_predicate.as_deref() {
+                        object.insert(
+                            "_conflictPredicate".to_string(),
+                            serde_json::json!(predicate),
+                        );
+                    }
                 }
                 let op_id = ulid::Ulid::new().to_string();
                 self.store
@@ -437,10 +448,29 @@ impl GatewayHandlers {
                 .await
                 .map_err(|error| GatewayError::provider(error.to_string()))?;
         }
+        // Record as a migration so providers that were absent (empty roster
+        // at DDL time, late joiners) replay it during catch-up — otherwise
+        // RAW DDL silently never reaches them (observed: extension/trigger
+        // DDL lost when issued before the first registry poll).
+        let migration_id = ulid::Ulid::new().to_string();
+        if let Err(error) = self.schema_raw_migration(&effective_sql, &migration_id).await {
+            tracing::warn!("raw ddl migration record failed: {error}");
+        }
         if let Err(error) = self.catalog.apply_ddl(&effective_sql).await {
             tracing::warn!("catalog ddl mirror failed: {error}");
         }
         Ok(Outcome::Command("DDL".to_string(), 0))
+    }
+
+    /// Appends a RAW DDL statement to the migration registry and pushes it to
+    /// the active roster. Only the append is fatal (buffer consistency);
+    /// push failures heal via the catch-up loop.
+    async fn schema_raw_migration(
+        &self,
+        sql: &str,
+        migration_id: &str,
+    ) -> std::result::Result<(), GatewayError> {
+        self.schema.record_raw_ddl(sql, migration_id).await
     }
 
     /// Applies a broad UPDATE/DELETE verbatim on every provider (RAW op).

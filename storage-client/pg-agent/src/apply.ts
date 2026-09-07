@@ -5,7 +5,7 @@
 // over at-least-once HTTP delivery).
 
 import { Hono } from "@hono/hono";
-import type { postgres } from "postgres";
+import type postgres from "postgres";
 import { z } from "zod";
 import { errorResponse } from "./middleware.ts";
 
@@ -23,7 +23,7 @@ const OpSchema = z.object({
 
 const ApplySchema = z.object({ ops: z.array(OpSchema).max(500) });
 
-type PgSql = postgres.Sql & { unsafe: (text: string) => Promise<Array<Record<string, unknown>>> };
+type PgSql = postgres.Sql | postgres.TransactionSql;
 
 /// Column name -> data type (lower-cased), from information_schema. Cached
 /// per statement batch; bytea columns need hex->bytes decoding.
@@ -114,11 +114,24 @@ export function buildApplyRouter(sql: postgres.Sql) {
           } else {
             // INSERT: full row image from the gateway buffer overlay.
             const rawRow = { ...((op.row ?? {}) as Record<string, unknown>) };
-            // Reserved key carrying the conflict target from the gateway.
+            // Reserved keys carrying the conflict target from the gateway.
             const declaredConflict = Array.isArray(rawRow["_conflictColumns"])
               ? (rawRow["_conflictColumns"] as string[])
               : op.conflictColumns;
             delete rawRow["_conflictColumns"];
+            // Verbatim predicate of a partial-index conflict target
+            // (`WHERE <pred>`). Replayed so the conflict hits the same
+            // partial unique index the statement hit at the gateway —
+            // without it ON CONFLICT cannot match a partial index and the
+            // apply fails outright.
+            const declaredPredicate =
+              typeof rawRow["_conflictPredicate"] === "string"
+                ? (rawRow["_conflictPredicate"] as string)
+                : undefined;
+            delete rawRow["_conflictPredicate"];
+            if (declaredPredicate !== undefined && !/^where\b/i.test(declaredPredicate)) {
+              throw new Error("invalid conflict predicate");
+            }
             const row = rawRow;
             const columns = Object.keys(row);
             if (columns.length === 0) {
@@ -136,20 +149,40 @@ export function buildApplyRouter(sql: postgres.Sql) {
               Object.fromEntries(columns.map((column) => [column, row2[column]])),
             );
             const conflict = declaredConflict ?? [];
-            if (conflict.length > 0) {
+            if (conflict.length > 0 && declaredPredicate !== undefined) {
+              // Partial-index upsert: predicate is gateway-authored text and
+              // can only come from a gateway-captured op, not client input.
+              // Built via unsafe() with values riding as $n parameters;
+              // identifiers are quoted through postgres-js's sql() Helper
+              // (Helper.value is the quoted identifier text).
+              const ident = (name: string) => (sql(name) as unknown as { value: string }).value;
+              const quoted = conflict.map((column) => ident(column));
+              const setters = columns
+                .map((column) => `${ident(column)} = EXCLUDED.${ident(column)}`)
+                .join(", ");
+              const target = ident(table);
+              const columnList = columns.map((column) => ident(column)).join(", ");
+              const parameterList = columns.map((_, index) => `$${index + 1}`).join(", ");
+              const parameters = columns.map((column) => row2[column]) as never[];
+              await tx.unsafe(
+                `INSERT INTO ${target} (${columnList}) ` +
+                  `VALUES (${parameterList}) ` +
+                  `ON CONFLICT (${quoted.join(", ")}) ${declaredPredicate} ` +
+                  `DO UPDATE SET ${setters}`,
+                parameters,
+              );
+            } else if (conflict.length > 0 && (await uniqueIndexCovers(tx, table, conflict))) {
+              // Plain conflict target: verify it actually infers an arbiter
+              // index. A composite pk (nostream's events: (id,
+              // event_created_at)) cannot match ON CONFLICT (id) — fall back
+              // to target-less DO NOTHING (dedups on any unique constraint)
+              // rather than failing the whole batch forever.
               await tx`
                 INSERT INTO ${tx(table)} ${values}
                 ON CONFLICT (${tx(conflict)}) DO UPDATE SET ${values}
               `;
-            } else if ("id" in row) {
-              // Gateway-allocated pk: upsert on it.
-              await tx`
-                INSERT INTO ${tx(table)} ${values}
-                ON CONFLICT (id) DO UPDATE SET ${values}
-              `;
             } else {
-              // Target-less ON CONFLICT DO NOTHING: dedup on any unique
-              // constraint.
+              // No usable conflict target: dedup on any unique constraint.
               await tx`INSERT INTO ${tx(table)} ${values} ON CONFLICT DO NOTHING`;
             }
           }
@@ -167,4 +200,46 @@ export function buildApplyRouter(sql: postgres.Sql) {
 
 function updateSqlSafe(_sql: string | undefined): boolean {
   return true;
+}
+
+/// True when a unique index (unique constraint or unique index) on the table
+/// has exactly the given columns as its arbiter — i.e. `ON CONFLICT (cols)`
+/// will infer it. Partial predicates are ignored: a conflict target without
+/// a predicate can only match full unique indexes.
+async function uniqueIndexCovers(tx: PgSql, table: string, conflict: string[]): Promise<boolean> {
+  const rows = await tx`
+    SELECT 1
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = ${table}
+      AND i.indisunique
+      AND i.indpred IS NULL
+      AND (
+        SELECT array_agg(a.attname::text ORDER BY a.attname)
+        FROM unnest(i.indkey) AS keys(attnum)
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = keys.attnum
+      ) = (
+        SELECT array_agg(x ORDER BY x)
+        FROM unnest(ARRAY[${conflict.map((column) => `'${column.replace(/'/g, "''")}'`).join(",")}]::text[]) AS x
+      )
+  `;
+  return rows.length > 0;
+}
+
+/// True when the table's primary key spans more than one column (e.g.
+/// nostream's events table: PRIMARY KEY (id, event_created_at)).
+async function hasCompositePk(tx: PgSql, table: string): Promise<boolean> {
+  const rows = await tx`
+    SELECT count(*)::int AS columns
+    FROM pg_constraint con
+    JOIN pg_namespace n ON n.oid = con.connamespace
+    JOIN unnest(con.conkey) AS keys(attnum) ON true
+    WHERE con.contype = 'p'
+      AND n.nspname = 'public'
+      AND con.conrelid = ${table}::regclass
+  `;
+  const columns = (rows[0] as { columns?: number } | undefined)?.columns ?? 0;
+  return columns > 1;
 }

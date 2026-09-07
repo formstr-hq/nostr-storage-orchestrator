@@ -155,7 +155,13 @@ fn pk_placeholder_detection() {
         pk_placeholder("SELECT * FROM notes WHERE id = $1").unwrap(),
         "$1".to_string()
     );
-    assert_eq!(pk_placeholder("SELECT * FROM notes WHERE body = $1"), None);
+    // Any `x = $N` equality is treated as the pk candidate at Describe time
+    // (the analyzer narrows it against the declared pk at Execute, after
+    // params are inlined — see pk_placeholder docs).
+    assert_eq!(
+        pk_placeholder("SELECT * FROM notes WHERE body = $1").unwrap(),
+        "$1".to_string()
+    );
     assert_eq!(
         pk_placeholder("UPDATE notes SET body = 'x' WHERE id = $2").unwrap(),
         "$2".to_string()
@@ -281,4 +287,97 @@ fn literal_defaults_captured() {
     let array = columns.as_array().unwrap();
     assert_eq!(array[0]["default"], false);
     assert_eq!(array[1]["default"], "inbox");
+}
+
+/// nostream's replaceable-event upsert: partial-index conflict target.
+/// sqlparser cannot parse the predicate, so analysis must repair the
+/// statement pre-parse and recover the verbatim predicate text.
+#[test]
+fn partial_index_conflict_upsert_analyzed() {
+    let sql = "INSERT INTO events (id, event_pubkey, event_kind, event_created_at, event_content, event_tags, event_signature) VALUES ('11111111-1111-1111-1111-111111111111', '\\x0208', 0, 5, 'hi', '[[]]', '\\x0309') ON CONFLICT (event_pubkey, event_kind, event_deduplication) WHERE (event_kind = 0 OR event_kind = 3 OR event_kind = 41 OR (event_kind >= 10000 AND event_kind < 20000) OR (event_kind >= 30000 AND event_kind < 40000)) DO UPDATE SET event_created_at = 6, event_content = 'hi2' WHERE events.event_created_at < 6";
+    match analyze(sql).unwrap() {
+        AnalyzedStatement::Write {
+            kind,
+            table,
+            row_id,
+            broad,
+            conflict_columns,
+            conflict_predicate,
+            ..
+        } => {
+            assert_eq!(kind, StatementKind::Insert);
+            assert_eq!(table, "events");
+            assert_eq!(row_id, "11111111-1111-1111-1111-111111111111");
+            assert!(!broad);
+            assert_eq!(
+                conflict_columns,
+                Some(vec![
+                    "event_pubkey".to_string(),
+                    "event_kind".to_string(),
+                    "event_deduplication".to_string()
+                ])
+            );
+            let predicate = conflict_predicate.expect("predicate must be recovered");
+            assert!(predicate.starts_with("WHERE (event_kind = 0"));
+            assert!(predicate.contains("event_kind >= 30000 AND event_kind < 40000"));
+        }
+        other => panic!("expected write, got {other:?}"),
+    }
+}
+
+/// Predicate scan must not be confused by quoted parens or nested parens.
+#[test]
+fn partial_index_predicate_with_quotes_and_nesting() {
+    let sql = "INSERT INTO t (id, body) VALUES ('a', 'x') ON CONFLICT (id) WHERE (body <> ')(' AND (body IS NOT NULL)) DO UPDATE SET body = 'y' WHERE t.id <> ''";
+    match analyze(sql).unwrap() {
+        AnalyzedStatement::Write { conflict_predicate, .. } => {
+            assert_eq!(
+                conflict_predicate.as_deref(),
+                Some("WHERE (body <> ')(' AND (body IS NOT NULL))")
+            );
+        }
+        other => panic!("expected write, got {other:?}"),
+    }
+}
+
+/// A normal conflict target (no predicate) must not be "repaired".
+#[test]
+fn plain_conflict_has_no_predicate() {
+    for sql in [
+        "INSERT INTO notes (id, body) VALUES ('a', 'x') ON CONFLICT (id) DO UPDATE SET body = 'y'",
+        "INSERT INTO notes (id, body) VALUES ('a', 'x') ON CONFLICT DO NOTHING",
+    ] {
+        match analyze(sql).unwrap() {
+            AnalyzedStatement::Write { conflict_predicate, .. } => {
+                assert!(conflict_predicate.is_none(), "{sql}");
+            }
+            other => panic!("{sql}: expected write, got {other:?}"),
+        }
+    }
+}
+
+/// Migration data-priming INSERT..SELECT (nostream's events_old -> events)
+/// routes as a broad write (verbatim to every provider), not a row op.
+#[test]
+fn insert_select_routes_broad() {
+    match analyze("INSERT INTO events (id, body) SELECT id, body FROM events_old ON CONFLICT DO NOTHING").unwrap() {
+        AnalyzedStatement::Write { kind, broad, sql, .. } => {
+            assert_eq!(kind, StatementKind::Insert);
+            assert!(broad);
+            assert!(sql.to_lowercase().contains("from events_old"));
+        }
+        other => panic!("expected write, got {other:?}"),
+    }
+    // Placeholders stay rejected (extended-protocol INSERT..SELECT).
+    assert!(analyze("INSERT INTO t (id) SELECT id FROM old WHERE x = $1").is_err());
+}
+
+/// FROM-less function call (nostream's `select confirm_invoice($1,$2,$3)`):
+/// classified as a read so fan-out executes it verbatim on providers.
+#[test]
+fn from_less_function_call_is_read() {
+    assert!(matches!(
+        analyze("select confirm_invoice('abc', 100, '2026-01-01T00:00:00Z')").unwrap(),
+        AnalyzedStatement::Read { .. }
+    ));
 }

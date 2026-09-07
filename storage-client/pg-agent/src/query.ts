@@ -2,7 +2,7 @@
 // against the provider's mesh database and returns rows as JSON.
 
 import { Hono } from "@hono/hono";
-import type { postgres } from "postgres";
+import type postgres from "postgres";
 import { z } from "zod";
 import { errorResponse } from "./middleware.ts";
 
@@ -19,9 +19,12 @@ export function buildQueryRouter(sql: postgres.Sql) {
     if (!parsed.success) {
       return errorResponse(ctx, 400, "invalid_query");
     }
-    // A single statement with one optional trailing semicolon.
+    // A single statement with one optional trailing semicolon. The gateway
+    // appends the pk column for its replica-verification filter — that SQL
+    // contains an inner comma but never a second statement, so only real
+    // statement separators (semicolon not at the end) are rejected.
     const text = parsed.data.sql.trim().replace(/;\s*$/, "");
-    if (!/^(select|with)\b/i.test(text) || text.includes(";")) {
+    if (!/^(select|with)\b/i.test(text) || /;\s*\S/.test(text)) {
       return errorResponse(ctx, 400, "only_single_select_supported");
     }
     try {

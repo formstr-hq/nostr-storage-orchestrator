@@ -451,15 +451,33 @@ impl CentralStore {
     /// objects, every value text-encoded. Postgres resolves ids, defaults,
     /// sequences and now(), so the captured row is the authoritative image
     /// replicated to every provider. Replaces gateway-side row materialization.
+    ///
+    /// Runs with `session_replication_role = replica`: central-side triggers
+    /// (e.g. a mirrored event_tags derivation) must never fire for the
+    /// capture — the row image is replayed on providers, where the real
+    /// trigger maintains derived tables. Replica mode keeps capture
+    /// independent of whether trigger/function DDL mirrored successfully.
     pub async fn execute_capture(&self, sql: &str) -> Result<Vec<Value>> {
         let mut client = self.connect().await?;
         let client = client
             .as_mut()
             .expect("central pg client is initialized");
-        let messages = client
-            .simple_query(sql)
-            .await
-            .map_err(|error| GatewayError::central(format!("central execute: {error:?}")))?;
+        let batch = format!("BEGIN; SET LOCAL session_replication_role = replica; {sql}; COMMIT;");
+        let messages = match client.simple_query(&batch).await {
+            Ok(messages) => messages,
+            Err(error) => {
+                // The batch may have aborted mid-transaction; clear it so the
+                // connection is reusable.
+                if client.simple_query("ROLLBACK").await.is_err() {
+                    tracing::warn!("capture rollback failed; connection discarded");
+                } else {
+                    let _ = client
+                        .simple_query("SET session_replication_role = DEFAULT")
+                        .await;
+                }
+                return Err(GatewayError::central(format!("central execute: {error:?}")));
+            }
+        };
         let mut out: Vec<Value> = Vec::new();
         for message in messages {
             if let tokio_postgres::SimpleQueryMessage::Row(row) = message {

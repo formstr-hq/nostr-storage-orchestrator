@@ -1,4 +1,5 @@
 import type { Context, Next } from "@hono/hono";
+import type postgres from "postgres";
 
 export function errorResponse(ctx: Context, status: 400 | 401 | 500 | 503, reason: string) {
   return ctx.json({ error: reason }, status);
