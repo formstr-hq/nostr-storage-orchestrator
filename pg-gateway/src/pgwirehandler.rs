@@ -853,11 +853,11 @@ impl ExtendedQueryHandler for GatewayHandlers {
         let sql = &target.statement.sql;
         let schema = if is_catalog_statement(sql) {
             // Real metadata from the catalog connection's prepare(): exact
-            // column names even for zero-row results.
-            match self.catalog.describe_columns(sql).await {
-                Ok(names) => text_fields(
-                    &names.into_iter().map(|name| Column { name, type_oid: Type::TEXT.oid() }).collect::<Vec<Column>>(),
-                ),
+            // column names AND types even for zero-row results. The declared
+            // type must match what Execute encodes (DataRowEncoder uses the
+            // same typed columns) or lib/pq decodes numerics as strings.
+            match self.catalog.describe_typed_columns(sql).await {
+                Ok(columns) => text_fields(&columns),
                 Err(_) => vec![],
             }
         } else {
@@ -927,15 +927,11 @@ impl ExtendedQueryHandler for GatewayHandlers {
     {
         let sql = &target.statement.statement.sql;
         if is_catalog_statement(sql) {
-            match self.catalog.describe_columns(sql).await {
-                Ok(names) => {
-                    let fields = text_fields(
-                        &names.into_iter().map(|name| Column { name, type_oid: Type::TEXT.oid() }).collect::<Vec<Column>>(),
-                    );
-                    return Ok(DescribePortalResponse::new(fields));
-                }
-                Err(_) => return Ok(DescribePortalResponse::new(vec![])),
-            }
+            // Typed describe — must match Execute's DataRow encoding.
+            return match self.catalog.describe_typed_columns(sql).await {
+                Ok(columns) => Ok(DescribePortalResponse::new(text_fields(&columns))),
+                Err(_) => Ok(DescribePortalResponse::new(vec![])),
+            };
         }
         // Projection-aware shape: `select *` maps to the registry columns;
         // named projections map each name to its registry type. The Describe
