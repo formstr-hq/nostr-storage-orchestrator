@@ -1,0 +1,18 @@
+{
+  "name": "@formstr/pg-agent",
+  "version": "0.1.0",
+  "exports": "./main.ts",
+  "license": "MIT",
+  "tasks": {
+    "start": "deno run --allow-net --allow-env main.ts",
+    "dev": "deno run --allow-net --allow-env --watch main.ts",
+    "check": "deno check main.ts src/**/*.ts",
+    "fmt": "deno fmt",
+    "lint": "deno lint"
+  },
+  "imports": {
+    "@hono/hono": "jsr:@hono/hono@^4.12.7",
+    "postgres": "npm:postgres@^3.4.7",
+    "zod": "npm:zod@^4.3.6"
+  }
+}

@@ -47,6 +47,7 @@ export function storageToJson(storage: Storage) {
     tunnelIp: storage.tunnelIp,
     blossomPort: storage.blossomPort,
     relayPort: storage.relayPort,
+    pgAgentPort: storage.pgAgentPort,
     declaredCapacityBytes: storage.declaredCapacityBytes?.toString() ?? null,
     reportedTotalBytes: storage.reportedTotalBytes?.toString() ?? null,
     reportedFreeBytes: storage.reportedFreeBytes?.toString() ?? null,

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>mesh-db explorer — sign in</title>
+    <style>
+      :root { --paper:#f4f4f3; --ink:#0b0b0c; --ink-light:#2a2a2a; --em:#e5484d; --gray:#6b7280; --border:#0b0b0c14; }
+      @media (prefers-color-scheme: dark) { :root { --paper:#0b0b0c; --ink:#f4f4f3; --ink-light:#9ca3af; --border:#ffffff1a; --card:#161617; } }
+      * { box-sizing: border-box; }
+      body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--paper); color:var(--ink); font-family: Inter, system-ui, -apple-system, sans-serif; }
+      .box { width: min(26rem, 92vw); background: var(--card, #fff); border:1px solid var(--border); border-radius:16px; padding:1.75rem; }
+      @media (prefers-color-scheme: dark) { .box { background:#161617; } }
+      h1 { margin:0 0 .25rem; font-size:1.25rem; font-weight:800; letter-spacing:-0.02em; }
+      .sub { color:var(--gray,#6b7280); font-size:.85rem; margin:0 0 1.25rem; }
+      button { width:100%; display:flex; align-items:center; justify-content:center; gap:.5rem; border:none; border-radius:10px; background:var(--ink); color:var(--paper); font:inherit; font-weight:600; padding:.7rem 1rem; cursor:pointer; margin-bottom:.6rem; }
+      button:hover { background:var(--ink-light,#2a2a2a); }
+      @media (prefers-color-scheme: dark) { button { background:#f4f4f3; color:#0b0b0c; } button:hover { background:#9ca3af; } }
+      details { border:1px solid var(--border); border-radius:10px; padding:.7rem .9rem; margin-bottom:.6rem; }
+      summary { cursor:pointer; font-size:.87rem; font-weight:600; }
+      input { width:100%; border:1px solid var(--border); border-radius:8px; padding:.55rem .7rem; font-size:.85rem; margin:.4rem 0; background:transparent; color:inherit; font-family:ui-monospace, Menlo, monospace; }
+      .err { color:#e5484d; font-size:.85rem; margin:.5rem 0; min-height:1.2em; }
+      .ok { color:#16a34a; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h1>mesh-db explorer</h1>
+      <p class="sub">Read-only SQL over the mesh. Sign in with Nostr — no passwords.</p>
+
+      <button id="nip07">Sign in with NIP-07 extension</button>
+
+      <details>
+        <summary>ncryptsec + passphrase</summary>
+        <input id="ncryptsec" placeholder="ncryptsec… (NIP-49 encrypted key)">
+        <input id="passphrase" type="password" placeholder="passphrase">
+        <button id="unlock">Unlock &amp; sign in</button>
+      </details>
+
+      <details>
+        <summary>NIP-46 bunker</summary>
+        <input id="bunker" placeholder="nostr+vc://… (bunker connect string)">
+        <button id="bunker-go">Connect bunker</button>
+      </details>
+
+      <details>
+        <summary>Paste signed header</summary>
+        <input id="paste" placeholder="Nostr eyJpZCI6… (Authorization header)">
+        <button id="paste-go">Use this header</button>
+      </details>
+
+      <div class="err" id="err"></div>
+    </div>
+
+    <script type="module">
+      const TARGET = location.origin + '/';
+      const $ = (id) => document.getElementById(id);
+      const err = (m, ok = false) => { const e = $('err'); e.textContent = m; e.className = ok ? 'ok' : 'err'; };
+
+      async function signIn(authorization) {
+        const r = await fetch('/auth', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ authorization }),
+        });
+        if (r.ok) return location.reload();
+        $('err').textContent = (await r.json()).error ?? 'sign-in failed';
+      }
+
+      // Build a NIP-98 event template (GET, this URL).
+      const template = () => ({
+        kind: 27235,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [['u', TARGET], ['method', 'GET']],
+        content: '',
+      });
+
+      // 1. NIP-07 / @formstr/signer
+      $('nip07').onclick = async () => {
+        if (!window.nostr) return $('err').textContent = 'No Nostr extension found (NIP-07).';
+        const b64 = btoa(JSON.stringify(await window.nostr.signEvent(template())));
+        return signIn('Nostr ' + b64);
+      };
+
+      // 2. ncryptsec + passphrase (NIP-49) — decrypted in memory only
+      $('unlock').onclick = async () => {
+        try {
+          const { nip49, finalizeEvent, getPublicKey } = await import('https://esm.sh/nostr-tools@2.23.5');
+          const sk = nip49.decrypt($('passphrase').value, $('ncryptsec').value.trim());
+          const ev = finalizeEvent(template(), sk);
+          const b64 = btoa(JSON.stringify(ev));
+          return signIn('Nostr ' + b64);
+        } catch (e) { $('err').textContent = 'Unlock failed: ' + e.message; }
+      };
+
+      // 3. NIP-46 bunker
+      $('bunker-go').onclick = async () => {
+        try {
+          const nostrTools = await import('https://esm.sh/nostr-tools@2.23.5');
+          const { BunkerSigner, parseBunkerInput } = nostrTools.nip46 ?? nostrTools;
+          const { generateSecretKey } = nostrTools;
+          const bp = await parseBunkerInput($('bunker').value.trim());
+          if (!bp) throw new Error('not a valid bunker connect string');
+          // onauth surfaces the NIP-46 auth URL when the bunker requires approval
+          const signer = new BunkerSigner(generateSecretKey(), bp, {
+            onauth: (authUrl) => { window.open(authUrl, '_blank', 'noopener'); },
+          });
+          await signer.connect();
+          const ev = await signer.signEvent(template());
+          await signer.close();
+          const b64 = btoa(JSON.stringify(ev));
+          return signIn('Nostr ' + b64);
+        } catch (e) { $('err').textContent = 'Bunker failed: ' + e.message; }
+      };
+
+      // 4. paste header
+      $('paste-go').onclick = () => signIn($('paste').value.trim());
+    </script>
+  </body>
+</html>

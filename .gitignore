@@ -26,3 +26,13 @@ proxy/relay/test/*.js
 proxy/relay/test/*.js.map
 proxy/relay/test/*.d.ts
 proxy/relay/test/*.d.ts.map
+
+# rust builds (pg-gateway crate)
+target/
+
+# python
+__pycache__/
+*.pyc
+
+# tauri generated code
+admin-app/src-tauri/gen/

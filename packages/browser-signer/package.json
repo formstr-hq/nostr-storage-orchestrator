@@ -1,0 +1,18 @@
+{
+  "name": "@formstr/browser-signer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "NIP-07 browser extension signer (NIP-98 signing) — keys stay on-device as NIP-49 ncryptsec, decrypted in memory only.",
+  "scripts": {
+    "build": "node ./scripts/build.mjs"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.23.5"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.0",
+    "typescript": "^6.0.3",
+    "esbuild": "^0.25.0"
+  }
+}

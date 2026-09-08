@@ -1,4 +1,5 @@
 import type {
+  ActivePgStorageRecord,
   ActiveStorageRecord,
   BlobRecord,
   MemberRecord,
@@ -156,6 +157,10 @@ export class DbClient {
 
   listActiveStorages(): Promise<ActiveStorageRecord[]> {
     return this.getOk("/storages/active");
+  }
+
+  listActivePgStorages(): Promise<ActivePgStorageRecord[]> {
+    return this.getOk("/storages/active-pg");
   }
 
   createStorage(data: {

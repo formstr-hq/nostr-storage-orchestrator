@@ -91,7 +91,7 @@ services:
     container_name: nso_nvpn
     environment:
       NVPN_ROLE: proxy
-      NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${RELAY_PORT:-8007},${ADMIN_API_PORT:-3002}"
+      NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${RELAY_PORT:-8007},${ADMIN_API_PORT:-3002},${PG_GATEWAY_PORT:-55432}"
       # Storage agents reach the control plane over the encrypted mesh.
       NVPN_MESH_INPUT_PORTS: "${ADMIN_API_PORT:-3002}"
     volumes:
@@ -101,6 +101,13 @@ services:
       - "${RELAY_PORT:-8007}:${RELAY_PORT:-8007}"
       # The admin API is reachable off-container only through local nginx.
       - "127.0.0.1:${ADMIN_API_PORT:-3002}:${ADMIN_API_PORT:-3002}"
+      # pgwire for mesh-PG clients (nostream, psql). Loopback for ops; the
+      # 172.17.0.1 binding lets sibling compose networks reach the gateway
+      # via host-gateway. The port is a public input on the sidecar's
+      # firewall so the published-port path (docker-proxy on the bridge)
+      # reaches the gateway's netns listener.
+      - "127.0.0.1:${PG_GATEWAY_PORT:-55432}:5432"
+      - "172.17.0.1:${PG_GATEWAY_PORT:-55432}:5432"
       - "${NVPN_LISTEN_PORT:-51820}:${NVPN_LISTEN_PORT:-51820}/udp"
 
   admin:
@@ -198,6 +205,49 @@ services:
       nvpn:
         condition: service_healthy
         restart: true
+    restart: unless-stopped
+
+  # Mesh-PG data plane: pgwire server for structured storage. Writes land in
+  # a durable buffer (central Postgres) and are pushed to providers' pg-agents
+  # over the NVPN mesh; reads route via the placement index or fan out. The
+  # nvpn sidecar publishes the listener (ports: above) for the whole shared
+  # namespace. Auth: fixed password (PG_GATEWAY_PASSWORD, required — fail
+  # closed). See docs/DECENTRALIZED_PG_PLAN.md.
+  pg-gateway:
+    build:
+      context: ./pg-gateway
+    container_name: nso_pg_gateway
+    # Must share the nvpn sidecar's netns: only that namespace can route
+    # 10.44.x.y tunnel addresses to providers' pg-agents.
+    network_mode: "service:nvpn"
+    depends_on:
+      db:
+        condition: service_healthy
+      nvpn:
+        condition: service_healthy
+        restart: true
+    environment:
+      PG_GATEWAY_LISTEN_ADDR: "0.0.0.0:5432"
+      DB_API_URL: http://db:${DB_API_PORT:-4000}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orchestrator}
+      POSTGRES_DB: ${POSTGRES_DB:-orchestrator}
+      # Required: the gateway refuses to start without a password (fail
+      # closed against open cleartext auth).
+      PG_GATEWAY_PASSWORD: ${PG_GATEWAY_PASSWORD:?PG_GATEWAY_PASSWORD is required}
+      # Bearer token for providers' /pg/* endpoints (must match providers'
+      # PG_AGENT_TOKEN). Optional but strongly recommended.
+      PG_PROVIDER_TOKEN: ${PG_PROVIDER_TOKEN:-}
+      # Broad writes (pk-less UPDATE/DELETE, INSERT..SELECT, DDL fallback)
+      # are required by nostream's kind-5 flows and knex migrations.
+      PG_ENABLE_BROAD_WRITES: "1"
+      # Exclusive database-node placement: each row lands on exactly one
+      # provider (hash-distributed). Raise only with a second pg provider.
+      PG_DEFAULT_REPLICA_COUNT: "1"
+      # Dispatch/apply diagnostics are debug-level; raise via RUST_LOG.
+      RUST_LOG: "${RUST_LOG:-info,pg_gateway=debug}"
     restart: unless-stopped
 
 volumes:

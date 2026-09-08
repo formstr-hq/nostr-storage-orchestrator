@@ -86,6 +86,7 @@ model Storage {
   tunnelIp              String?
   blossomPort           Int?
   relayPort             Int?
+  pgAgentPort           Int?
   declaredCapacityBytes BigInt?
   reportedTotalBytes    BigInt?
   reportedFreeBytes     BigInt?
@@ -95,4 +96,67 @@ model Storage {
 
   @@index([lifecycle, lastPingAt])
   @@index([ownerNpub])
+}
+
+// ── Decentralized Postgres layer (docs/DECENTRALIZED_PG_PLAN.md) ────────────
+// Owned by the pg-gateway, which talks to these tables directly over
+// tokio-postgres; they are declared here so Prisma owns the schema/migrations.
+
+model PgTable {
+  name      String   @id
+  columns   Json
+  version   Int      @default(1)
+  replicaN  Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("pg_table")
+}
+
+model PgMigration {
+  id        String    @id
+  ddl       String
+  version   Int
+  state     String    @default("PENDING")
+  createdAt DateTime  @default(now())
+  appliedAt DateTime?
+
+  @@index([state, version])
+  @@map("pg_migration")
+}
+
+model PgMigrationState {
+  storageNpub String   @map("storage_npub")
+  version     Int
+  appliedAt   DateTime @default(now())
+
+  @@id([storageNpub, version])
+  @@map("pg_migration_state")
+}
+
+model PgWriteOp {
+  id             String    @id
+  tableName      String    @map("table_name")
+  op             String
+  rowId          String    @map("row_id")
+  payload        Json?
+  createdAt      DateTime  @default(now())
+  retryCount     Int       @default(0)
+  lastError      String?   @map("last_error")
+  lastAttemptAt  DateTime? @map("last_attempt_at")
+
+  @@index([tableName, rowId])
+  @@index([createdAt])
+  @@map("pg_write_op")
+}
+
+model PgPlacement {
+  tableName String   @map("table_name")
+  rowId     String   @map("row_id")
+  replicas  String[]
+  state     String   @default("PENDING")
+  updatedAt DateTime @updatedAt
+
+  @@id([tableName, rowId])
+  @@map("pg_placement")
 }

@@ -35,6 +35,47 @@ services:
 
     command: ["relay"]
 
+  # Mesh-PG data plane (dev topology — ports published on loopback).
+  mesh-postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    container_name: mesh_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${MESH_PG_USER:-mesh}
+      POSTGRES_PASSWORD: ${MESH_PG_PASSWORD:-mesh}
+      POSTGRES_DB: ${MESH_PG_DATABASE:-mesh}
+    volumes:
+      - ./data/mesh-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${MESH_PG_USER:-mesh}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pg-agent:
+    build: ./pg-agent
+    container_name: pg_agent
+    restart: unless-stopped
+    depends_on:
+      mesh-postgres:
+        condition: service_healthy
+    ports:
+      - "${PG_AGENT_PORT:-3300}:3300"
+    environment:
+      PG_AGENT_PORT: "${PG_AGENT_PORT:-3300}"
+      PG_AGENT_TOKEN: "${PG_AGENT_TOKEN:-}"
+      MESH_PG_HOST: mesh-postgres
+      MESH_PG_PORT: "5432"
+      MESH_PG_DATABASE: ${MESH_PG_DATABASE:-mesh}
+      MESH_PG_USER: ${MESH_PG_USER:-mesh}
+      MESH_PG_PASSWORD: ${MESH_PG_PASSWORD:-mesh}
+    healthcheck:
+      test: ["CMD", "deno", "eval", "const r = await fetch('http://localhost:' + (Deno.env.get('PG_AGENT_PORT') ?? '3300') + '/pg/health'); if (!r.ok) Deno.exit(1);"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
   blossom:
     build: ./blossom
     container_name: blossom
