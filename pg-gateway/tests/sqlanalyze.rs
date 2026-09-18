@@ -88,9 +88,50 @@ fn reads_allow_colocated_joins_reject_aggregates() {
     assert!(pg_gateway::sqlanalyze::has_join("SELECT a.* FROM a JOIN b ON a.id = b.id"));
     // Comma / cross-product FROM lists stay rejected.
     assert!(pg_gateway::sqlanalyze::analyze("SELECT * FROM a, b WHERE a.id = b.id").is_err());
-    assert!(pg_gateway::sqlanalyze::analyze("SELECT COUNT(*) FROM notes").is_err());
-    assert!(pg_gateway::sqlanalyze::analyze("SELECT DISTINCT id FROM notes").is_err());
+    // Aggregates and joinless DISTINCT route to the map-reduce engine.
+    assert!(matches!(
+        pg_gateway::sqlanalyze::analyze("SELECT COUNT(*) FROM notes"),
+        Ok(AnalyzedStatement::Aggregate { .. })
+    ));
+    assert!(matches!(
+        pg_gateway::sqlanalyze::analyze("SELECT DISTINCT id FROM notes"),
+        Ok(AnalyzedStatement::Aggregate { .. })
+    ));
+    // DISTINCT over a co-located JOIN is a plain read (pushed down; the
+    // gateway dedups by pk) — this is nostream's `select distinct "events".*`.
+    assert!(matches!(
+        pg_gateway::sqlanalyze::analyze(
+            "SELECT DISTINCT a.* FROM a JOIN b ON a.id = b.id"
+        ),
+        Ok(AnalyzedStatement::Read { .. })
+    ));
 }
+
+#[test]
+fn union_set_operations() {
+    // UNION / UNION ALL are pushed down as plain reads.
+    for sql in [
+        "SELECT * FROM notes UNION SELECT * FROM notes",
+        "SELECT * FROM notes UNION ALL SELECT * FROM notes",
+        "(SELECT id FROM notes) UNION (SELECT id FROM notes ORDER BY id LIMIT 1)",
+        "(SELECT DISTINCT a.* FROM a JOIN b ON a.id = b.id) UNION (SELECT * FROM a)",
+    ] {
+        assert!(
+            matches!(analyze(sql), Ok(AnalyzedStatement::Read { .. })),
+            "{sql} should be a read"
+        );
+    }
+    // EXCEPT/INTERSECT need cross-provider rows: rejected.
+    assert!(analyze("SELECT * FROM notes EXCEPT SELECT * FROM notes").is_err());
+    assert!(analyze("SELECT * FROM notes INTERSECT SELECT * FROM notes").is_err());
+    // Aggregates inside a UNION need the map-reduce engine: rejected.
+    assert!(analyze("SELECT COUNT(*) FROM notes UNION SELECT COUNT(*) FROM notes").is_err());
+    // Helpers descend into the first branch.
+    let sql = "(SELECT * FROM notes) UNION (SELECT * FROM notes)";
+    assert_eq!(read_table_name(sql).as_deref(), Some("notes"));
+    assert!(pg_gateway::sqlanalyze::has_set_operation(sql));
+}
+
 
 #[test]
 fn classifies_ddl() {

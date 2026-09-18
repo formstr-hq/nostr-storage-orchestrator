@@ -6,7 +6,7 @@
 
 use sqlparser::ast::{
     AlterTableOperation, BinaryOperator, ColumnOption, DataType, Expr, GeneratedAs, ObjectName,
-    Query, Statement, TableConstraint, TableFactor, Value,
+    Query, Select, SetExpr, SetOperator, Statement, TableConstraint, TableFactor, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::keywords::Keyword;
@@ -480,6 +480,21 @@ fn analyze_select(query: Query, sql: &str) -> Result<AnalyzedStatement> {
     // LIMIT is allowed: fan-out applies it per provider (may over-fetch;
     // merge keeps the invariant "at least the requested rows from each
     // provider", which satisfies correctness for replicated data).
+    // Set operations are pushed down verbatim: every provider evaluates the
+    // whole UNION over its exclusive slice and the gateway merges by primary
+    // key. Exclusive placement makes that exact for UNION — a row lives on
+    // exactly one provider, so a per-provider evaluation cannot miss or
+    // duplicate a row (the pk dedup also collapses a row that matches several
+    // branches). EXCEPT/INTERSECT depend on rows that may live on *other*
+    // providers, so a per-provider evaluation would be wrong: reject them.
+    if let sqlparser::ast::SetExpr::SetOperation { .. } = query.body.as_ref() {
+        let mut selects: Vec<&Select> = Vec::new();
+        collect_union_selects(query.body.as_ref(), &mut selects)?;
+        for select in selects {
+            validate_union_select(select)?;
+        }
+        return Ok(AnalyzedStatement::Read { sql: sql.to_string() });
+    }
     let body = match query.body.as_ref() {
         sqlparser::ast::SetExpr::Select(select) => select,
         _ => {
@@ -492,11 +507,25 @@ fn analyze_select(query: Query, sql: &str) -> Result<AnalyzedStatement> {
         // SELECT without FROM (e.g. `SELECT 1`): constant, no providers.
         return Ok(AnalyzedStatement::Read { sql: sql.to_string() });
     }
-    // Aggregates / DISTINCT / GROUP BY / HAVING: plan a map-reduce execution
-    // (providers aggregate their exclusive slices, gateway merges). Falls
-    // through to the plain read path when the query has none of these.
+    // Aggregates / GROUP BY / HAVING: plan a map-reduce execution (providers
+    // aggregate their exclusive slices, gateway merges). Falls through to the
+    // plain read path when the query has none of these.
     let has_aggregate = query_has_aggregate(&query);
-    if has_aggregate || body.distinct.is_some() || body.having.is_some() || !matches!(body.group_by, sqlparser::ast::GroupByExpr::Expressions(ref items, _) if items.is_empty()) {
+    let has_join = body.from.iter().any(|from| !from.joins.is_empty());
+    let has_group_by = !matches!(body.group_by, sqlparser::ast::GroupByExpr::Expressions(ref items, _) if items.is_empty());
+    // A bare DISTINCT projects whole rows. Without a join the aggregate engine
+    // plans it (exact global tuple-dedup, even when the pk is not projected).
+    // With a join that engine rejects the shape, but the plain read path
+    // handles it: each provider runs the DISTINCT and the gateway dedups by
+    // pk. So only joinless bare DISTINCT goes to the aggregate engine.
+    // `DISTINCT ON (...)` is order-dependent and stays on the aggregate path
+    // (where it is rejected if it cannot be planned), never the read path.
+    let bare_distinct = matches!(body.distinct.as_ref(), Some(sqlparser::ast::Distinct::Distinct));
+    let needs_aggregate = has_aggregate
+        || body.having.is_some()
+        || has_group_by
+        || (body.distinct.is_some() && !(bare_distinct && has_join));
+    if needs_aggregate {
         match crate::aggregate::plan_aggregate(sql) {
             Ok(plan) => return Ok(AnalyzedStatement::Aggregate { plan }),
             Err(error) => {
@@ -558,6 +587,75 @@ fn query_has_aggregate(query: &Query) -> bool {
         }
     }
     false
+}
+
+/// Flattens a UNION/UNION ALL tree into its leaf SELECTs. Rejects non-UNION
+/// operators (EXCEPT/INTERSECT need cross-provider row knowledge and cannot be
+/// evaluated per provider). Parenthesized operands (`SetExpr::Query`) are
+/// descended so a branch's own ORDER BY/LIMIT does not hide its SELECT.
+fn collect_union_selects<'a>(body: &'a SetExpr, out: &mut Vec<&'a Select>) -> Result<()> {
+    match body {
+        SetExpr::Select(select) => out.push(select),
+        SetExpr::Query(query) => collect_union_selects(query.body.as_ref(), out)?,
+        SetExpr::SetOperation { left, op, right, .. } => {
+            if !matches!(op, SetOperator::Union) {
+                return Err(GatewayError::UnsupportedSql(format!(
+                    "{op} set operations are not supported; only UNION"
+                )));
+            }
+            collect_union_selects(left, out)?;
+            collect_union_selects(right, out)?;
+        }
+        _ => {
+            return Err(GatewayError::UnsupportedSql(
+                "UNION operands must be SELECT statements".to_string(),
+            ))
+        }
+    }
+    Ok(())
+}
+
+/// Validates one UNION branch. The statement is forwarded to providers
+/// verbatim, so the shape must be one whose per-provider result is globally
+/// correct under exclusive placement: plain row SELECTs (JOINs allowed,
+/// DISTINCT allowed) with no aggregate/GROUP BY/HAVING — those need the
+/// map-reduce engine, which cannot be combined inside a set operation.
+fn validate_union_select(select: &Select) -> Result<()> {
+    if select.having.is_some()
+        || !matches!(select.group_by, sqlparser::ast::GroupByExpr::Expressions(ref items, _) if items.is_empty())
+    {
+        return Err(GatewayError::UnsupportedSql(
+            "aggregates/GROUP BY/HAVING are not supported inside a UNION".to_string(),
+        ));
+    }
+    for item in &select.projection {
+        let expr = match item {
+            sqlparser::ast::SelectItem::UnnamedExpr(expr) => Some(expr),
+            sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => Some(expr),
+            sqlparser::ast::SelectItem::ExprWithAliases { expr, .. } => Some(expr),
+            _ => None,
+        };
+        if let Some(expr) = expr {
+            if expr_has_aggregate(expr) {
+                return Err(GatewayError::UnsupportedSql(
+                    "aggregates are not supported inside a UNION".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// First leaf SELECT of a query body, descending set operations and
+/// parenthesized operands. UNION branches must agree on arity (Postgres
+/// enforces this), so the first branch's shape describes the result.
+fn first_select(body: &SetExpr) -> Option<&Select> {
+    match body {
+        SetExpr::Select(select) => Some(select),
+        SetExpr::Query(query) => first_select(query.body.as_ref()),
+        SetExpr::SetOperation { left, .. } => first_select(left),
+        _ => None,
+    }
 }
 
 fn expr_has_aggregate(expr: &Expr) -> bool {
@@ -1130,29 +1228,61 @@ fn placeholder_in_equality(expr: &Expr) -> Option<String> {
     }
 }
 
-/// Table name of a SELECT, when it is a plain single-table read.
-/// True when the SELECT's FROM carries JOINs. The read-your-writes buffer
-/// overlay keys on the base table's pk and cannot re-evaluate join predicates
-/// against pending rows, so it is skipped for joins.
+/// True when any leaf SELECT's FROM carries JOINs. For a UNION/UNION ALL, the
+/// first branch is representative: Postgres requires every branch to have
+/// identical arity, and nostream's unions are over one table. The
+/// read-your-writes buffer overlay keys on the base table's pk and cannot
+/// re-evaluate join predicates against pending rows, so it is skipped for
+/// joins.
 pub fn has_join(sql: &str) -> bool {
     let Ok(statements) = Parser::parse_sql(&GenericDialect {}, sql) else {
         return false;
     };
     for statement in statements {
         if let Statement::Query(query) = statement {
-            if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
-                return select.from.iter().any(|from| !from.joins.is_empty());
+            let mut selects: Vec<&Select> = Vec::new();
+            if collect_union_selects(query.body.as_ref(), &mut selects).is_ok() {
+                return selects.iter().any(|select| select.from.iter().any(|from| !from.joins.is_empty()));
             }
         }
     }
     false
 }
 
+/// True when the read is a UNION/UNION ALL (a set operation rather than a
+/// single SELECT). The read-your-writes buffer overlay re-evaluates no
+/// predicates, so it is skipped for set operations for the same reason it is
+/// skipped for joins: a pending row may not match a branch's filter.
+pub fn has_set_operation(sql: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&GenericDialect {}, sql) else {
+        return false;
+    };
+    statements.into_iter().any(|statement| match statement {
+        Statement::Query(query) => matches!(query.body.as_ref(), SetExpr::SetOperation { .. }),
+        _ => false,
+    })
+}
+
+/// SQL to send to a provider for a read. `nostream`'s UNIONs render as
+/// `(select ...) UNION (select ...)`, which pg-agent rejects because the
+/// statement does not begin with SELECT/WITH (`only_single_select_supported`).
+/// Wrapping is semantically identical, satisfies "a single read-only SELECT",
+/// and requires no provider upgrade.
+pub fn provider_read_sql(sql: &str) -> String {
+    if !has_set_operation(sql) {
+        return sql.to_string();
+    }
+    // Providers reject a second statement; a trailing semicolon would break
+    // the derived-table wrap (`select * from (select ...;)`).
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    format!("select * from ({trimmed}) as _mesh_union")
+}
+
 pub fn read_table_name(sql: &str) -> Option<String> {
     let statements = Parser::parse_sql(&GenericDialect {}, sql).ok()?;
     for statement in statements {
         if let Statement::Query(query) = statement {
-            if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
+            if let Some(select) = first_select(query.body.as_ref()) {
                 if let Some(from) = select.from.first() {
                     if let TableFactor::Table { name, .. } = &from.relation {
                         return extract_table_name(name).ok();
@@ -1172,7 +1302,7 @@ pub fn is_select_star(sql: &str) -> bool {
     };
     for statement in statements {
         if let Statement::Query(query) = statement {
-            if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
+            if let Some(select) = first_select(query.body.as_ref()) {
                 return select
                     .projection
                     .iter()
@@ -1186,13 +1316,15 @@ pub fn is_select_star(sql: &str) -> bool {
 /// Projection of a SELECT as (name, is_identifier) pairs, in output order.
 /// Plain `*` yields None (the whole table). Unsupported expressions are
 /// filtered; describe falls back to TEXT for anything it cannot resolve.
+/// For a UNION, the first branch is representative (all branches must agree
+/// on arity).
 pub fn select_projection(sql: &str) -> Option<Option<Vec<String>>> {
     let Ok(statements) = Parser::parse_sql(&GenericDialect {}, sql) else {
         return None;
     };
     for statement in statements {
         if let Statement::Query(query) = statement {
-            if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
+            if let Some(select) = first_select(query.body.as_ref()) {
                 let mut columns = Vec::new();
                 for item in &select.projection {
                     match item {
@@ -1218,8 +1350,31 @@ pub fn select_projection(sql: &str) -> Option<Option<Vec<String>>> {
                             // Expression projection: shape unknown here.
                             return Some(Some(Vec::new()));
                         }
-                        sqlparser::ast::SelectItem::QualifiedWildcard(_, _) => {
-                            return Some(Some(Vec::new()));
+                        sqlparser::ast::SelectItem::QualifiedWildcard(kind, _) => {
+                            // `<table>.*` on the read's base table is the whole
+                            // table (so a registry-backed describe is exact) —
+                            // this is what nostream's `select distinct
+                            // "events".*` join reads project. A qualifier for
+                            // any other table is left unresolved.
+                            let qualifier = match kind {
+                                sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
+                                    name.0.last().and_then(|part| part.as_ident())
+                                }
+                                _ => None,
+                            };
+                            let base = select
+                                .from
+                                .first()
+                                .and_then(|from| match &from.relation {
+                                    TableFactor::Table { name, .. } => name.0.last().and_then(|p| p.as_ident()),
+                                    _ => None,
+                                });
+                            match (qualifier, base) {
+                                (Some(q), Some(b)) if q.value.eq_ignore_ascii_case(&b.value) => {
+                                    return Some(None);
+                                }
+                                _ => return Some(Some(Vec::new())),
+                            }
                         }
                     }
                 }
@@ -1312,3 +1467,110 @@ pub fn insert_capture_sql(sql: &str) -> Result<String> {
     Ok(rendered)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn union_is_accepted_as_read() {
+        let sql = "select * from \"events\" where \"event_kind\" in ('1') union \
+                   select * from \"events\" where \"event_kind\" in ('0')";
+        assert!(matches!(analyze(sql).unwrap(), AnalyzedStatement::Read { .. }));
+    }
+
+    #[test]
+    fn union_all_is_accepted_as_read() {
+        let sql = "select * from \"events\" union all select * from \"events\"";
+        assert!(matches!(analyze(sql).unwrap(), AnalyzedStatement::Read { .. }));
+    }
+
+    #[test]
+    fn union_nested_and_parenthesized() {
+        // nostream emits parenthesized operands with their own ORDER BY/LIMIT.
+        let sql = "(select * from \"events\" where \"event_kind\" in ('1')) union \
+                   (select * from \"events\" where \"event_kind\" in ('0') \
+                    order by \"event_created_at\" desc limit 1) \
+                   order by \"event_created_at\" desc limit 1";
+        assert!(matches!(analyze(sql).unwrap(), AnalyzedStatement::Read { .. }));
+    }
+
+    #[test]
+    fn union_with_distinct_and_join_branches() {
+        let sql = "select distinct \"events\".* from \"events\" \
+                   left join \"event_tags\" on \"events\".\"event_id\" = \"event_tags\".\"event_id\" \
+                   where \"event_tags\".tag_name = 'e' union \
+                   select * from \"events\" where \"event_kind\" in ('0')";
+        assert!(matches!(analyze(sql).unwrap(), AnalyzedStatement::Read { .. }));
+    }
+
+    #[test]
+    fn except_and_intersect_are_rejected() {
+        let except = "select * from \"events\" except select * from \"events\"";
+        let intersect = "select * from \"events\" intersect select * from \"events\"";
+        assert!(analyze(except).is_err());
+        assert!(analyze(intersect).is_err());
+    }
+
+    #[test]
+    fn aggregates_inside_union_are_rejected() {
+        let sql = "select count(*) from \"events\" union select count(*) from \"events\"";
+        assert!(analyze(sql).is_err());
+    }
+
+    #[test]
+    fn union_helpers_pick_first_branch() {
+        let sql = "(select * from \"events\") union (select * from \"events\")";
+        assert_eq!(read_table_name(sql).as_deref(), Some("events"));
+        assert!(has_set_operation(sql));
+        assert!(!has_join(sql));
+        // `select *` on the first branch.
+        assert!(matches!(select_projection(sql), Some(None)));
+    }
+
+    #[test]
+    fn distinct_over_join_routes_to_read() {
+        let sql = "select distinct \"events\".* from \"events\" \
+                   left join \"event_tags\" on \"events\".\"event_id\" = \"event_tags\".\"event_id\" \
+                   where \"event_tags\".tag_name = 'e'";
+        assert!(matches!(analyze(sql).unwrap(), AnalyzedStatement::Read { .. }));
+        assert!(has_join(sql));
+        // `<table>.*` describes as the whole table, matching Execute's arity.
+        assert!(matches!(select_projection(sql), Some(None)));
+    }
+
+    #[test]
+    fn joinless_distinct_stays_aggregate() {
+        let sql = "select distinct event_kind from \"events\"";
+        assert!(matches!(analyze(sql).unwrap(), AnalyzedStatement::Aggregate { .. }));
+    }
+
+    #[test]
+    fn plain_join_read_still_works() {
+        let sql = "select \"events\".* from \"events\" \
+                   left join \"event_tags\" on \"events\".\"event_id\" = \"event_tags\".\"event_id\" \
+                   where \"event_tags\".tag_name = 'e' \
+                   order by \"events\".\"event_created_at\" desc limit 2";
+        assert!(matches!(analyze(sql).unwrap(), AnalyzedStatement::Read { .. }));
+    }
+
+    #[test]
+    fn union_branch_without_select_is_rejected() {
+        let sql = "select * from \"events\" union values (1, 2)";
+        assert!(analyze(sql).is_err());
+    }
+
+    #[test]
+    fn provider_read_sql_wraps_unions_only() {
+        // A plain read is forwarded unchanged.
+        let plain = "select * from \"events\" where \"event_kind\" in ('1')";
+        assert_eq!(provider_read_sql(plain), plain);
+        // A union is wrapped so it starts with SELECT (pg-agent requirement),
+        // including when the original carries a trailing semicolon.
+        let union = "(select * from \"events\") union (select * from \"events\");";
+        let wrapped = provider_read_sql(union);
+        assert!(wrapped.starts_with("select * from ("));
+        assert!(wrapped.contains(") union ("));
+        assert!(wrapped.ends_with(") as _mesh_union"));
+        assert!(!wrapped.contains(';'));
+    }
+}
