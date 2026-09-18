@@ -11,8 +11,11 @@ part of any compose project — so a host reboot used to leave the relay down.
 | `docker-compose.yml` | `nostream` + `nostream-cache`, pinned network |
 | `settings.yaml` | Relay settings overrides, mounted read-only |
 | `resources/` | Landing page (`index.html`, `css/style.css`), mounted read-only |
-| `nginx/` | Relay vhosts + per-IP connection limits (host nginx) |
 | `.env.example` | Secrets / tuning template |
+
+nginx config is **not** here — it lives in its own repo,
+`formstr-hq/nginx-72.61.138.38`, which is checked out at `/etc/nginx` on the
+host. See "nginx per-IP connection limits" below.
 
 ## Why these exist
 
@@ -90,14 +93,14 @@ connections get terminated right after the AUTH challenge and publishes fail.
 
 ## nginx per-IP connection limits
 
-`nginx/` mirrors the host's relay vhosts and the limit zones in
-`/etc/nginx/conf.d/`:
+The relay vhosts and the limit zones live in the **host nginx repo**,
+`formstr-hq/nginx-72.61.138.38` (checked out at `/etc/nginx` on the host):
 
 | File | Host path |
 |---|---|
-| `relay-limits.conf` | `/etc/nginx/conf.d/relay-limits.conf` |
-| `relay.stg.formstr.app` | `/etc/nginx/sites-enabled/relay.stg.formstr.app` |
-| `relay.formstr.app` | `/etc/nginx/sites-enabled/relay.formstr.app` |
+| `conf.d/relay-limits.conf` | `/etc/nginx/conf.d/relay-limits.conf` |
+| `sites-enabled/relay.stg.formstr.app` | `/etc/nginx/sites-enabled/relay.stg.formstr.app` |
+| `sites-enabled/relay.formstr.app` | `/etc/nginx/sites-enabled/relay.formstr.app` |
 
 Both hostnames proxy to the same backend (`127.0.0.1:8008`), so one set of
 limits covers both.
@@ -114,13 +117,13 @@ vector; `limit_req` (10 r/s, burst 20) bounds connection churn. Values are
 deliberately generous: a normal client uses 1–2 connections, and mobile-carrier
 NAT can put many users behind one address.
 
-Install / update on the host:
+Edit on the host and push:
 
 ```bash
-cp nginx/relay-limits.conf        /etc/nginx/conf.d/relay-limits.conf
-cp nginx/relay.stg.formstr.app    /etc/nginx/sites-enabled/relay.stg.formstr.app
-cp nginx/relay.formstr.app        /etc/nginx/sites-enabled/relay.formstr.app
+cd /etc/nginx
+$EDITOR sites-enabled/relay.stg.formstr.app   # or conf.d/relay-limits.conf
 nginx -t && nginx -s reload
+git add -A && git commit -m "..." && git push origin master
 ```
 
 ## Verify
