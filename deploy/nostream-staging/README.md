@@ -11,6 +11,7 @@ part of any compose project — so a host reboot used to leave the relay down.
 | `docker-compose.yml` | `nostream` + `nostream-cache`, pinned network |
 | `settings.yaml` | Relay settings overrides, mounted read-only |
 | `resources/` | Landing page (`index.html`, `css/style.css`), mounted read-only |
+| `nginx/` | Relay vhosts + per-IP connection limits (host nginx) |
 | `.env.example` | Secrets / tuning template |
 
 ## Why these exist
@@ -86,6 +87,41 @@ host address (`172.28.0.1`), so the two stay consistent. nginx already sends
 Without this, every public connection appears to come from the proxy, and the
 default `limits.connection` bucket (12/sec, 48/min) is shared by all clients —
 connections get terminated right after the AUTH challenge and publishes fail.
+
+## nginx per-IP connection limits
+
+`nginx/` mirrors the host's relay vhosts and the limit zones in
+`/etc/nginx/conf.d/`:
+
+| File | Host path |
+|---|---|
+| `relay-limits.conf` | `/etc/nginx/conf.d/relay-limits.conf` |
+| `relay.stg.formstr.app` | `/etc/nginx/sites-enabled/relay.stg.formstr.app` |
+| `relay.formstr.app` | `/etc/nginx/sites-enabled/relay.formstr.app` |
+
+Both hostnames proxy to the same backend (`127.0.0.1:8008`), so one set of
+limits covers both.
+
+Why: nostream holds a DB-pool connection per in-flight subscription/event
+handler. On 2026-09-18 one client opened and abandoned hundreds of connections
+(~600 aborts in 30 min, repeated oversized payloads), which starved the pool
+and wedged every write relay-wide with `KnexTimeoutError: Timeout acquiring a
+connection` until nostream was restarted. nostream has no IP blacklist —
+`ipWhitelist` only *exempts* IPs from its limiter — so the cap belongs at nginx.
+
+`limit_conn` (max 30 concurrent connections per IP) bounds the pool-starvation
+vector; `limit_req` (10 r/s, burst 20) bounds connection churn. Values are
+deliberately generous: a normal client uses 1–2 connections, and mobile-carrier
+NAT can put many users behind one address.
+
+Install / update on the host:
+
+```bash
+cp nginx/relay-limits.conf        /etc/nginx/conf.d/relay-limits.conf
+cp nginx/relay.stg.formstr.app    /etc/nginx/sites-enabled/relay.stg.formstr.app
+cp nginx/relay.formstr.app        /etc/nginx/sites-enabled/relay.formstr.app
+nginx -t && nginx -s reload
+```
 
 ## Verify
 
