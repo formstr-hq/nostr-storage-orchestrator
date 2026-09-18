@@ -268,6 +268,9 @@ impl GatewayHandlers {
                     infer_columns(&result.rows, &table),
                     &result.columns,
                 );
+                // Align Execute's output with the statement's named projection
+                // so it can never disagree with Describe.
+                let columns = align_columns_to_projection(sql, columns);
                 let count = result.rows.len();
                 let rows = result
                     .rows
@@ -630,6 +633,33 @@ fn apply_provider_oids(mut columns: Vec<Column>, provider: &[crate::provider::Qu
         }
     }
     columns
+}
+
+/// Narrows Execute's output columns to the statement's named projection, in
+/// projection order. Reads can fetch extra columns the client never asked for:
+/// point reads inject the pk to verify placement (`select "event_kind"` becomes
+/// `select "id", "event_kind"`), and the buffer overlay returns a pending row's
+/// full image. Describe answers from the original projection, so leaking those
+/// extras makes Execute return more fields than RowDescription advertised —
+/// drivers that trust Describe (pg-cursor) then index past `fields` and crash.
+///
+/// `columns` is left untouched for wildcard/unknown shapes (`select *`,
+/// `<table>.*`, expression projections), where `select_projection` returns
+/// None or an empty name list.
+fn align_columns_to_projection(sql: &str, columns: Vec<Column>) -> Vec<Column> {
+    match sqlanalyze::select_projection(sql) {
+        Some(Some(names)) if !names.is_empty() => names
+            .iter()
+            .map(|name| {
+                columns
+                    .iter()
+                    .find(|column| column.name.eq_ignore_ascii_case(name))
+                    .cloned()
+                    .unwrap_or(Column { name: name.clone(), type_oid: Type::TEXT.oid() })
+            })
+            .collect(),
+        _ => columns,
+    }
 }
 
 /// Rewrites JS toISOString output ("2026-09-07T14:19:36.633Z") into the
@@ -1534,7 +1564,8 @@ fn is_ddl_text(sql: &str) -> bool {
 
 #[cfg(test)]
 mod timestamp_tests {
-    use super::normalize_timestamp;
+    use super::{align_columns_to_projection, normalize_timestamp, Column};
+    use pgwire::api::Type;
 
     #[test]
     fn iso_z_to_pg_text() {
@@ -1568,5 +1599,61 @@ mod timestamp_tests {
     fn non_timestamp_untouched() {
         assert_eq!(normalize_timestamp("hello world"), "hello world");
         assert_eq!(normalize_timestamp(""), "");
+    }
+
+    fn column(name: &str) -> Column {
+        Column { name: name.to_string(), type_oid: Type::TEXT.oid() }
+    }
+
+    #[test]
+    fn align_drops_injected_pk_from_point_read() {
+        // Point read injected `id` to verify placement; the client asked only
+        // for event_kind, so Execute must drop it again.
+        let columns = vec![column("id"), column("event_kind")];
+        let aligned = align_columns_to_projection(
+            "select \"event_kind\" from \"events\" where \"id\" = 'x'",
+            columns,
+        );
+        assert_eq!(aligned.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["event_kind"]);
+    }
+
+    #[test]
+    fn align_preserves_projection_order_and_missing_columns() {
+        let columns = vec![column("id"), column("event_content"), column("event_tags")];
+        let aligned = align_columns_to_projection(
+            "select \"event_tags\", \"event_content\" from \"events\" where \"id\" = 'x'",
+            columns,
+        );
+        assert_eq!(
+            aligned.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["event_tags", "event_content"]
+        );
+        // A projected name absent from the returned row still gets a slot so
+        // the arity matches Describe.
+        let aligned = align_columns_to_projection(
+            "select \"event_tags\", \"missing_col\" from \"events\" where \"id\" = 'x'",
+            vec![column("id"), column("event_tags")],
+        );
+        assert_eq!(
+            aligned.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["event_tags", "missing_col"]
+        );
+    }
+
+    #[test]
+    fn align_leaves_wildcard_and_expression_projections_alone() {
+        let columns = vec![column("id"), column("event_kind")];
+        // `select *` -> whole row, untouched.
+        let aligned = align_columns_to_projection("select * from \"events\"", columns.clone());
+        assert_eq!(aligned.len(), 2);
+        // `<table>.*` -> whole table, untouched (returns Some(None)).
+        let aligned = align_columns_to_projection("select \"events\".* from \"events\"", columns.clone());
+        assert_eq!(aligned.len(), 2);
+        // Expression projection with no named columns -> untouched.
+        let aligned = align_columns_to_projection("select count(*) from \"events\"", columns.clone());
+        assert_eq!(aligned.len(), 2);
+        // Unparseable -> untouched.
+        let aligned = align_columns_to_projection("not sql at all", columns);
+        assert_eq!(aligned.len(), 2);
     }
 }
