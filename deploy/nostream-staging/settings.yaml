@@ -1,0 +1,49 @@
+# Relay settings for the staging nostream that fronts mesh-PG.
+#
+# This is the *user overrides* file: it deep-merges over the image's
+# resources/default-settings.yaml. Keep it to overrides only.
+#
+# Mounted read-only by docker-compose.yml, so the running relay can never
+# mutate it; the source of truth is this repository.
+
+info:
+  relay_url: wss://relay.stg.formstr.app
+  name: "Formstr Relay"
+  description: "A public Nostr relay backed by mesh-PG — distributed, resilient, yours."
+  contact: mailto:team@formstr.app
+
+relay:
+  port: 8008
+
+# Defaults enable both; this relay is intentionally public.
+authentication:
+  enabled: false
+authorization:
+  requireAdmission: false
+
+# Trust the reverse proxy so rate limits key on the real client IP.
+#
+# Without this, every connection arrives as the Docker bridge gateway
+# (172.28.0.1) and the default limits.connection bucket (12/sec, 48/min) is
+# shared by the entire internet: onConnection terminates clients right after
+# the NIP-42 AUTH challenge, so publishes silently die with a 1006 close.
+#
+# 172.28.0.1 is deterministic because docker-compose.yml pins the
+# nostream-net subnet to 172.28.0.0/16 — the bridge gateway is always the
+# first host address. Update this if that subnet ever changes.
+network:
+  remoteIpHeader: x-forwarded-for
+  trustedProxies:
+    - "127.0.0.1"
+    - "::ffff:127.0.0.1"
+    - "::1"
+    - "10.10.10.1"
+    - "::ffff:10.10.10.1"
+    - "172.28.0.1"
+    - "::ffff:172.28.0.1"
+
+limits:
+  event:
+    createdAt:
+      maxPositiveDelta: 900
+      maxNegativeDelta: 3600

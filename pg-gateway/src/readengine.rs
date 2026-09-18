@@ -144,11 +144,16 @@ impl ReadEngine {
             return Err(GatewayError::NoProviders);
         }
         let provider_count = providers.len();
+        // Set operations (`(select ...) UNION (select ...)`) must be wrapped in
+        // a derived table before reaching pg-agent, which only accepts a
+        // statement starting with SELECT/WITH. The merge below still keys on
+        // the original SQL.
+        let provider_sql = crate::sqlanalyze::provider_read_sql(sql);
         let mut handles = Vec::with_capacity(provider_count);
         for provider in providers {
             let client = self.provider.clone();
             let url = provider.url.clone();
-            let sql = sql.to_string();
+            let sql = provider_sql.clone();
             handles.push(tokio::spawn(async move {
                 let npub = provider.npub.clone();
                 let provider_started = std::time::Instant::now();
@@ -214,10 +219,11 @@ impl ReadEngine {
         }
         let mut rows: Vec<Value> = merged_index.into_values().collect();
         rows.extend(extra_rows);
-        // Buffer overlay: pending rows shadow provider rows. Skipped for joins —
-        // the overlay keys on the base table's pk and cannot re-check the join
-        // predicate against a pending row (would surface non-matching rows).
-        if !crate::sqlanalyze::has_join(sql) {
+        // Buffer overlay: pending rows shadow provider rows. Skipped for joins
+        // and set operations — the overlay keys on the base table's pk and
+        // cannot re-check a join/UNION predicate against a pending row (would
+        // surface non-matching rows).
+        if !crate::sqlanalyze::has_join(sql) && !crate::sqlanalyze::has_set_operation(sql) {
         if let Ok(table_name) = sql_table_name(sql) {
             for (row_id, pending_row) in self.store.pending_rows(&table_name).await? {
                 let Some(row) = pending_row else { continue };

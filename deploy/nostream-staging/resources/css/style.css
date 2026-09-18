@@ -1,0 +1,243 @@
+:root {
+  --paper: #f4f4f3;
+  --ink: #0b0b0c;
+  --ink-light: #2a2a2a;
+  --emphasis: #e5484d;
+  --gray-300: #d6d3d1;
+  --gray-400: #9ca3af;
+  --gray-500: #6b7280;
+  --border: #0b0b0c14;
+  --card: #ffffff;
+  --radius: 14px;
+  --font-sans: "Inter", "SF Pro Text", system-ui, -apple-system, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0b0b0c;
+    --ink: #f4f4f3;
+    --ink-light: #9ca3af;
+    --border: #ffffff1a;
+    --card: #161617;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 5rem 1.25rem 2rem;
+}
+
+/* ── hero ─────────────────────────────────────────── */
+.hero { text-align: center; margin-bottom: 2.75rem; }
+
+.mark {
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 1.1rem;
+  border-radius: 14px;
+  background: var(--emphasis);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mark svg { width: 26px; height: 26px; }
+
+.hero .kicker {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+  margin-bottom: 0.5rem;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2rem, 5.5vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  color: var(--ink);
+}
+
+.hero h1 .em { color: var(--emphasis); }
+
+.hero .sub {
+  margin: 1rem auto 0;
+  max-width: 30rem;
+  color: var(--gray-500);
+  font-size: 1.05rem;
+}
+
+/* ── relay address ────────────────────────────────── */
+.card {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+  padding: 1.4rem;
+  margin-bottom: 1rem;
+}
+
+.card h5 {
+  margin: 0 0 0.7rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+}
+
+.card p { margin: 0 0 0.9rem; font-size: 0.95rem; line-height: 1.65; }
+.card p:last-child { margin-bottom: 0; }
+.card a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.card a:hover { color: var(--emphasis); }
+
+.relay-box {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--paper);
+}
+
+.relay-box code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.copy-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: none;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.5rem 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.copy-btn:hover { background: var(--ink-light); }
+.copy-btn.copied { background: #16a34a; }
+.copy-btn svg { width: 13px; height: 13px; }
+
+@media (prefers-color-scheme: dark) {
+  .copy-btn { background: var(--paper); color: var(--ink); }
+  .copy-btn:hover { background: var(--gray-400); }
+}
+
+/* ── steps ────────────────────────────────────────── */
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.7rem;
+}
+
+.step {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 0.8rem;
+  text-align: center;
+}
+
+.step .num {
+  width: 24px;
+  height: 24px;
+  margin: 0 auto 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.step .t { font-size: 0.87rem; font-weight: 700; }
+.step .d { font-size: 0.78rem; color: var(--gray-500); margin-top: 0.2rem; }
+
+@media (max-width: 560px) { .steps { grid-template-columns: 1fr; } }
+
+/* ── CTA ──────────────────────────────────────────── */
+.btn-cta {
+  display: inline-block;
+  border: none;
+  border-radius: 10px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 0.92rem;
+  font-weight: 700;
+  padding: 0.7rem 1.3rem;
+  text-decoration: none;
+  transition: background 0.15s ease;
+}
+
+.btn-cta:hover { background: var(--ink-light); }
+
+/* ── status line ──────────────────────────────────── */
+.status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 1.75rem;
+  font-size: 0.8rem;
+  color: var(--gray-500);
+}
+
+.status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #16a34a;
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.15);
+}
+
+/* ── footer ───────────────────────────────────────── */
+footer {
+  text-align: center;
+  padding: 2rem 1rem 2.75rem;
+  font-size: 0.8rem;
+  color: var(--gray-500);
+}
+
+footer a { color: var(--gray-500); text-decoration: none; }
+footer a:hover { color: var(--emphasis); }
+footer .sep { margin: 0 0.6rem; opacity: 0.5; }
+
+.hidden { display: none !important; }
+/* bootstrap-compat helper used by the template's section classes */
+.d-none { display: none !important; }
+/* template section classes (bootstrap-compat): hide when empty-fee */
+.d-none { display: none !important; }
