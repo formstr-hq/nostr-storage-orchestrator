@@ -82,7 +82,6 @@ pub async fn link(
                         "lifecycle": "LINKED",
                         "tunnelIp": null,
                         "blossomPort": null,
-                        "relayPort": null,
                         "lastPingAt": null,
                         "createdAt": Utc::now(),
                     }),
@@ -120,7 +119,6 @@ pub async fn ping(
     let report: PingRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::bad_request("invalid storage ping JSON body"))?;
     let blossom_port = valid_port(report.blossom_port)?;
-    let relay_port = valid_port(report.relay_port)?;
     let total = decimal_u64(&report.reported_total_bytes, "reportedTotalBytes")?;
     let free = decimal_u64(&report.reported_free_bytes, "reportedFreeBytes")?;
     if free > total {
@@ -164,7 +162,6 @@ pub async fn ping(
             serde_json::json!({
                 "tunnelIp": tunnel_ip.to_string(),
                 "blossomPort": blossom_port,
-                "relayPort": relay_port,
                 "reportedTotalBytes": total.to_string(),
                 "reportedFreeBytes": free.to_string(),
                 "lastPingAt": Utc::now(),

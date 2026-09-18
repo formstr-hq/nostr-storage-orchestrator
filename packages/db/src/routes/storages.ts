@@ -46,7 +46,6 @@ storagesRouter.get("/active", async (_req, res) => {
       lastPingAt: { gt: cutoff },
       tunnelIp: { not: null },
       blossomPort: { not: null },
-      relayPort: { not: null },
     },
   });
   res.json(storages.map(storageToJson));
@@ -63,7 +62,6 @@ storagesRouter.get("/active-pg", async (_req, res) => {
       lastPingAt: { gt: cutoff },
       tunnelIp: { not: null },
       blossomPort: { not: null },
-      relayPort: { not: null },
       pgAgentPort: { not: null },
     },
   });
@@ -97,16 +95,12 @@ storagesRouter.post("/backfill-replicas", async (req, res) => {
       addAlias(`http://${storage.tunnelIp}:${storage.blossomPort}`, storage.npub);
       addAlias(`https://${storage.tunnelIp}:${storage.blossomPort}`, storage.npub);
     }
-    if (storage.relayPort !== null) {
-      addAlias(`ws://${storage.tunnelIp}:${storage.relayPort}`, storage.npub);
-      addAlias(`wss://${storage.tunnelIp}:${storage.relayPort}`, storage.npub);
-    }
   }
 
   let changedRows = 0;
   let replacedValues = 0;
   let unmatchedValues = 0;
-  const updates: Array<ReturnType<typeof prisma.blob.update> | ReturnType<typeof prisma.relayEvent.update>> = [];
+  const updates: Array<ReturnType<typeof prisma.blob.update>> = [];
   const rewrite = (replicas: string[]) => replicas.map((replica) => {
     if (!/^https?:\/\//i.test(replica) && !/^wss?:\/\//i.test(replica)) return replica;
     const replacement = aliases.get(normalizeUrl(replica));
@@ -118,22 +112,12 @@ storagesRouter.post("/backfill-replicas", async (req, res) => {
     return replacement;
   });
 
-  const [blobs, relayEvents] = await Promise.all([
-    prisma.blob.findMany({ select: { hash: true, replicas: true } }),
-    prisma.relayEvent.findMany({ select: { eventId: true, replicas: true } }),
-  ]);
+  const blobs = await prisma.blob.findMany({ select: { hash: true, replicas: true } });
   for (const blob of blobs) {
     const replicas = rewrite(blob.replicas);
     if (replicas.some((value, index) => value !== blob.replicas[index])) {
       changedRows += 1;
       if (!dryRun) updates.push(prisma.blob.update({ where: { hash: blob.hash }, data: { replicas } }));
-    }
-  }
-  for (const event of relayEvents) {
-    const replicas = rewrite(event.replicas);
-    if (replicas.some((value, index) => value !== event.replicas[index])) {
-      changedRows += 1;
-      if (!dryRun) updates.push(prisma.relayEvent.update({ where: { eventId: event.eventId }, data: { replicas } }));
     }
   }
   if (updates.length > 0) await prisma.$transaction(updates);
@@ -215,11 +199,10 @@ storagesRouter.patch("/:npub", async (req, res) => {
   }
   try {
     const blossomPort = parseOptionalPort(body.blossomPort);
-    const relayPort = parseOptionalPort(body.relayPort);
     const pgAgentPort = parseOptionalPort(body.pgAgentPort);
     const lastPingAt = parseOptionalDate(body.lastPingAt);
     const createdAt = parseOptionalDate(body.createdAt);
-    if (Number.isNaN(blossomPort) || Number.isNaN(relayPort) || Number.isNaN(pgAgentPort)
+    if (Number.isNaN(blossomPort) || Number.isNaN(pgAgentPort)
       || (body.lastPingAt !== undefined && lastPingAt === undefined)
       || (body.createdAt !== undefined && createdAt === undefined)) {
       return res.status(400).json({ error: "invalid_storage" });
@@ -230,7 +213,6 @@ storagesRouter.patch("/:npub", async (req, res) => {
     const data: Prisma.StorageUpdateInput = {};
     if (body.tunnelIp === null || typeof body.tunnelIp === "string") data.tunnelIp = body.tunnelIp;
     if (blossomPort !== undefined) data.blossomPort = blossomPort;
-    if (relayPort !== undefined) data.relayPort = relayPort;
     if (pgAgentPort !== undefined) data.pgAgentPort = pgAgentPort;
     if (body.declaredCapacityBytes !== undefined) data.declaredCapacityBytes = parseBigInt(body.declaredCapacityBytes) as bigint | null;
     if (body.reportedTotalBytes !== undefined) data.reportedTotalBytes = parseBigInt(body.reportedTotalBytes) as bigint | null;

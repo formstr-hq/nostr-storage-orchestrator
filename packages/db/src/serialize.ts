@@ -1,4 +1,4 @@
-import type { Blob, Member, RelayEvent, Storage, User } from "./prisma.js";
+import type { Blob, Member, Storage, User } from "./prisma.js";
 
 export function userToJson(user: User) {
   return {
@@ -15,16 +15,6 @@ export function blobToJson(blob: Blob) {
     size: blob.size.toString(),
     replicas: blob.replicas,
     createdAt: blob.createdAt.toISOString(),
-  };
-}
-
-export function relayEventToJson(relayEvent: RelayEvent) {
-  return {
-    eventId: relayEvent.eventId,
-    npub: relayEvent.npub,
-    kind: relayEvent.kind,
-    size: relayEvent.size.toString(),
-    replicas: relayEvent.replicas,
   };
 }
 
@@ -46,7 +36,6 @@ export function storageToJson(storage: Storage) {
     ownerNpub: storage.ownerNpub,
     tunnelIp: storage.tunnelIp,
     blossomPort: storage.blossomPort,
-    relayPort: storage.relayPort,
     pgAgentPort: storage.pgAgentPort,
     declaredCapacityBytes: storage.declaredCapacityBytes?.toString() ?? null,
     reportedTotalBytes: storage.reportedTotalBytes?.toString() ?? null,

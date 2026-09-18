@@ -8,11 +8,11 @@ pub struct Capacity {
     pub free: u64,
 }
 
-pub fn measure(paths: [&Path; 2]) -> Result<Capacity, String> {
+pub fn measure(paths: &[&Path]) -> Result<Capacity, String> {
     let mut devices = HashSet::new();
     let mut total = 0_u64;
     let mut free = 0_u64;
-    for path in paths {
+    for &path in paths {
         let device = fs::metadata(path)
             .map_err(|error| format!("could not inspect {}: {error}", path.display()))?
             .dev();
@@ -46,7 +46,7 @@ mod tests {
 
     #[test]
     fn same_filesystem_is_counted_once() {
-        let result = measure([Path::new("/tmp"), Path::new("/tmp")]).unwrap();
+        let result = measure(&[Path::new("/tmp"), Path::new("/tmp")]).unwrap();
         assert!(result.total > 0);
         assert!(result.free <= result.total);
     }

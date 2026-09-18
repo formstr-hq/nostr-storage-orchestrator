@@ -6,7 +6,6 @@ import type {
   MemberRole,
   MemberStatus,
   PlanConfig,
-  RelayEventRecord,
   StorageRecord,
   StorageUpdate,
   UserInfo,
@@ -99,31 +98,6 @@ export class DbClient {
 
   deleteBlob(hash: string): Promise<{ deleted: true; usedStorage: string }> {
     return this.mutate("DELETE", `/blobs/${encodeURIComponent(hash)}`);
-  }
-
-  getRelayEvent(eventId: string): Promise<RelayEventRecord | null> {
-    return this.get<RelayEventRecord>(`/relay-events/${encodeURIComponent(eventId)}`);
-  }
-
-  createRelayEvent(data: {
-    eventId: string;
-    npub: string;
-    kind: number;
-    size: number | string;
-  }): Promise<RelayEventRecord & { usedStorage: string }> {
-    return this.mutate("POST", "/relay-events", data);
-  }
-
-  rollbackRelayEvent(eventId: string): Promise<{ rolledBack: boolean }> {
-    return this.mutate("POST", `/relay-events/${encodeURIComponent(eventId)}/rollback`);
-  }
-
-  setRelayEventReplicas(eventId: string, replicas: string[]): Promise<{ updated: true }> {
-    return this.mutate("PATCH", `/relay-events/${encodeURIComponent(eventId)}`, { replicas });
-  }
-
-  deleteRelayEvent(eventId: string): Promise<{ deleted: true }> {
-    return this.mutate("DELETE", `/relay-events/${encodeURIComponent(eventId)}`);
   }
 
   getMember(npub: string): Promise<MemberRecord | null> {

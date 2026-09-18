@@ -57,8 +57,8 @@ services:
       POSTGRES_PORT: "5432"
     # Bound to the host's loopback only (not 0.0.0.0) — reachable from
     # sibling containers on the bridge network via `db:$DB_API_PORT` as
-    # before, and from the host-networked `blossom`/`relay` services (see
-    # below) via `localhost:$DB_API_PORT`. Never reachable off this machine.
+    # before, and from the host-networked `blossom` service (see below) via
+    # `localhost:$DB_API_PORT`. Never reachable off this machine.
     ports:
       - "127.0.0.1:${DB_API_PORT:-4000}:${DB_API_PORT:-4000}"
     depends_on:
@@ -83,19 +83,6 @@ services:
     # host. DB_API_URL/BLOSSOM_SERVERS come straight from .env with no
     # override needed — host networking means the local-dev and Docker
     # values are identical.
-    network_mode: host
-    env_file:
-      - ./.env
-    depends_on:
-      db:
-        condition: service_healthy
-
-  relay:
-    build:
-      context: .
-      dockerfile: ./proxy/relay/Dockerfile
-    container_name: nso_relay
-    # Host networking (Linux-only), same reasoning as `blossom` above.
     network_mode: host
     env_file:
       - ./.env

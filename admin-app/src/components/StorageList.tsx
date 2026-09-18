@@ -25,7 +25,6 @@ function networkMeta(storage: Storage): string {
   const network = [
     storage.tunnelIp,
     storage.blossomPort === null ? null : `blossom :${storage.blossomPort}`,
-    storage.relayPort === null ? null : `relay :${storage.relayPort}`,
   ].filter(Boolean).join(" / ");
   return `${network}${network ? " / " : ""}last reported ${relativeTime(storage.lastPingAt)}`;
 }

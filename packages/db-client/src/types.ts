@@ -22,14 +22,6 @@ export interface BlobRecord {
   createdAt: string;
 }
 
-export interface RelayEventRecord {
-  eventId: string;
-  npub: string;
-  kind: number;
-  size: string;
-  replicas: string[];
-}
-
 export type MemberRole = "CLIENT" | "ADMIN";
 export type MemberStatus = "ACTIVE" | "REVOKED";
 export type StorageLifecycle = "LINKED" | "REMOVED";
@@ -49,7 +41,6 @@ export interface StorageRecord {
   ownerNpub: string;
   tunnelIp: string | null;
   blossomPort: number | null;
-  relayPort: number | null;
   pgAgentPort: number | null;
   declaredCapacityBytes: string | null;
   reportedTotalBytes: string | null;
@@ -62,7 +53,6 @@ export interface StorageRecord {
 export interface ActiveStorageRecord extends StorageRecord {
   tunnelIp: string;
   blossomPort: number;
-  relayPort: number;
   lifecycle: "LINKED";
   lastPingAt: string;
 }
@@ -74,7 +64,6 @@ export interface ActivePgStorageRecord extends ActiveStorageRecord {
 export interface StorageUpdate {
   tunnelIp?: string | null;
   blossomPort?: number | null;
-  relayPort?: number | null;
   pgAgentPort?: number | null;
   declaredCapacityBytes?: string | number | null;
   reportedTotalBytes?: string | number | null;

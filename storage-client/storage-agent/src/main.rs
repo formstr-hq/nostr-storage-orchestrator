@@ -50,7 +50,7 @@ async fn main() -> Result<(), String> {
         .map_err(|error| format!("could not build HTTP client: {error}"))?;
     loop {
         let result =
-            capacity::measure([config.blossom_path.as_path(), config.relay_path.as_path()])
+            capacity::measure(&[config.blossom_path.as_path()])
                 .and_then(|capacity| {
                     if capacity.free > capacity.total {
                         Err("measured free capacity exceeded total capacity".to_string())
@@ -64,7 +64,6 @@ async fn main() -> Result<(), String> {
                 &config.control_url,
                 &keys,
                 config.blossom_port,
-                config.relay_port,
                 capacity,
             )
             .await

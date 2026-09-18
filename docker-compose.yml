@@ -1,6 +1,6 @@
 # version: "3.9"
 #
-# NVPN mesh production topology — blossom/relay reach storage-client backends
+# NVPN mesh production topology — blossom reaches storage-client backends
 # over a private NVPN mesh confined to the `nvpn` sidecar's network namespace;
 # the host itself never joins the mesh. See docs/NVPN_SIDECAR_PLAN.md and
 # nvpn/README.md. For local dev/smoke-testing without a mesh, use
@@ -91,14 +91,13 @@ services:
     container_name: nso_nvpn
     environment:
       NVPN_ROLE: proxy
-      NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${RELAY_PORT:-8007},${ADMIN_API_PORT:-3002},${PG_GATEWAY_PORT:-55432}"
+      NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${ADMIN_API_PORT:-3002},${PG_GATEWAY_PORT:-55432}"
       # Storage agents reach the control plane over the encrypted mesh.
       NVPN_MESH_INPUT_PORTS: "${ADMIN_API_PORT:-3002}"
     volumes:
       - nvpn_data:/data
     ports:
       - "${BLOSSOM_PORT:-3001}:${BLOSSOM_PORT:-3001}"
-      - "${RELAY_PORT:-8007}:${RELAY_PORT:-8007}"
       # The admin API is reachable off-container only through local nginx.
       - "127.0.0.1:${ADMIN_API_PORT:-3002}:${ADMIN_API_PORT:-3002}"
       # pgwire for mesh-PG clients (nostream, psql). Loopback for ops; the
@@ -177,27 +176,6 @@ services:
       # here. Reach it by service name over the sidecar's bridge attachment
       # instead (the code's default is localhost:$DB_API_PORT, which is only
       # right for local dev and docker-compose.dev.yml).
-      DB_API_URL: http://db:${DB_API_PORT:-4000}
-    depends_on:
-      db:
-        condition: service_healthy
-      nvpn:
-        condition: service_healthy
-        restart: true
-    restart: unless-stopped
-
-  relay:
-    build:
-      context: .
-      dockerfile: ./proxy/relay/Dockerfile
-    container_name: nso_relay
-    # Shares the nvpn sidecar's network namespace, same reasoning as
-    # `blossom` above.
-    network_mode: "service:nvpn"
-    env_file:
-      - ./.env
-    environment:
-      # Same reasoning as `blossom` above.
       DB_API_URL: http://db:${DB_API_PORT:-4000}
     depends_on:
       db:

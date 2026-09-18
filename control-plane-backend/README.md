@@ -46,7 +46,6 @@ The ping body is:
 ```json
 {
   "blossomPort": 3000,
-  "relayPort": 7777,
   "reportedTotalBytes": "1000000000",
   "reportedFreeBytes": "750000000"
 }

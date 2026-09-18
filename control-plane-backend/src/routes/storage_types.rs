@@ -30,7 +30,6 @@ pub struct StorageView {
     owner_npub: String,
     tunnel_ip: Option<String>,
     blossom_port: Option<u16>,
-    relay_port: Option<u16>,
     declared_capacity_bytes: Option<String>,
     reported_total_bytes: Option<String>,
     reported_free_bytes: Option<String>,
@@ -50,7 +49,6 @@ pub struct LinkRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PingRequest {
     pub blossom_port: u64,
-    pub relay_port: u64,
     pub reported_total_bytes: String,
     pub reported_free_bytes: String,
 }
@@ -81,7 +79,6 @@ impl StorageView {
             owner_npub: storage.owner_npub,
             tunnel_ip: storage.tunnel_ip,
             blossom_port: storage.blossom_port,
-            relay_port: storage.relay_port,
             declared_capacity_bytes: storage.declared_capacity_bytes,
             reported_total_bytes: storage.reported_total_bytes,
             reported_free_bytes: storage.reported_free_bytes,

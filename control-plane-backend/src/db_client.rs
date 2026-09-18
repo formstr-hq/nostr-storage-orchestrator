@@ -53,7 +53,6 @@ pub struct StorageDb {
     pub owner_npub: String,
     pub tunnel_ip: Option<String>,
     pub blossom_port: Option<u16>,
-    pub relay_port: Option<u16>,
     pub declared_capacity_bytes: Option<String>,
     pub reported_total_bytes: Option<String>,
     pub reported_free_bytes: Option<String>,
