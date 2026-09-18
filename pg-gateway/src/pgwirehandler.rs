@@ -246,8 +246,15 @@ impl GatewayHandlers {
                 let result = read_outcome;
                 let table = sqlanalyze::read_table_name(sql).unwrap_or_default();
                 // Snapshot the live provider columns so Describe matches
-                // Execute's arity even when the registry goes stale.
-                if !table.is_empty() && !result.columns.is_empty() {
+                // Execute's arity even when the registry goes stale. Only a
+                // whole-table projection (`select *` / `<table>.*`) yields the
+                // full column set — a narrow projection (e.g. nostream's
+                // `select "event_id" from "events"` replaceable check) would
+                // otherwise overwrite the snapshot with a handful of columns
+                // and make the next `select *` Describe advertise too few
+                // fields against Execute's 13 values (driver `parseRow` crash).
+                let whole_table = matches!(sqlanalyze::select_projection(sql), Some(None));
+                if whole_table && !table.is_empty() && !result.columns.is_empty() {
                     self.store.remember_provider_columns(
                         &table,
                         &result
