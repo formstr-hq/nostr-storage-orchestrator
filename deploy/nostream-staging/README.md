@@ -10,6 +10,7 @@ part of any compose project — so a host reboot used to leave the relay down.
 |---|---|
 | `docker-compose.yml` | `nostream` + `nostream-cache`, pinned network |
 | `settings.yaml` | Relay settings overrides, mounted read-only |
+| `resources/` | Landing page (`index.html`, `css/style.css`), mounted read-only |
 | `.env.example` | Secrets / tuning template |
 
 ## Why these exist
@@ -22,6 +23,24 @@ part of any compose project — so a host reboot used to leave the relay down.
    real client IP) previously lived only in the host's
    `.nostr/settings.yaml`. They are now committed and mounted read-only, so the
    running relay cannot drift from the repo.
+
+## Landing page
+
+`resources/` holds the relay's landing page, mounted read-only over the image's
+`/app/resources/index.html` and `/app/resources/css/style.css`.
+
+This exists because the deployed `nostream-mesh:staging` image predates the
+redesign: it was built 2026-09-07 14:00 UTC, while the redesign commits landed
+16:28–16:39 UTC. The redesigned page had been copied into the running
+container's writable layer, so recreating the container reverted the relay to
+the old bootstrap page. Mounting the files from the repo makes the page
+durable across recreation.
+
+To change the page: edit `resources/index.html` / `resources/css/style.css`
+or refresh them from the nostream fork's `landing-redesign` branch, then
+`docker compose up -d` (compose recreates on mount change). The page must stay
+self-contained — no external fonts/scripts — to satisfy the image's CSP.
+
 
 ## Deploy
 

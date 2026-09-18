@@ -47,6 +47,14 @@ services:
       # The rest of NOSTR_CONFIG_DIR stays container-local and node-writable
       # (nostream writes settings backups + an audit log there).
       - ./settings.yaml:/home/node/.nostr/settings.yaml:ro
+      # Landing page, also source-controlled and mounted read-only. The
+      # deployed image predates the redesign (built 2026-09-07 14:00 UTC; the
+      # redesign landed 16:28 UTC), so without this the relay serves the old
+      # bootstrap page. Mounting the two files keeps the page in the repo and
+      # survives container recreation — a previous `docker cp` into the
+      # container's writable layer did not.
+      - ./resources/index.html:/app/resources/index.html:ro
+      - ./resources/css/style.css:/app/resources/css/style.css:ro
     ports:
       # nginx (relay.stg.formstr.app) proxies to 127.0.0.1:8008, so keep the
       # listener on loopback and never expose the relay directly.

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f4f3">
+    <title>{{name}}</title>
+    <link rel="stylesheet" href="{{path_prefix}}/css/style.css">
+  </head>
+  <body lang="en">
+    <main>
+      <div class="hero">
+        <div class="mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 20V6" stroke="#F4F4F3" stroke-width="2.4" stroke-linecap="round"/>
+            <path d="M5 9.5 12 3l7 6.5" stroke="#F4F4F3" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M8 13.5h8" stroke="#F4F4F3" stroke-width="2.4" stroke-linecap="round"/>
+            <circle cx="12" cy="17.5" r="1.6" fill="#F4F4F3"/>
+          </svg>
+        </div>
+        <div class="kicker">A Nostr relay</div>
+        <h1>Notes anchored to <span class="em">your key.</span></h1>
+        <p class="sub">{{description}}</p>
+      </div>
+
+      <div class="card">
+        <h5>Relay address</h5>
+        <p>Point any Nostr client at this address to read and write here.</p>
+        <div class="relay-box">
+          <code id="relay-address">{{relay_url}}</code>
+          <button class="copy-btn" type="button" id="copy-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            Copy
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h5>Get started</h5>
+        <div class="steps">
+          <div class="step">
+            <div class="num">1</div>
+            <div class="t">Pick a client</div>
+            <div class="d">Damus, Amethyst, Snort, Iris…</div>
+          </div>
+          <div class="step">
+            <div class="num">2</div>
+            <div class="t">Add this relay</div>
+            <div class="d">Paste the address above</div>
+          </div>
+          <div class="step">
+            <div class="num">3</div>
+            <div class="t">Post away</div>
+            <div class="d">Your events live here</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card {{payments_section_class}}">
+        <h5>Admission required</h5>
+        <p>
+          This relay requires a one-time admission fee of <strong>{{amount}} sats</strong> to publish events. Reading events is free.
+        </p>
+        <a href="{{path_prefix}}/invoices" class="btn-cta">Pay admission fee</a>
+      </div>
+
+      <div class="card {{no_payments_section_class}}">
+        <h5>Community relay</h5>
+        <p>
+          Free to read, free to write — no fees, no invites. This is a community relay: be respectful, no spam or harassment, and remember your events are public and stored by the mesh.
+        </p>
+      </div>
+
+      <div class="card">
+        <h5>Ground rules</h5>
+        <p>
+          A relay is shared space. Post as yourself, treat others decently, and don't use the relay for spam, malware, or illegal content. Content that breaks these rules or the law may be removed, and the <a href="{{path_prefix}}/terms">Terms</a> and <a href="{{path_prefix}}/privacy">Privacy Policy</a> apply to everyone.
+        </p>
+      </div>
+
+      <div class="status">
+        <span class="dot"></span>
+        Relay is up — be kind, post good stuff
+      </div>
+    </main>
+
+    <footer>
+      <a href="{{path_prefix}}/terms">Terms</a>
+      <span class="sep">·</span>
+      <a href="{{path_prefix}}/privacy">Privacy</a>
+      <span class="sep">·</span>
+      Powered by Form* mesh
+    </footer>
+
+    <script nonce="{{nonce}}">
+      (function () {
+        var btn = document.getElementById('copy-btn');
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+          var address = document.getElementById('relay-address').textContent.trim();
+          var label = btn.lastChild;
+          var done = function () {
+            btn.classList.add('copied');
+            label.textContent = ' Copied';
+            setTimeout(function () {
+              btn.classList.remove('copied');
+              label.textContent = ' Copy';
+            }, 1600);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(address).then(done, function () {});
+          } else {
+            var ta = document.createElement('textarea');
+            ta.value = address;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); done(); } catch (e) {}
+            document.body.removeChild(ta);
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>
