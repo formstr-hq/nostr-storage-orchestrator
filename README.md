@@ -45,8 +45,8 @@ TypeScript/Express service that:
 - validates Nostr auth events from `Authorization: Nostr ...`
 - resolves `npub` from the signed event
 - enforces plan quotas and upload size limits (fetches `PLAN_CONFIG` from `db-api` once and caches it)
-- selects healthy backend blossom servers
-- uploads blob data to `replicaCount` backends
+- selects a single provider deterministically by `fnv1a(npub) % n` over the npub-sorted active roster
+- on upload failure, drops the failed provider and recomputes `fnv1a(npub) % n` over the rest, retrying until one accepts
 - stores blob metadata and user storage usage via `db-api`
 - supports download and delete operations for authenticated owners
 
@@ -550,7 +550,7 @@ pnpm -r run build
 
 ## Notes
 
-- `BLOSSOM_SERVERS` controls which backend blob servers `proxy/blossom` will use.
+- `BLOSSOM_SERVERS` is a dev-only seed: when the DB has active storages, `proxy/blossom` places each blob on one provider by `fnv1a(npub) % n` and never uses the env list; the list is only used when the active roster is empty. Uploads fail over by dropping the failed provider and recomputing `fnv1a(npub) % n` until one accepts.
 - Structured relay storage is served through the mesh-PG data plane (`pg-gateway` + providers' `pg-agent`), not by a relay process in this repo.
 - `db-api` (`packages/db`) is the only service with a Postgres/Prisma dependency; `proxy/blossom` talks to it over HTTP via the dependency-free `packages/db-client`, so its Docker image no longer needs Prisma at all.
 - In local dev (`docker-compose.dev.yml`), `blossom` runs with `network_mode: host`, so `BLOSSOM_SERVERS` in `.env` is reached directly via `localhost` — no `host.docker.internal`/`extra_hosts` needed. In production (`docker-compose.yml`), it instead shares an NVPN sidecar's network namespace and reaches storage-client backends over the mesh — see [Production: NVPN mesh](#production-nvpn-mesh).

@@ -76,45 +76,51 @@ if (process.env.NODE_ENV !== "test") {
   setInterval(() => void serverRegistry.refresh(), POLL_MS).unref();
 }
 
-export async function getServerStatus(url: string) {
-  try {
-    const health = await axios.get(`${url}/health`, { timeout: 3000 });
-    return {
-      url,
-      healthy: health.status === 200,
-      available: Number.MAX_SAFE_INTEGER,
-    };
-  } catch (e) {
-    console.error("Server check failed:", url, e);
-    return {
-      url,
-      healthy: false,
-      available: 0,
-    };
+// Stable, seedless 64-bit hash (FNV-1a), matching pg-gateway's placement
+// choice in src/registry.rs. Used only for even placement spread, so it
+// needs determinism across restarts, not cryptographic strength.
+function fnv1a(input: string): bigint {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(input)) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
   }
+  return hash;
 }
 
-export async function getBestServers(replicaCount: number) {
-  const statuses = await Promise.all(serverRegistry.candidates().map(async (candidate) => ({
-    ...await getServerStatus(candidate.url),
-    id: candidate.id,
-  })));
-
-  return statuses
-    .filter((server) => server.healthy)
-    .sort((a, b) => b.available - a.available)
-    .slice(0, replicaCount);
+function byId(a: ServerCandidate, b: ServerCandidate): number {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-export async function uploadBlob(blob: Buffer, hash: string, authHeader: string, replicaCount: number) {
-  const servers = await getBestServers(replicaCount);
-  console.log("Selected servers for upload:", servers);
-  if (servers.length === 0) {
-    throw new Error("No healthy servers available");
+// Exclusive provider placement: one owner per npub. Deterministically picks
+// by hash(npub) over the npub-sorted candidates, independent of the order the
+// roster happens to be polled in. Mirrors select_owner in pg-gateway.
+export function selectOwner(npub: string, candidates: ServerCandidate[]): ServerCandidate | undefined {
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  const sorted = [...candidates].sort(byId);
+  return sorted[Number(fnv1a(npub) % BigInt(sorted.length))];
+}
+
+// Uploads to the provider selected by hash(npub). On failure the failed
+// provider is dropped and hash(npub) is recomputed over the remaining roster,
+// repeating until one provider accepts the blob.
+export async function uploadBlob(
+  blob: Buffer,
+  hash: string,
+  authHeader: string,
+  npub: string,
+  registry: Pick<ServerRegistry, "candidates"> = serverRegistry,
+) {
+  const remaining = registry.candidates();
+  if (remaining.length === 0) {
+    throw new Error("No storage providers available");
   }
 
-  const successfulReplicas: string[] = [];
-  for (const server of servers) {
+  const tried: string[] = [];
+  while (remaining.length > 0) {
+    const server = selectOwner(npub, remaining)!;
     try {
       await axios.put(`${server.url}/upload`, blob, {
         headers: {
@@ -123,16 +129,18 @@ export async function uploadBlob(blob: Buffer, hash: string, authHeader: string,
           "X-SHA-256": hash,
         },
       });
-      successfulReplicas.push(server.id);
+      if (tried.length > 0) {
+        console.warn(`Upload for ${npub} failed over to ${server.id}; tried ${tried.join(", ")}`);
+      }
+      return { hash, replicas: [server.id] };
     } catch (err) {
       console.error(`Failed upload ${server.url}`, err);
+      tried.push(server.id);
+      remaining.splice(remaining.indexOf(server), 1);
     }
   }
 
-  if (successfulReplicas.length < replicaCount) {
-    throw new Error("Failed to satisfy replica count");
-  }
-  return { hash, replicas: successfulReplicas };
+  throw new Error(`Failed to upload blob to any storage provider (tried: ${tried.join(", ")})`);
 }
 
 export async function downloadBlob(hash: string, replicas: string[]) {

@@ -230,7 +230,7 @@ app.put("/upload", async (req, res) => {
         data,
         hash,
         authHeader!,
-        limits.replicaCount,
+        npub,
       );
       try {
         const created = await db.createBlob({
