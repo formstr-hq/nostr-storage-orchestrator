@@ -54,14 +54,19 @@ const candidates = [
   { id: "npub-bob", url: "http://10.44.0.2:3000" },
 ];
 
-test("selectOwner is deterministic and independent of candidate order", () => {
-  // FNV-1a mod 3: "npub-bob" = 0, "npub-alice" = 2.
-  assert.equal(selectOwner("npub-bob", candidates)?.id, "npub-alice");
-  assert.equal(selectOwner("npub-alice", candidates)?.id, "npub-carol");
-  assert.equal(selectOwner("npub-alice", [...candidates].reverse())?.id, "npub-carol");
+test("selectOwner is deterministic, time-seeded, and independent of candidate order", () => {
+  // Fixed clock: fnv1a("npub:slot") mod 3 over [alice, bob, carol]:
+  // slot 472222 -> alice, bob; slot 472227 -> alice -> carol.
+  const first = 472222 * 3_600_000;
+  const later = 472227 * 3_600_000;
+  assert.equal(selectOwner("npub-alice", candidates, first)?.id, "npub-alice");
+  assert.equal(selectOwner("npub-bob", candidates, first)?.id, "npub-bob");
+  assert.equal(selectOwner("npub-alice", [...candidates].reverse(), first)?.id, "npub-alice");
+  assert.equal(selectOwner("npub-alice", candidates, later)?.id, "npub-carol");
 });
 
-test("uploadBlob stores on the pk-selected provider and fails over by recomputing pk % n", async () => {
+test("uploadBlob stores on the pk+time-selected provider and fails over by recomputing the selection", async () => {
+  const now = 472227 * 3_600_000;
   const put = mock.method(axios, "put", async (url: string) => {
     if (url.startsWith("http://10.44.0.3:3000")) {
       throw new Error("provider down");
@@ -73,9 +78,9 @@ test("uploadBlob stores on the pk-selected provider and fails over by recomputin
   const registry = { candidates: () => [...candidates] };
 
   try {
-    // npub-alice picks npub-carol (10.44.0.3); after dropping it, 3 -> 2
-    // recomputes fnv1a mod 2 = 1 over the remaining sorted pair: npub-bob.
-    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry);
+    // npub-alice picks npub-carol (10.44.0.3) at this slot; after dropping it,
+    // the 3 -> 2 recompute over the sorted pair picks npub-bob (10.44.0.2).
+    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry, now);
     assert.deepEqual(result, { hash: "hash", replicas: ["npub-bob"] });
     assert.deepEqual(put.mock.calls.map((call) => call.arguments[0]), [
       "http://10.44.0.3:3000/upload",
@@ -97,12 +102,12 @@ test("uploadBlob throws when no provider accepts and when the roster is empty", 
 
   try {
     await assert.rejects(
-      uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-bob", { candidates: () => [...candidates] }),
+      uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-bob", { candidates: () => [...candidates] }, 0),
       /Failed to upload blob to any storage provider/,
     );
     assert.equal(put.mock.callCount(), 3);
     await assert.rejects(
-      uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-bob", { candidates: () => [] }),
+      uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-bob", { candidates: () => [] }, 0),
       /No storage providers available/,
     );
   } finally {

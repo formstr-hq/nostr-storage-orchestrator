@@ -14,6 +14,9 @@ const FALLBACK_SERVERS = (process.env.BLOSSOM_SERVERS ?? "")
   .map((url) => url.trim().replace(/\/+$/, ""))
   .filter(Boolean);
 const POLL_MS = positiveNumber(process.env.STORAGE_REGISTRY_POLL_MS, 15_000);
+// How long a pk-seeded placement stays fixed before it rotates. Defaults to
+// one hour; the same bucket is used by every upload within the window.
+const TIME_SLOT_MS = positiveNumber(process.env.BLOSSOM_PLACEMENT_SLOT_MS, 3_600_000);
 const RAW_URL = /^(?:https?|wss?):\/\//i;
 
 function positiveNumber(value: string | undefined, fallback: number): number {
@@ -76,9 +79,8 @@ if (process.env.NODE_ENV !== "test") {
   setInterval(() => void serverRegistry.refresh(), POLL_MS).unref();
 }
 
-// Stable, seedless 64-bit hash (FNV-1a), matching pg-gateway's placement
-// choice in src/registry.rs. Used only for even placement spread, so it
-// needs determinism across restarts, not cryptographic strength.
+// Stable, seedless 64-bit hash (FNV-1a). Placement uses it for even spread;
+// only determinism is needed, not cryptographic strength.
 function fnv1a(input: string): bigint {
   let hash = 0xcbf29ce484222325n;
   for (const byte of new TextEncoder().encode(input)) {
@@ -92,26 +94,33 @@ function byId(a: ServerCandidate, b: ServerCandidate): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-// Exclusive provider placement: one owner per npub. Deterministically picks
-// by hash(npub) over the npub-sorted candidates, independent of the order the
-// roster happens to be polled in. Mirrors select_owner in pg-gateway.
-export function selectOwner(npub: string, candidates: ServerCandidate[]): ServerCandidate | undefined {
+// Time-bucketed, pk-seeded provider placement. Candidates are npub-sorted so
+// the choice never depends on roster poll order, then hash(npub:timeSlot)
+// spreads uploads across providers and rotates which provider a busy pubkey
+// lands on every TIME_SLOT_MS.
+export function selectOwner(
+  npub: string,
+  candidates: ServerCandidate[],
+  now = Date.now(),
+): ServerCandidate | undefined {
   if (candidates.length === 0) {
     return undefined;
   }
   const sorted = [...candidates].sort(byId);
-  return sorted[Number(fnv1a(npub) % BigInt(sorted.length))];
+  const timeSlot = Math.floor(now / TIME_SLOT_MS);
+  return sorted[Number(fnv1a(`${npub}:${timeSlot}`) % BigInt(sorted.length))];
 }
 
-// Uploads to the provider selected by hash(npub). On failure the failed
-// provider is dropped and hash(npub) is recomputed over the remaining roster,
-// repeating until one provider accepts the blob.
+// Uploads to the provider selected by hash(npub:timeSlot). On failure the
+// failed provider is dropped and the selection is recomputed over the
+// remaining roster, repeating until one provider accepts the blob.
 export async function uploadBlob(
   blob: Buffer,
   hash: string,
   authHeader: string,
   npub: string,
   registry: Pick<ServerRegistry, "candidates"> = serverRegistry,
+  now = Date.now(),
 ) {
   const remaining = registry.candidates();
   if (remaining.length === 0) {
@@ -120,7 +129,7 @@ export async function uploadBlob(
 
   const tried: string[] = [];
   while (remaining.length > 0) {
-    const server = selectOwner(npub, remaining)!;
+    const server = selectOwner(npub, remaining, now)!;
     try {
       await axios.put(`${server.url}/upload`, blob, {
         headers: {
