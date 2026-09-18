@@ -1,0 +1,99 @@
+# Staging nostream relay (relay.stg.formstr.app), fronted by mesh-PG.
+#
+# This makes the relay a declared, restart-surviving service instead of a
+# hand-started `docker run`. Before this file existed, `nso_nostream` was not
+# in any compose project, so a host reboot left the relay down.
+#
+# Deploy from a checkout of this repo:
+#   cp .env.example .env && $EDITOR .env          # set secrets
+#   docker compose -f docker-compose.yml up -d
+#
+# The relay image is built separately from the nostream fork (see README.md)
+# and referenced by tag: compose never pulls it.
+
+services:
+  nostream:
+    image: ${NOSTREAM_IMAGE:-nostream-mesh:staging}
+    # The image is built/loaded locally, not on a registry.
+    pull_policy: never
+    container_name: nso_nostream
+    restart: unless-stopped
+    environment:
+      SECRET: ${SECRET:?SECRET is required}
+      RELAY_PORT: "8008"
+      NOSTR_CONFIG_DIR: /home/node/.nostr
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # mesh-PG gateway. The listener is bound to docker0 (172.17.0.1), NOT
+      # to this compose network's gateway (172.28.0.1), so use the docker0
+      # address rather than extra_hosts/host-gateway.
+      DB_HOST: ${DB_HOST:-172.17.0.1}
+      DB_PORT: ${DB_PORT:-55432}
+      DB_USER: ${DB_USER:-orchestrator}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_NAME: ${DB_NAME:-nostr_ts_relay}
+      DB_MIN_POOL_SIZE: ${DB_MIN_POOL_SIZE:-0}
+      DB_MAX_POOL_SIZE: ${DB_MAX_POOL_SIZE:-8}
+      DB_ACQUIRE_CONNECTION_TIMEOUT: ${DB_ACQUIRE_CONNECTION_TIMEOUT:-60000}
+      READ_REPLICA_ENABLED: "false"
+      REDIS_HOST: nostream-cache
+      REDIS_PORT: "6379"
+      REDIS_USER: ${REDIS_USER:-default}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    user: node:node
+    volumes:
+      # Settings overrides are source-controlled in this repo and mounted
+      # read-only, so the running relay cannot drift from the committed file.
+      # nostream deep-merges these over the image's default-settings.yaml.
+      # The rest of NOSTR_CONFIG_DIR stays container-local and node-writable
+      # (nostream writes settings backups + an audit log there).
+      - ./settings.yaml:/home/node/.nostr/settings.yaml:ro
+    ports:
+      # nginx (relay.stg.formstr.app) proxies to 127.0.0.1:8008, so keep the
+      # listener on loopback and never expose the relay directly.
+      - "127.0.0.1:8008:8008"
+    depends_on:
+      nostream-cache:
+        condition: service_healthy
+    healthcheck:
+      # BusyBox wget (node:*-alpine) has no -H/--header support; a bare probe
+      # that expects the NIP-11 document is enough.
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:8008/ >/dev/null || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - nostream-net
+
+  nostream-cache:
+    image: redis:7.0.5-alpine3.16
+    container_name: nso_nostream_cache
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    volumes:
+      - nostream_cache:/data
+    command: sh -c 'redis-server --loglevel warning --requirepass "$$REDIS_PASSWORD"'
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nostream-net
+
+networks:
+  nostream-net:
+    name: nostream-net
+    driver: bridge
+    # Pinned so the bridge gateway is always 172.28.0.1 — settings.yaml's
+    # network.trustedProxies lists it so rate limits key on the real client
+    # IP (X-Forwarded-For) instead of collapsing every client into one bucket.
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  nostream_cache:
