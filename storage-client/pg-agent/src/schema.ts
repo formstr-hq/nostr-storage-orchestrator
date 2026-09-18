@@ -36,12 +36,21 @@ export function buildSchemaRouter(sql: postgres.Sql) {
         if (known.length > 0) continue;
         const ddl = stripServerGenerators(migration.ddl);
         try {
-          await sql.begin(async (tx) => {
-            await tx.unsafe(ddl);
-            await tx`
+          if (runsOutsideTransaction(ddl)) {
+            // CREATE INDEX CONCURRENTLY (and friends) are forbidden inside a
+            // transaction block. Run the DDL standalone, then record it.
+            await sql.unsafe(ddl);
+            await sql`
               INSERT INTO _mesh_pg_migrations (id, version) VALUES (${migration.id}, ${migration.version})
             `;
-          });
+          } else {
+            await sql.begin(async (tx) => {
+              await tx.unsafe(ddl);
+              await tx`
+                INSERT INTO _mesh_pg_migrations (id, version) VALUES (${migration.id}, ${migration.version})
+              `;
+            });
+          }
         } catch (error) {
           // Catch-up replays are not transactionally synchronized with the
           // gateway's direct RAW applies (fallback DDL is both pushed here
@@ -78,6 +87,13 @@ async function currentVersion(sql: postgres.Sql): Promise<number> {
     SELECT value FROM _mesh_pg_meta WHERE key = 'schema_version'
   `;
   return rows.length > 0 ? Number(rows[0].value) : 0;
+}
+
+/// Statements Postgres refuses to run inside an explicit transaction block.
+/// `CREATE INDEX CONCURRENTLY` is the one that shows up in propagated
+/// migrations; `DROP INDEX CONCURRENTLY` and `VACUUM` share the rule.
+function runsOutsideTransaction(ddl: string): boolean {
+  return /\bCONCURRENTLY\b/i.test(ddl) || /^\s*VACUUM\b/i.test(ddl);
 }
 /**
  * Strips server-side generators from propagated DDL. The gateway

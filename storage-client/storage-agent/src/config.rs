@@ -13,9 +13,7 @@ pub struct Config {
     pub control_url: Url,
     pub host_npub: PublicKey,
     pub blossom_path: PathBuf,
-    pub relay_path: PathBuf,
     pub blossom_port: u16,
-    pub relay_port: u16,
     pub health_port: u16,
     pub ping_interval: Duration,
     pub retry_interval: Duration,
@@ -49,11 +47,7 @@ impl Config {
             blossom_path: env::var_os("BLOSSOM_DATA_PATH")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/storage/blossom")),
-            relay_path: env::var_os("RELAY_DATA_PATH")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/storage/strfry")),
             blossom_port: env_u16("BLOSSOM_PORT", 3000)?,
-            relay_port: env_u16("NOSTR_PORT", 7777)?,
             health_port: env_u16("AGENT_HEALTH_PORT", 3010)?,
             ping_interval: Duration::from_secs(env_u64("PING_INTERVAL_SECS", 300)?),
             retry_interval: Duration::from_secs(env_u64("PING_RETRY_SECS", 15)?),

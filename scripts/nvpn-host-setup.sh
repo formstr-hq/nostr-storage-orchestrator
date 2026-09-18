@@ -7,8 +7,7 @@
 #
 # It brings up the proxy stack, prints an invite for you to send, waits for
 # the client's npub, approves it, waits for the mesh to come up, then points
-# BLOSSOM_SERVERS/BACKEND_RELAYS at the peer's tunnel IP and restarts only the
-# proxy services.
+# BLOSSOM_SERVERS at the peer's tunnel IP and restarts only the proxy service.
 #
 # Safe to re-run: an already-initialized sidecar keeps its identity, so
 # existing approvals and invites survive.
@@ -133,35 +132,34 @@ log "mesh established; client tunnel IP is ${peer_ip}"
 
 # ---- step 6: point the proxies at the peer --------------------------------
 
-log "step 6/6: pointing BLOSSOM_SERVERS/BACKEND_RELAYS at ${peer_ip}"
+log "step 6/6: pointing BLOSSOM_SERVERS at ${peer_ip}"
 cp .env .env.bak
 sed -i \
   -e "s|^BLOSSOM_SERVERS=.*|BLOSSOM_SERVERS=http://${peer_ip}:3000|" \
-  -e "s|^BACKEND_RELAYS=.*|BACKEND_RELAYS=ws://${peer_ip}:7777|" \
   .env
 log "updated .env (previous version saved as .env.bak):"
-grep -E '^(BLOSSOM_SERVERS|BACKEND_RELAYS)=' .env >&2
+grep -E '^BLOSSOM_SERVERS=' .env >&2
 
-# Only the application services — recreating the sidecar would tear down the
-# network namespace they share with it.
-docker compose up -d --force-recreate blossom relay
+# Only the application service — recreating the sidecar would tear down the
+# network namespace it shares with it.
+docker compose up -d --force-recreate blossom
 
-for port in "$(grep -E '^BLOSSOM_PORT=' .env | cut -d= -f2)" "$(grep -E '^RELAY_PORT=' .env | cut -d= -f2)"; do
-  [ -n "${port}" ] || continue
+port="$(grep -E '^BLOSSOM_PORT=' .env | cut -d= -f2)"
+if [ -n "${port}" ]; then
   waited=0
   until (exec 3<>"/dev/tcp/localhost/${port}") 2>/dev/null; do
     waited=$((waited + 1))
-    [ "${waited}" -ge 60 ] && { docker compose logs blossom relay; fail "port ${port} never came up"; }
+    [ "${waited}" -ge 60 ] && { docker compose logs blossom; fail "port ${port} never came up"; }
     sleep 1
   done
-done
+fi
 
 # An open TCP port is not the same as a working proxy: changing .env makes
-# Compose recreate `db` alongside blossom/relay, and until db-api is answering
+# Compose recreate `db` alongside blossom, and until db-api is answering
 # again every blossom request 500s. Poll for a real application response (an
 # unauthenticated /storage must be rejected with 401, not fail with 5xx) so
 # this script does not hand back a stack that is still settling.
-log "waiting for the proxies to serve requests"
+log "waiting for the proxy to serve requests"
 waited=0
 until docker compose exec -T blossom node -e '
   fetch("http://localhost:" + process.env.BLOSSOM_PORT + "/storage")
@@ -180,7 +178,6 @@ cat >&2 <<EOF
   Host is live.
 
     blossom proxy   http://localhost:$(grep -E '^BLOSSOM_PORT=' .env | cut -d= -f2)
-    relay proxy     ws://localhost:$(grep -E '^RELAY_PORT=' .env | cut -d= -f2)
     backend peer    ${peer_ip} (over the NVPN tunnel)
 
   Verify the full protocol path end to end:

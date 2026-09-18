@@ -14,7 +14,6 @@ use crate::capacity::Capacity;
 #[serde(rename_all = "camelCase")]
 struct PingBody {
     blossom_port: u16,
-    relay_port: u16,
     reported_total_bytes: String,
     reported_free_bytes: String,
 }
@@ -24,12 +23,10 @@ pub async fn send(
     url: &Url,
     keys: &Keys,
     blossom_port: u16,
-    relay_port: u16,
     capacity: Capacity,
 ) -> Result<(), String> {
     let body = serde_json::to_vec(&PingBody {
         blossom_port,
-        relay_port,
         reported_total_bytes: capacity.total.to_string(),
         reported_free_bytes: capacity.free.to_string(),
     })
@@ -67,7 +64,6 @@ mod tests {
     fn ping_capacities_are_decimal_strings() {
         let value = serde_json::to_value(PingBody {
             blossom_port: 3000,
-            relay_port: 7777,
             reported_total_bytes: 42_u64.to_string(),
             reported_free_bytes: 20_u64.to_string(),
         })

@@ -1,7 +1,7 @@
 import express from "express";
 import { prisma } from "./prisma.js";
 import { PLAN_CONFIG } from "./plan.js";
-import { blobToJson, relayEventToJson, userToJson } from "./serialize.js";
+import { blobToJson, userToJson } from "./serialize.js";
 import { membersRouter } from "./routes/members.js";
 import { storagesRouter } from "./routes/storages.js";
 
@@ -98,101 +98,6 @@ app.delete("/blobs/:hash", async (req, res) => {
       });
     });
     res.json({ deleted: true, usedStorage: user.usedStorage.toString() });
-  } catch (error) {
-    if (prismaErrorCode(error) === "P2025") {
-      return res.status(404).json({ error: "not_found" });
-    }
-    console.error(error);
-    res.status(500).json({ error: "internal_error" });
-  }
-});
-
-app.get("/relay-events/:eventId", async (req, res) => {
-  const relayEvent = await prisma.relayEvent.findUnique({ where: { eventId: req.params.eventId! } });
-  if (!relayEvent) {
-    return res.status(404).json({ error: "not_found" });
-  }
-  res.json(relayEventToJson(relayEvent));
-});
-
-app.post("/relay-events", async (req, res) => {
-  const { eventId, npub, kind, size } = req.body as {
-    eventId: string;
-    npub: string;
-    kind: number;
-    size: string | number;
-  };
-  try {
-    const sizeBig = BigInt(size);
-    const { relayEvent, user } = await prisma.$transaction(async (tx) => {
-      await tx.user.findUniqueOrThrow({ where: { npub } });
-      const relayEvent = await tx.relayEvent.create({
-        data: { eventId, npub, kind, size: sizeBig, replicas: [] },
-      });
-      const user = await tx.user.update({
-        where: { npub },
-        data: { usedStorage: { increment: sizeBig } },
-      });
-      return { relayEvent, user };
-    });
-    res.status(201).json({ ...relayEventToJson(relayEvent), usedStorage: user.usedStorage.toString() });
-  } catch (error) {
-    const code = prismaErrorCode(error);
-    if (code === "P2025") {
-      return res.status(404).json({ error: "user_not_found" });
-    }
-    if (code === "P2002") {
-      return res.status(409).json({ error: "already_exists" });
-    }
-    console.error(error);
-    res.status(500).json({ error: "internal_error" });
-  }
-});
-
-app.post("/relay-events/:eventId/rollback", async (req, res) => {
-  const eventId = req.params.eventId!;
-  try {
-    const existing = await prisma.$transaction(async (tx) => {
-      const existing = await tx.relayEvent.findUnique({ where: { eventId } });
-      if (!existing) {
-        return null;
-      }
-      await tx.relayEvent.delete({ where: { eventId } });
-      await tx.user.update({
-        where: { npub: existing.npub },
-        data: { usedStorage: { decrement: existing.size } },
-      });
-      return existing;
-    });
-    res.json({ rolledBack: existing !== null });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "internal_error" });
-  }
-});
-
-app.patch("/relay-events/:eventId", async (req, res) => {
-  const eventId = req.params.eventId!;
-  const { replicas } = req.body as { replicas: string[] };
-  try {
-    await prisma.relayEvent.update({ where: { eventId }, data: { replicas } });
-    res.json({ updated: true });
-  } catch (error) {
-    if (prismaErrorCode(error) === "P2025") {
-      return res.status(404).json({ error: "not_found" });
-    }
-    console.error(error);
-    res.status(500).json({ error: "internal_error" });
-  }
-});
-
-// NOTE: intentionally does not decrement usedStorage — preserves pre-existing
-// relay kind-5 deletion behavior from before the db-api split.
-app.delete("/relay-events/:eventId", async (req, res) => {
-  const eventId = req.params.eventId!;
-  try {
-    await prisma.relayEvent.delete({ where: { eventId } });
-    res.json({ deleted: true });
   } catch (error) {
     if (prismaErrorCode(error) === "P2025") {
       return res.status(404).json({ error: "not_found" });

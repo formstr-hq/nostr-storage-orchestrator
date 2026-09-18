@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Guided setup for the CLIENT (storage) side of an NVPN mesh, run on the
-# machine that actually holds the blobs and relay data. Its counterpart is
+# machine that actually holds the blobs. Its counterpart is
 # ../scripts/nvpn-host-setup.sh, run by the proxy operator on a different
 # machine — this script pauses where a human has to carry a value between the
 # two.
@@ -149,10 +149,9 @@ cat >&2 <<EOF
 
     this machine's tunnel IP   ${tunnel_ip}
     blossom backend            ${tunnel_ip}:3000  (mesh-only)
-    strfry backend             ${tunnel_ip}:7777  (mesh-only)
 
-  Neither backend is published on this host or reachable from the Docker
-  bridge — the sidecar's firewall rejects both from anywhere but the tunnel
+  The backend is not published on this host or reachable from the Docker
+  bridge — the sidecar's firewall rejects it from anywhere but the tunnel
   and loopback.
 
   The host operator's script picks up this tunnel IP automatically; nothing

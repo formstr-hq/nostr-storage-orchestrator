@@ -119,7 +119,6 @@ export interface Storage {
   ownerNpub: string;
   tunnelIp: string | null;
   blossomPort: number | null;
-  relayPort: number | null;
   declaredCapacityBytes: string | null;
   reportedTotalBytes: string | null;
   reportedFreeBytes: string | null;

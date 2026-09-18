@@ -106,22 +106,19 @@ if [ -z "${client_ip}" ]; then
 fi
 log "mesh established; client tunnel IP is ${client_ip}"
 
-log "step 6/7: pointing the host's proxies at the client's backends over the mesh"
+log "step 6/7: pointing the host's proxy at the client's blossom backend over the mesh"
 export MESH_BLOSSOM_SERVERS="http://${client_ip}:3000"
-export MESH_BACKEND_RELAYS="ws://${client_ip}:7777"
-mesh_compose up -d --force-recreate blossom relay
+mesh_compose up -d --force-recreate blossom
 
-# The proxies bind inside the sidecar's namespace; the sidecar publishes them.
-for port in "${BLOSSOM_PORT:-3001}" "${RELAY_PORT:-8007}"; do
-  waited=0
-  until (exec 3<>"/dev/tcp/localhost/${port}") 2>/dev/null; do
-    waited=$((waited + 1))
-    [ "${waited}" -ge 60 ] && { log "FAIL: port ${port} never came up"; root_compose logs blossom relay; exit 1; }
-    sleep 1
-  done
+# The proxy binds inside the sidecar's namespace; the sidecar publishes it.
+waited=0
+until (exec 3<>"/dev/tcp/localhost/${BLOSSOM_PORT:-3001}") 2>/dev/null; do
+  waited=$((waited + 1))
+  [ "${waited}" -ge 60 ] && { log "FAIL: port ${BLOSSOM_PORT:-3001} never came up"; root_compose logs blossom; exit 1; }
+  sleep 1
 done
-log "proxies listening on :${BLOSSOM_PORT:-3001} and :${RELAY_PORT:-8007}"
+log "proxy listening on :${BLOSSOM_PORT:-3001}"
 
 log "step 7/7: running protocol-level checks across the mesh (packages/smoke-test)"
 pnpm --filter @orchestrator/smoke-test run smoke
-log "mesh e2e passed — every blob and relay operation above crossed the NVPN tunnel"
+log "mesh e2e passed — every blob operation above crossed the NVPN tunnel"

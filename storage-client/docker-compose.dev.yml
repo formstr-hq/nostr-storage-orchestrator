@@ -6,35 +6,6 @@
 # Usage: docker compose -f docker-compose.dev.yml up --build
 # (../scripts/docker-smoke-test.sh and ./scripts/start.sh select this file.)
 services:
-  # See the same service in docker-compose.yml — strfry runs as uid 1000 but
-  # ./data/strfry is created root-owned, so it needs chowning first or strfry
-  # dies with `mdb_env_open: Permission denied`.
-  relay-init:
-    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-    user: "0:0"
-    volumes:
-      - ./data/strfry:/db
-    command: ["chown", "-R", "1000:1000", "/db"]
-
-  relay:
-    # Pinned by digest — upstream publishes only `latest` and retags it; one
-    # such retag switched the runtime user from root to uid 1000.
-    image: ghcr.io/hoytech/strfry:latest@sha256:9dd7646202dc494a351957505ab3accd9045b8626eff99fafc0a0075d7d9b322
-    container_name: strfry
-    restart: unless-stopped
-    depends_on:
-      relay-init:
-        condition: service_completed_successfully
-
-    ports:
-      - "7777:7777"
-
-    volumes:
-      - ./data/strfry:/app/db
-      - ./strfry/strfry.conf:/etc/strfry.conf
-
-    command: ["relay"]
-
   # Mesh-PG data plane (dev topology — ports published on loopback).
   mesh-postgres:
     image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
