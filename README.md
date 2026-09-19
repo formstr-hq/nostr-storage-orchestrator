@@ -44,9 +44,9 @@ TypeScript/Express service that:
 
 - validates Nostr auth events from `Authorization: Nostr ...`
 - resolves `npub` from the signed event
-- enforces plan quotas and upload size limits (fetches `PLAN_CONFIG` from `db-api` once and caches it)
-- selects healthy backend blossom servers
-- uploads blob data to `replicaCount` backends
+- enforces plan quotas, the optional instance-wide `GLOBAL_STORAGE_LIMIT_MB` cap (MB, `-1` = unlimited), and upload size limits
+- selects a single provider deterministically by `fnv1a(npub:timeSlot) % n` over the npub-sorted active roster, rotating the slot (default hourly)
+- on upload failure, drops the failed provider and recomputes the selection over the rest, retrying until one accepts
 - stores blob metadata and user storage usage via `db-api`
 - supports download and delete operations for authenticated owners
 
@@ -98,6 +98,7 @@ All internal-only, no auth. `size`/`usedStorage` are decimal strings. `db-api` o
 | GET       | `/health`                         | compose healthcheck                                               |
 | GET       | `/plans`                          | static `PLAN_CONFIG` data                                         |
 | GET / PUT | `/users/:npub`                    | read / upsert                                                     |
+| GET       | `/blobs/total`                    | summed blob size across all users; used by the proxy's global cap |
 | GET       | `/blobs/:hash`                    | read                                                              |
 | POST      | `/blobs`                          | atomically creates the blob row and increments `usedStorage`      |
 | DELETE    | `/blobs/:hash`                    | atomically deletes and decrements `usedStorage`                   |
@@ -550,7 +551,8 @@ pnpm -r run build
 
 ## Notes
 
-- `BLOSSOM_SERVERS` controls which backend blob servers `proxy/blossom` will use.
+- `BLOSSOM_SERVERS` is a dev-only seed: when the DB has active storages, `proxy/blossom` places each blob on one provider by `fnv1a(npub:timeSlot) % n` and never uses the env list; the list is only used when the active roster is empty. `BLOSSOM_PLACEMENT_SLOT_MS` (default 1 hour) sets how long a placement stays fixed. Uploads fail over by dropping the failed provider and recomputing the selection until one accepts.
+- `GLOBAL_STORAGE_LIMIT_MB` caps total stored bytes across all users, enforced by `proxy/blossom` (the proxy is the only enforcement point; `db-api` just answers an aggregate query). `-1` means unlimited.
 - Structured relay storage is served through the mesh-PG data plane (`pg-gateway` + providers' `pg-agent`), not by a relay process in this repo.
 - `db-api` (`packages/db`) is the only service with a Postgres/Prisma dependency; `proxy/blossom` talks to it over HTTP via the dependency-free `packages/db-client`, so its Docker image no longer needs Prisma at all.
 - In local dev (`docker-compose.dev.yml`), `blossom` runs with `network_mode: host`, so `BLOSSOM_SERVERS` in `.env` is reached directly via `localhost` — no `host.docker.internal`/`extra_hosts` needed. In production (`docker-compose.yml`), it instead shares an NVPN sidecar's network namespace and reaches storage-client backends over the mesh — see [Production: NVPN mesh](#production-nvpn-mesh).
