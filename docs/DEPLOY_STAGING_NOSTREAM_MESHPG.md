@@ -324,23 +324,29 @@ docker exec nso_postgres psql -U orchestrator -d orchestrator \
   - Decide separately whether to enable it at all — search over a small
     community relay may not be worth the schema/index cost.
 
-- **Protect kind 1059 reads (NIP-59 gift wrap / NIP-17 DMs).** Today they are
-  world-readable: `nip42.restrictedReads.enabled` is `false` in the image
-  defaults, and no override sets it. The kinds list already includes `4` and
-  `1059`, so turning the flag on is a `settings.yaml` change with no gateway
-  work — nostream enforces the guard in `subscribe-message-handler`
-  (`streamFilter(isReadAuthorized)`), live broadcasts and COUNT. Exposure is
-  currently zero (no `1059` rows in the mesh yet), so this is cheap to fix
-  before real DM traffic arrives rather than after.
+- **Protect kind 1059 reads (NIP-59 gift wrap / NIP-17 DMs).** DONE — enabled in
+  `deploy/nostream-staging/settings.yaml` (`nip42.restrictedReads.enabled: true`,
+  kinds `4` and `1059`). nostream enforces the guard per-event on REQ streams
+  (`streamFilter(isReadAuthorized)`), live broadcasts and COUNT. Verified live:
+  unauthenticated REQ → `CLOSED auth-required`, recipient (p-tagged) → can read,
+  stranger → cannot.
+  - This required two nostream fixes, both on the fork branch
+    `fix/nip59-timestamps-nip42-lazy-auth` (pushed to `abh3po/nostream`), not
+    config: (a) gift wraps were rejected on publish because NIP-59 randomizes
+    `created_at` up to 48h into the past and `limits.event.createdAt` rejected
+    them — kinds 1059/13 are now exempt; (b) the relay sent a NIP-42 AUTH
+    challenge to every client on connect, prompting unwanted signer popups —
+    it is now sent lazily, immediately before the first `auth-required`
+    response.
   - Enabling it changes client behaviour: REQs that exclusively target
     restricted kinds from unauthenticated clients are closed with
-    `auth-required:`, so clients must do NIP-42 AUTH. Confirm the launch
-    clients handle that before enabling, or DMs go dark for them.
-  - Note the guard is nostream-side only. Direct pgwire access to the gateway
-    (currently loopback + `172.17.0.1:55432`, password-gated) bypasses it, and
-    the events are stored in plaintext on the providers. Read protection here
-    means "clients must AUTH", not encryption-at-rest — worth stating plainly
-    in the announcement so users don't over-trust it.
+    `auth-required:`, so clients must do NIP-42 AUTH. Clients must also
+    **re-send the REQ after AUTH** (standard NIP-42 flow).
+  - Scope: the guard gates *who the relay hands events to*; it is not the
+    encryption. Kind 1059 content is already NIP-44 ciphertext addressed to the
+    recipient, and its pubkey is a per-message ephemeral key, so the relay and
+    other readers cannot recover the plaintext regardless. What remains visible
+    is metadata: the recipient `p` tag and the timestamp.
 
 - **Moderation dashboard.** nostream's built-in admin UI (`admin.enabled`,
   currently `false`) covers settings, metrics and health — it has **no**

@@ -59,3 +59,27 @@ limits:
     createdAt:
       maxPositiveDelta: 900
       maxNegativeDelta: 3600
+
+# NIP-42 read protection for private DMs.
+#
+# Only an authenticated client that authored the event or is p-tagged in it may
+# read these kinds. For kind 1059 (NIP-59 gift wrap) the wrapper pubkey is
+# ephemeral, so authorization reduces to the single `p` tag — i.e. only the
+# recipient (or the sender, who is also p-tagged in the NIP-17 scheme) can read
+# it. Enforced per-event on REQ streams, live broadcasts and COUNT
+# (src/utils/nip42.ts).
+#
+# Consequence: unauthenticated REQs that ask only for these kinds are closed
+# with `auth-required:`, so clients MUST implement NIP-42 AUTH to read DMs.
+#
+# Scope: this gates *who the relay hands the events to*. The payloads
+# themselves are already private — kind 1059 content is a NIP-44 ciphertext
+# addressed to the recipient, and its pubkey is a per-message ephemeral key, so
+# neither the relay nor another reader can recover the plaintext. The read
+# guard is metadata protection on top of that encryption, not the encryption.
+nip42:
+  restrictedReads:
+    enabled: true
+    kinds:
+      - 4 # NIP-04 encrypted direct messages
+      - 1059 # NIP-59 gift wraps (NIP-17 private DMs, Marmot welcomes)
