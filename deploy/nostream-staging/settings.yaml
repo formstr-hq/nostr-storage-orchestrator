@@ -7,10 +7,22 @@
 # mutate it; the source of truth is this repository.
 
 info:
-  relay_url: wss://relay.stg.formstr.app
+  # Canonical public URL. This is not just cosmetic: nostream derives the
+  # relay's signing key (NIP-11 `self`) from HMAC(SECRET, relay_url), and
+  # NIP-42 AUTH domain-matches the client's relay tag against it. Changing it
+  # changes `self`. Safe here because no relay-signed events exist yet
+  # (dvm/nip43/mirroring are disabled).
+  relay_url: wss://relay.formstr.app
   name: "Formstr Relay"
   description: "A public Nostr relay backed by mesh-PG — distributed, resilient, yours."
+  # NIP-11 `pubkey` is the administrative *contact* (not the relay's own key,
+  # which is `self`, derived above). This is the Formstr support/updates npub.
+  pubkey: "073cd836b557a9fdc2a62c27373273da0c556a7008763f7f0e2b7f28ea754fd6"
   contact: mailto:team@formstr.app
+  # Served from the mounted resources/css dir (see docker-compose.yml).
+  icon: https://relay.formstr.app/css/formstr-icon.png
+  banner: https://relay.formstr.app/css/formstr-banner.png
+  terms_of_service: https://relay.formstr.app/terms
 
 relay:
   port: 8008

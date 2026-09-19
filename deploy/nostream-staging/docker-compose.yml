@@ -54,7 +54,9 @@ services:
       # survives container recreation — a previous `docker cp` into the
       # container's writable layer did not.
       - ./resources/index.html:/app/resources/index.html:ro
-      - ./resources/css/style.css:/app/resources/css/style.css:ro
+      # The css dir also carries the NIP-11 brand art (formstr-icon.png,
+      # formstr-banner.png, formstr-wordmark.svg), served at /css/<name>.
+      - ./resources/css:/app/resources/css:ro
     ports:
       # nginx (relay.stg.formstr.app) proxies to 127.0.0.1:8008, so keep the
       # listener on loopback and never expose the relay directly.
