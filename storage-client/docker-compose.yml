@@ -1,7 +1,7 @@
-# NVPN mesh topology for a storage-client backend. blossom/strfry are only
-# reachable over the NVPN mesh (or loopback) — no host-published ports — and
-# no `container_name:` so multiple storage-client stacks can run on one
-# Docker host with distinct Compose project names. See
+# NVPN mesh topology for a storage-client backend. blossom and the mesh-PG
+# stack are only reachable over the NVPN mesh (or loopback) — no
+# host-published ports — and no `container_name:` so multiple storage-client
+# stacks can run on one Docker host with distinct Compose project names. See
 # ../docs/NVPN_SIDECAR_PLAN.md section 4. For local dev/smoke-testing without
 # a mesh, use docker-compose.dev.yml instead.
 #
@@ -14,21 +14,9 @@ services:
       service: nvpn
     environment:
       NVPN_ROLE: client
-      NVPN_MESH_INPUT_PORTS: "3000,7777,3300"
+      NVPN_MESH_INPUT_PORTS: "3000,3300"
     volumes:
       - nvpn_data:/data
-
-  # strfry runs as uid 1000, but RELAY_DATA_PATH is created root-owned — by
-  # Docker on a fresh machine, or by an earlier `sudo docker compose` run —
-  # which makes strfry die with `mdb_env_open: Permission denied`. This
-  # one-shot root container fixes the ownership before the relay starts,
-  # rather than overriding the image's non-root user.
-  relay-init:
-    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-    user: "0:0"
-    volumes:
-      - ${RELAY_DATA_PATH}:/db
-    command: ["chown", "-R", "1000:1000", "/db"]
 
   # Mesh-PG data plane: postgres holds mesh_pg_* tables; pg-agent exposes the
   # /pg/* API the orchestrator's pg-gateway calls over the NVPN mesh. Postgres
@@ -73,26 +61,6 @@ services:
       retries: 10
       start_period: 20s
 
-  relay:
-    # Pinned by digest: upstream publishes only a `latest` tag and retags it,
-    # and one such retag switched the runtime user from root to uid 1000 —
-    # exactly the silent break `latest` invites.
-    image: ghcr.io/hoytech/strfry:latest@sha256:9dd7646202dc494a351957505ab3accd9045b8626eff99fafc0a0075d7d9b322
-    restart: unless-stopped
-    network_mode: "service:nvpn"
-    depends_on:
-      nvpn:
-        condition: service_healthy
-        restart: true
-      relay-init:
-        condition: service_completed_successfully
-
-    volumes:
-      - ${RELAY_DATA_PATH}:/app/db
-      - ./strfry/strfry.conf:/etc/strfry.conf
-
-    command: ["relay"]
-
   blossom:
     build: ./blossom
     restart: unless-stopped
@@ -133,9 +101,7 @@ services:
       CONTROL_PLANE_API_PORT: "${CONTROL_PLANE_API_PORT:-3002}"
       NVPN_TUN_IFACE: "${NVPN_TUN_IFACE:-nvpn0}"
       BLOSSOM_DATA_PATH: /storage/blossom
-      RELAY_DATA_PATH: /storage/strfry
       BLOSSOM_PORT: "${BLOSSOM_PORT:-3000}"
-      NOSTR_PORT: "${NOSTR_PORT:-7777}"
       AGENT_HEALTH_PORT: "${AGENT_HEALTH_PORT:-3010}"
       PING_INTERVAL_SECS: "${PING_INTERVAL_SECS:-300}"
       PING_RETRY_SECS: "${PING_RETRY_SECS:-15}"
@@ -145,7 +111,6 @@ services:
         restart: true
     volumes:
       - ${BLOSSOM_DATA_PATH}:/storage/blossom:ro
-      - ${RELAY_DATA_PATH}:/storage/strfry:ro
       # Identity only: storage-agent never executes nvpn and shares no PID namespace.
       - nvpn_data:/data:ro
     healthcheck:

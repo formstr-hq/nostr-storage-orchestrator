@@ -1,6 +1,6 @@
 # nostr-storage-orchestrator
 
-A pnpm workspace for a Nostr-aware storage orchestrator. It combines a blob proxy, a WebSocket Nostr relay proxy, and backend storage services with PostgreSQL persistence — accessed through an internal, thin DB-as-a-service layer (`db-api`) rather than a shared in-process client.
+A pnpm workspace for a Nostr-aware storage orchestrator. It combines a blob proxy and backend storage services with PostgreSQL persistence — accessed through an internal, thin DB-as-a-service layer (`db-api`) rather than a shared in-process client. Structured relay data is served by the mesh-PG data plane (see [docs/DECENTRALIZED_PG_PLAN.md](docs/DECENTRALIZED_PG_PLAN.md)); the orchestrator itself no longer runs a relay proxy.
 
 ## Architecture
 
@@ -10,14 +10,12 @@ Client
   ▼
 proxy/blossom  ──► db-api (HTTP, internal-only) ──► PostgreSQL
   │
-  ├──► active blossom backends (DB roster, refreshed every 15s)
-  └──► ...
+  └──► active blossom backends (DB roster, refreshed every 15s)
 
-Client
-  │  WebSocket Nostr relay protocol
+Mesh-PG clients (nostream, psql)
+  │  postgres wire protocol
   ▼
-proxy/relay  ──► active backend relays (DB roster, refreshed every 15s)
-  └──► db-api (HTTP, internal-only) ──► PostgreSQL
+pg-gateway ──► providers' pg-agent (HTTP over NVPN mesh)
 
 Storage Control (Android/Linux)
   │  NIP-98 HTTP auth
@@ -32,8 +30,8 @@ control-plane-backend ──► db-api + NVPN CLI/shared sidecar state
 ### `packages/db` (`@orchestrator/db-api`)
 
 - Prisma schema, migrations, and generated client — the only service that touches Postgres directly
-- Express HTTP server exposing CRUD for `User`, `Blob`, `RelayEvent`, `Member`, and `Storage`, plus `GET /plans`
-- No quota checks, no auth — see [`proxy/blossom` API](#proxyblossom-api) / [`proxy/relay`](#proxyrelay-behavior) for where those decisions actually happen
+- Express HTTP server exposing CRUD for `User`, `Blob`, `Member`, and `Storage`, plus `GET /plans`
+- No quota checks, no auth — see [`proxy/blossom` API](#proxyblossom-api) for where those decisions actually happen
 
 ### `packages/db-client` (`@orchestrator/db-client`)
 
@@ -52,46 +50,16 @@ TypeScript/Express service that:
 - stores blob metadata and user storage usage via `db-api`
 - supports download and delete operations for authenticated owners
 
-### `proxy/relay`
+### `pg-gateway` (mesh-PG data plane)
 
-TypeScript/Express + WebSocket Nostr relay proxy that:
-
-- accepts NIP-42-style `AUTH` handshake messages for writes (reads are open without authentication)
-- validates relay auth events against a challenge and normalized `PUBLIC_URL`
-- aggregates `REQ` subscriptions across multiple `BACKEND_RELAYS` and emits exactly one `EOSE` per frontend subscription
-- keeps backend subscriptions active after `EOSE` for live event delivery
-- accepts signed `EVENT` writes and enforces plan upload constraints
-- publishes events to healthy backend relays with required-replica policy
-- records relay events and storage reservations via `db-api`
-- serves NIP-11 relay information at the same HTTP URI as the WebSocket endpoint (`Accept: application/nostr+json`)
-
-Supported NIPs (verified by tests): **NIP-01**, **NIP-11**, **NIP-42**.
-
-#### Multi-backend EOSE aggregation
-
-Each frontend `REQ` opens one backend subscription per configured relay. The proxy tracks each backend independently (`pending`, `eose`, `timed-out`, `failed`, `closed`) and sends a single frontend `["EOSE", subId]` only after every backend reaches an initial terminal state. Healthy backend subscriptions remain open for live events.
-
-#### Publication replication policy
-
-For writes and kind-5 deletions, the proxy selects `replicaCount` healthy backends from the user's plan and requires acceptance from **every** selected backend. `OK true` is sent only when all required replicas accept. Partial success returns `OK false` with an `error:` reason, persists accepted replica URLs when any backend accepted, and rolls back storage reservation only when zero backends accepted.
-
-#### Optional backend service authentication
-
-If a backend relay sends NIP-42 `AUTH`, the proxy can authenticate using `BACKEND_AUTH_SECRET_KEY` (service identity). Without it, backend operations fail fast with `auth-required: backend relay requires authentication`. Service identity cannot satisfy backend ACLs that require the original frontend user's pubkey.
-
-#### Timeout configuration
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `RELAY_INITIAL_EOSE_TIMEOUT_MS` | `5000` | Per-backend initial query timeout before counting as `timed-out` |
-| `RELAY_PUBLISH_ACK_TIMEOUT_MS` | `5000` | Backend `OK` acknowledgement timeout for publishes |
+Rust pgwire server that exposes a regular Postgres API backed by the mesh of storage providers: writes land in a durable buffer and are dispatched over the NVPN mesh, reads fan out to providers' `pg-agent` or route via the placement index. See [`docs/DECENTRALIZED_PG_PLAN.md`](docs/DECENTRALIZED_PG_PLAN.md) and [`docs/provider-onboarding.md`](docs/provider-onboarding.md).
 
 ### `storage-client`
 
 Dockerised backend services used for local testing:
 
 - `blossom` — raw blob server with upload, health, and storage endpoints (routes: `/upload`, `/blob/:hash` for both download and delete, `/health`, `/storage`)
-- `strfry` — deployed via Docker Compose as a backend relay
+- `mesh-postgres` + `pg-agent` — provider side of the mesh-PG data plane (`pg-agent` exposes `/pg/*` on the mesh)
 - `storage-agent` — opt-in (`docker compose --profile agent up -d`) capacity and liveness reporting, signed by the storage machine's nVPN identity
 
 ### `control-plane-backend` and `admin-app`
@@ -102,7 +70,7 @@ Dockerised backend services used for local testing:
 
 ### `packages/smoke-test`
 
-Protocol-level checks driven over real HTTP/WebSocket connections — signs Nostr events with `nostr-tools`, exercises the full `proxy/blossom` REST API and `proxy/relay` WebSocket protocol (AUTH, EVENT, REQ, kind-5 delete) against a live stack. The same 24 checks are driven by both topology harnesses: `scripts/docker-smoke-test.sh` (meshless) and `scripts/nvpn-mesh-e2e.sh` (NVPN mesh, host + client). See [Smoke testing](#smoke-testing) below.
+Protocol-level checks driven over real HTTP connections — signs Nostr events with `nostr-tools` and exercises the full `proxy/blossom` REST API against a live stack. The same checks are driven by both topology harnesses: `scripts/docker-smoke-test.sh` (meshless) and `scripts/nvpn-mesh-e2e.sh` (NVPN mesh, host + client). See [Smoke testing](#smoke-testing) below.
 
 ## Plan rules
 
@@ -116,11 +84,10 @@ Protocol-level checks driven over real HTTP/WebSocket connections — signs Nost
 
 - `User` — `npub` (PK), `plan`, `usedStorage`, `createdAt`
 - `Blob` — `hash` (PK), `npub`, `size`, `replicas`, `createdAt`
-- `RelayEvent` — `eventId` (PK), `npub`, `kind`, `size`, `replicas`, `createdAt`
 - `Member` — donor/operator npub, role, authorization status, and audit metadata
 - `Storage` — storage-machine npub, owner, tunnel address, reported capacity, lifecycle, and last ping
 
-`usedStorage` and `size` are `BigInt` in Postgres; `db-api` serializes them as decimal **strings** over HTTP (JSON can't carry `BigInt`). `packages/db-client` types these fields as `string`; proxies convert with `Number(...)` where needed, same as before.
+`usedStorage` and `size` are `BigInt` in Postgres; `db-api` serializes them as decimal **strings** over HTTP (JSON can't carry `BigInt`). `packages/db-client` types these fields as `string`; the proxy converts with `Number(...)` where needed, same as before.
 
 ## `db-api` endpoints
 
@@ -134,14 +101,10 @@ All internal-only, no auth. `size`/`usedStorage` are decimal strings. `db-api` o
 | GET       | `/blobs/:hash`                    | read                                                              |
 | POST      | `/blobs`                          | atomically creates the blob row and increments `usedStorage`      |
 | DELETE    | `/blobs/:hash`                    | atomically deletes and decrements `usedStorage`                   |
-| GET       | `/relay-events/:eventId`          | read                                                              |
-| POST      | `/relay-events`                   | atomically creates the row and increments `usedStorage`           |
-| POST      | `/relay-events/:eventId/rollback` | idempotent delete + decrement                                     |
-| PATCH     | `/relay-events/:eventId`          | sets `replicas`                                                   |
-| DELETE    | `/relay-events/:eventId`          | plain delete, **no** decrement (matches relay's kind-5 semantics) |
 | GET / PUT / DELETE | `/members`, `/members/:npub` | donor roster CRUD and soft revocation                         |
 | GET / POST / PATCH / DELETE | `/storages`, `/storages/:npub` | storage roster CRUD and liveness inputs              |
-| GET       | `/storages/active`                | fresh linked backends polled by both proxies                     |
+| GET       | `/storages/active`                | fresh linked blossom backends polled by `proxy/blossom`          |
+| GET       | `/storages/active-pg`             | fresh linked mesh-PG providers polled by `pg-gateway`            |
 
 ## Prerequisites
 
@@ -220,7 +183,7 @@ CI, or to confirm a new machine is capable of running this at all:
 This walkthrough is the manual, step-by-step equivalent of the [Quick start](#quick-start-fresh-machines)
 scripts above — use it if you want to see/control each step, or aren't running the NVPN mesh at
 all. **None of it needs `pnpm install`**: every service Dockerfile (`packages/db`,
-`proxy/blossom`, `proxy/relay`) runs its own `pnpm install --frozen-lockfile`, builds, and (for
+`proxy/blossom`) runs its own `pnpm install --frozen-lockfile`, builds, and (for
 `db-api`) `prisma generate` internally, and `db-api`'s image runs `prisma migrate deploy` itself
 on container start via its `CMD`. `pnpm install` on the host is only needed if you want to run a
 service directly with `pnpm --filter ... run dev` instead of Docker, or run
@@ -228,7 +191,7 @@ service directly with `pnpm --filter ... run dev` instead of Docker, or run
 
 ### 1. Create the env file
 
-A single root `.env` configures everything — `db-api`, `proxy/blossom`, `proxy/relay`, and `docker-compose.yml` itself all read from it (see [`.env.example`](.env.example) for the full list with comments):
+A single root `.env` configures everything — `db-api`, `proxy/blossom`, `pg-gateway`, and `docker-compose.yml` itself all read from it (see [`.env.example`](.env.example) for the full list with comments):
 
 ```bash
 cp .env.example .env
@@ -240,11 +203,9 @@ The defaults in `.env.example` already work for local (non-Docker) dev out of th
 DB_API_PORT=4000
 BLOSSOM_PORT=3001
 BLOSSOM_SERVERS=http://localhost:3000
-RELAY_PORT=8007
-BACKEND_RELAYS=ws://localhost:7777
 ```
 
-> `BLOSSOM_SERVERS`/`BACKEND_RELAYS` must each list one or more backend URLs separated by commas.
+> `BLOSSOM_SERVERS` must list one or more backend URLs separated by commas.
 
 ### 2. Start storage backends
 
@@ -255,25 +216,23 @@ cd storage-client
 ./scripts/start.sh
 ```
 
-This brings up the local `blossom` backend and the backend relay service. A `relay-init`
-one-shot service runs first and fixes `data/strfry`'s ownership for you — strfry runs as uid
-1000 while that bind-mounted directory is created root-owned, and without the fix strfry
-crash-loops on `mdb_env_open: Permission denied`.
+This brings up the local `blossom` backend (plus the provider-side `mesh-postgres` + `pg-agent`
+of the mesh-PG data plane).
 
 ### 3. Run everything else with Docker (local dev — meshless)
 
-`docker-compose.dev.yml` runs PostgreSQL, `db-api`, `proxy/blossom`, and `proxy/relay` together for
+`docker-compose.dev.yml` runs PostgreSQL, `db-api`, and `proxy/blossom` together for
 local development, reading the same `.env` from step 1 — `db-api`'s image installs its own
 dependencies, runs `prisma generate`, builds, and (on container start) runs `prisma migrate
 deploy` itself, so there's nothing to prepare on the host first. `db-api` binds only to the host's
-loopback (`127.0.0.1:4000`) — never reachable off-box. `proxy/blossom` and `proxy/relay` both run
-with `network_mode: host` (Linux only) rather than the bridge network, so their local-dev and
-Docker config are identical and `BLOSSOM_SERVERS`/`BACKEND_RELAYS` default straight to `localhost`.
+loopback (`127.0.0.1:4000`) — never reachable off-box. `proxy/blossom` runs
+with `network_mode: host` (Linux only) rather than the bridge network, so its local-dev and
+Docker config are identical and `BLOSSOM_SERVERS` defaults straight to `localhost`.
 It only overrides `DATABASE_URL` on the `db` service (pointed at the compose-managed `postgres`
 using the `POSTGRES_*` credentials from `.env`); everything else is injected straight from `.env`
 via `env_file:`.
 
-Production instead uses the plain `docker-compose.yml`, which puts `blossom`/`relay` behind an
+Production instead uses the plain `docker-compose.yml`, which puts `blossom` behind an
 NVPN mesh sidecar instead of host networking — see [Production: NVPN mesh](#production-nvpn-mesh)
 below.
 
@@ -287,7 +246,6 @@ docker compose -f docker-compose.dev.yml up --build
 2. Confirm services are running:
 
 - `proxy/blossom` on `http://localhost:3001` (bound directly on the host via `network_mode: host`)
-- `proxy/relay` on `ws://localhost:8007`
 - `db-api` on `http://127.0.0.1:4000` — loopback only, not reachable from outside the host
 - PostgreSQL is reachable only from other containers on the compose network (`postgres:5432`) — uncomment the `ports:` mapping on the `postgres` service in `docker-compose.dev.yml` if you need direct access (e.g. for `prisma studio`)
 
@@ -301,11 +259,11 @@ cd storage-client
 ./scripts/start.sh
 ```
 
-Then use the main orchestrator Docker stack for `blossom`, `relay`, and `db`.
+Then use the main orchestrator Docker stack for `blossom` and `db`.
 
 ## Local (non-Docker) dev
 
-Only needed if you're running `db-api`/`proxy/blossom`/`proxy/relay` directly with `pnpm --filter
+Only needed if you're running `db-api`/`proxy/blossom` directly with `pnpm --filter
 ... run dev` instead of Docker (see [Workspace commands](#workspace-commands) for those), or want
 `prisma studio`/`migrate dev` against your local database. None of this is required for the
 Docker paths above — see the note at the top of [Setup](#setup).
@@ -319,9 +277,9 @@ pnpm --filter @orchestrator/db-api run migrate:deploy   # or migrate:dev while i
 ## Production: NVPN mesh
 
 Production replaces host networking with a Docker sidecar running [NVPN](https://github.com/mmalmi/nostr-vpn)
-(`nostr-vpn` v4.0.87) — `proxy/blossom`/`proxy/relay` share the sidecar's network namespace
-(`network_mode: "service:nvpn"`) and reach storage-client backends over a private mesh confined to
-that namespace. **The host itself never joins the mesh.** Full design, firewall rules, and
+(`nostr-vpn` v4.0.87) — `proxy/blossom`, `control-plane-backend`, and `pg-gateway` share the
+sidecar's network namespace (`network_mode: "service:nvpn"`) and reach storage-client backends
+over a private mesh confined to that namespace. **The host itself never joins the mesh.** Full design, firewall rules, and
 verification gates: [`docs/NVPN_SIDECAR_PLAN.md`](docs/NVPN_SIDECAR_PLAN.md); sidecar contract and
 recovery steps: [`nvpn/README.md`](nvpn/README.md).
 
@@ -333,7 +291,7 @@ recovering, or debugging a stuck join).
 
 To check the whole flow works on a machine before doing it for real, run
 `./scripts/nvpn-mesh-e2e.sh` — it drives every step below against a throwaway client on a single
-host and asserts that blob and relay traffic actually crosses the tunnel.
+host and asserts that blob traffic actually crosses the tunnel.
 
 ### Proxy (this repo, root)
 
@@ -378,7 +336,7 @@ bootstrap also adds the inviting proxy to this client's own roster: `import-invi
 `devices = []`, and the mesh daemon refuses to start with no participants configured.
 
 The client stack goes healthy while still waiting for approval — that is deliberate, so a
-pending client is distinguishable from a broken one. Its `blossom`/`strfry` backends are
+pending client is distinguishable from a broken one. Its `blossom` backend and `pg-agent` are
 reachable only over the mesh tunnel or loopback; the sidecar's firewall explicitly rejects them
 from the Docker bridge, so nothing is exposed to the host or to sibling containers.
 
@@ -390,7 +348,7 @@ from the Docker bridge, so nothing is exposed to the host or to sibling containe
 
 `nvpn-approve.sh` adds the device to the signed roster and then issues `nvpn reload`, which the
 running daemon picks up in place — so approving a client never requires recreating the `nvpn`
-sidecar, and therefore never tears down the network namespace `blossom`/`relay` share with it.
+sidecar, and therefore never tears down the network namespace `blossom` shares with it.
 
 Once the roster syncs, look up the approved peer's mesh tunnel IP and point the proxy at it:
 
@@ -405,14 +363,13 @@ Wait until the peer shows `reachable=true` before pointing anything at it.
 ```bash
 # .env
 BLOSSOM_SERVERS=http://10.44.x.y:3000
-BACKEND_RELAYS=ws://10.44.x.y:7777
 ```
 
-Restart or recreate only the proxy application services after changing those values — do not
+Restart or recreate only the proxy application service after changing that value — do not
 recreate the `nvpn` sidecar unnecessarily:
 
 ```bash
-docker compose up -d --force-recreate blossom relay
+docker compose up -d --force-recreate blossom
 ```
 
 ### Delegated admins
@@ -487,11 +444,11 @@ with `https://storage.formstr.app` prefilled and can retain multiple host profil
 
 ### Recovery
 
-If a Compose-controlled sidecar update leaves `blossom`/`relay` stuck waiting on the sidecar's
+If a Compose-controlled sidecar update leaves `blossom` stuck waiting on the sidecar's
 namespace, force-recreate the sidecar and its dependents together:
 
 ```bash
-docker compose up -d --force-recreate nvpn blossom relay
+docker compose up -d --force-recreate nvpn blossom admin pg-gateway
 ```
 
 See [`nvpn/README.md`](nvpn/README.md#recovery) for what to do if the sidecar refuses to start
@@ -528,41 +485,25 @@ All endpoints expect `Authorization: Nostr <base64-encoded-signed-nostr-event>`.
 
 The proxy expects a base64-encoded JSON event object signed with Nostr keys. The service verifies the event signature and derives `npub` from the event pubkey.
 
-## `proxy/relay` behavior
-
-- Listens for WebSocket clients at `ws://localhost:8007` by default.
-- Sends an initial `AUTH` challenge to clients.
-- Accepts `AUTH`, `EVENT`, `REQ`, and `CLOSE` messages.
-- Validates event signatures and publishes approved writes to backend relays.
-- Unauthenticated reads are allowed; writes require NIP-42 authentication.
-- Serves NIP-11 metadata on the same URI when `Accept: application/nostr+json` is set.
-- Aggregates `EOSE` across multiple `BACKEND_RELAYS` and continues live forwarding after `EOSE`.
-
-Run relay unit/integration tests (fake local backends, no Docker required):
-
-```bash
-pnpm --filter @orchestrator/relay test
-```
-
 ## Smoke testing
 
 `scripts/docker-smoke-test.sh` brings up the full stack in Docker via the meshless
-`docker-compose.dev.yml` files (starting `storage-client`'s backends first if they aren't already
-running — no NVPN sidecar or invite/approval flow involved) and drives the real HTTP/WebSocket
+`docker-compose.dev.yml` files (starting `storage-client`'s blossom backend first if it isn't
+already running — no NVPN sidecar or invite/approval flow involved) and drives the real HTTP
 protocols end to end via `packages/smoke-test`:
 
 ```bash
 ./scripts/docker-smoke-test.sh
 ```
 
-It creates a missing `.env` from `.env.example`, waits for `postgres`/`db`/`blossom`/`relay` to become reachable, then checks: blossom auth rejection, storage accounting, upload/download/delete round-trips; and relay's NIP-42 AUTH handshake, unauthenticated-write rejection, event publish, `REQ`/`EOSE`, and kind-5 deletion. By default it tears the root dev stack down afterward (`storage-client`'s backends are left running for reuse); set `KEEP_UP=1` to leave the root stack up too for manual poking.
+It creates a missing `.env` from `.env.example`, waits for `postgres`/`db`/`blossom` to become reachable, then checks blossom auth rejection, storage accounting, and upload/download/delete round-trips. By default it tears the root dev stack down afterward (`storage-client`'s blossom backend is left running for reuse); set `KEEP_UP=1` to leave the root stack up too for manual poking.
 
 ### Mesh end-to-end test
 
 `scripts/docker-smoke-test.sh` covers only the meshless topology. `scripts/nvpn-mesh-e2e.sh`
 covers the other one — it brings up the root proxy stack as a mesh **host**, joins a
 `storage-client` as a **client** through the real `create-invite` → `bootstrap-client` →
-`add-device` flow, waits for the two sidecars to peer, points the proxies at the client's
+`add-device` flow, waits for the two sidecars to peer, points the proxy at the client's
 `10.44.x.y` tunnel IP, and then runs the same `packages/smoke-test` checks across the tunnel:
 
 ```bash
@@ -577,12 +518,8 @@ approval, so it is injected via the `compose.mesh-e2e.yml` overlay rather than w
 ## Pinned images
 
 Every external image is pinned by digest — base images in each `Dockerfile`, plus `postgres` and
-`ghcr.io/hoytech/strfry` in the compose files. This is not just hygiene: upstream publishes
-`strfry` only as a mutable `latest` tag, and one retag of it silently changed the container's
-runtime user from root to uid 1000, which broke the relay with `mdb_env_open: Permission denied`
-against the root-owned `storage-client/data/strfry` bind mount. A `relay-init` one-shot service
-now fixes that directory's ownership before `relay` starts, so a fresh checkout works without
-manual `chown`.
+`alpine` in the compose files — so rebuilds are reproducible and an upstream retag cannot silently
+change the runtime.
 
 To move a pin deliberately, resolve the new digest and edit the reference:
 
@@ -596,11 +533,9 @@ docker inspect postgres:16-alpine --format '{{index .RepoDigests 0}}'
 ```bash
 pnpm --filter @orchestrator/db-api run dev
 pnpm --filter @orchestrator/blossom run dev
-pnpm --filter @orchestrator/relay run dev
-pnpm --filter @orchestrator/relay test
 pnpm --filter @orchestrator/db-api run studio
 pnpm --filter @orchestrator/db-api run migrate:deploy
-pnpm --filter @orchestrator/smoke-test run smoke   # requires BLOSSOM_URL/RELAY_URL already up
+pnpm --filter @orchestrator/smoke-test run smoke   # requires BLOSSOM_URL already up
 
 # Guided mesh setup — two roles, two machines
 ./scripts/nvpn-host-setup.sh                       # on the host (proxy) machine
@@ -615,9 +550,8 @@ pnpm -r run build
 
 ## Notes
 
-- `proxy/relay` is now implemented and actively proxies Nostr relay traffic.
 - `BLOSSOM_SERVERS` controls which backend blob servers `proxy/blossom` will use.
-- `BACKEND_RELAYS` controls which downstream relays `proxy/relay` forwards events to.
-- `db-api` (`packages/db`) is the only service with a Postgres/Prisma dependency; both proxies talk to it over HTTP via the dependency-free `packages/db-client`, so their Docker images no longer need Prisma at all.
-- In local dev (`docker-compose.dev.yml`), `blossom` and `relay` both run with `network_mode: host`, so `BLOSSOM_SERVERS`/`BACKEND_RELAYS` in `.env` are reached directly via `localhost` — no `host.docker.internal`/`extra_hosts` needed. In production (`docker-compose.yml`), they instead share an NVPN sidecar's network namespace and reach storage-client backends over the mesh — see [Production: NVPN mesh](#production-nvpn-mesh).
-- A single root `.env` configures everything: `db-api`, `proxy/blossom`, `proxy/relay` (each resolves it via an explicit `dotenv` path pointing at the repo root, regardless of which package's script you run it from), and `docker-compose.yml` itself. `PORT` reads are namespaced per service (`DB_API_PORT`, `BLOSSOM_PORT`, `RELAY_PORT`) so all three can share the one file without colliding.
+- Structured relay storage is served through the mesh-PG data plane (`pg-gateway` + providers' `pg-agent`), not by a relay process in this repo.
+- `db-api` (`packages/db`) is the only service with a Postgres/Prisma dependency; `proxy/blossom` talks to it over HTTP via the dependency-free `packages/db-client`, so its Docker image no longer needs Prisma at all.
+- In local dev (`docker-compose.dev.yml`), `blossom` runs with `network_mode: host`, so `BLOSSOM_SERVERS` in `.env` is reached directly via `localhost` — no `host.docker.internal`/`extra_hosts` needed. In production (`docker-compose.yml`), it instead shares an NVPN sidecar's network namespace and reaches storage-client backends over the mesh — see [Production: NVPN mesh](#production-nvpn-mesh).
+- A single root `.env` configures everything: `db-api`, `proxy/blossom`, `pg-gateway` (each resolves it via an explicit `dotenv` path pointing at the repo root, regardless of which package's script you run it from), and `docker-compose.yml` itself. `PORT` reads are namespaced per service (`DB_API_PORT`, `BLOSSOM_PORT`, `PG_GATEWAY_PORT`) so all can share the one file without colliding.

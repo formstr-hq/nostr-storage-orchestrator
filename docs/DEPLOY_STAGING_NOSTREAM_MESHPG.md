@@ -30,8 +30,8 @@ Two hard rules while executing:
   real deployment — they wipe the `nvpn_data` volumes (mesh identity +
   invites).
 - Recreating the `nvpn` sidecar (steps 1 and 3) requires recreating every
-  container that shares its network namespace (`blossom relay admin` on the
-  orchestrator; `blossom relay mesh-postgres pg-agent` on the provider) —
+  container that shares its network namespace (`blossom admin pg-gateway` on
+  the orchestrator; `blossom mesh-postgres pg-agent` on the provider) —
   `docker restart` of those fails once the old sidecar is gone. Mesh
   identity survives in the `nvpn_data` volume; outage is brief.
 
@@ -71,15 +71,16 @@ docker compose up -d db
 sleep 10
 docker exec nso_db wget -qO- http://db:4739/storages/active-pg   # expect [] (200)
 docker exec nso_postgres psql -U orchestrator -d orchestrator -c '\dt'
-# expect: Blob, RelayEvent, User, Member, Storage, PgTable, PgMigration,
+# expect: Blob, User, Member, Storage, PgTable, PgMigration,
 #         PgMigrationState, PgWriteOp, PgPlacement
+# (RelayEvent was dropped once the strfry relay path was removed.)
 
 # IMPORTANT: recreating the nvpn sidecar destroys its network namespace,
-# and blossom/relay/admin live inside that namespace (network_mode:
+# and blossom/admin/pg-gateway live inside that namespace (network_mode:
 # "service:nvpn"). They must be recreated together with it — `docker restart`
 # of a namespace-sharing container fails with "No such container" against
 # the replaced sidecar.
-docker compose up -d --force-recreate nvpn blossom relay admin pg-gateway
+docker compose up -d --force-recreate nvpn blossom admin pg-gateway
 swapoff /swapfile && rm /swapfile   # build done; reclaim disk
 ```
 
@@ -127,7 +128,7 @@ cd storage-client
 # nvpn is recreated (NVPN_MESH_INPUT_PORTS gains 3300) — recreate its
 # namespace-mates together with it (docker restart will NOT work, see the
 # hard rule above):
-docker compose up -d --force-recreate nvpn blossom relay mesh-postgres pg-agent
+docker compose up -d --force-recreate nvpn blossom mesh-postgres pg-agent
 docker compose ps   # all healthy
 ```
 
@@ -286,7 +287,7 @@ docker exec nso_postgres psql -U orchestrator -d orchestrator \
 - **db-api migration**: additive; `git checkout main` + rebuild is safe (the
   pg_* tables remain, harmlessly).
 - **provider**: `git checkout main` in both checkouts + `docker compose up -d`
-  (mesh-postgres/pg-agent disappear; blossom/strfry unaffected; mesh data
+  (mesh-postgres/pg-agent disappear; blossom unaffected; mesh data
   persists under the provider's `MESH_PG_DATA_PATH`).
 
 ## Risks & notes
@@ -300,8 +301,7 @@ docker exec nso_postgres psql -U orchestrator -d orchestrator \
 - `docker stats` during the first REQ burst: small orchestrator hosts
   may be RAM-constrained (the reference staging box has ~3.8 GB total).
 - Follow-ups: storage-agent ping + control plane should carry `pgAgentPort`
-  (removes the manual PATCH); decide nostream's public exposure (:8008) and
-  whether `proxy/relay` should include it as a backend.
+  (removes the manual PATCH); decide nostream's public exposure (:8008).
 
 ## Deferred work (post community-release evaluation)
 

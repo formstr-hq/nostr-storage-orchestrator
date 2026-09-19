@@ -8,7 +8,6 @@ export type {
   Plan,
   PlanConfig,
   PlanLimits,
-  RelayEventRecord,
   StorageLifecycle,
   StorageRecord,
   StorageUpdate,
