@@ -324,6 +324,35 @@ docker exec nso_postgres psql -U orchestrator -d orchestrator \
   - Decide separately whether to enable it at all — search over a small
     community relay may not be worth the schema/index cost.
 
+- **Protect kind 1059 reads (NIP-59 gift wrap / NIP-17 DMs).** Today they are
+  world-readable: `nip42.restrictedReads.enabled` is `false` in the image
+  defaults, and no override sets it. The kinds list already includes `4` and
+  `1059`, so turning the flag on is a `settings.yaml` change with no gateway
+  work — nostream enforces the guard in `subscribe-message-handler`
+  (`streamFilter(isReadAuthorized)`), live broadcasts and COUNT. Exposure is
+  currently zero (no `1059` rows in the mesh yet), so this is cheap to fix
+  before real DM traffic arrives rather than after.
+  - Enabling it changes client behaviour: REQs that exclusively target
+    restricted kinds from unauthenticated clients are closed with
+    `auth-required:`, so clients must do NIP-42 AUTH. Confirm the launch
+    clients handle that before enabling, or DMs go dark for them.
+  - Note the guard is nostream-side only. Direct pgwire access to the gateway
+    (currently loopback + `172.17.0.1:55432`, password-gated) bypasses it, and
+    the events are stored in plaintext on the providers. Read protection here
+    means "clients must AUTH", not encryption-at-rest — worth stating plainly
+    in the announcement so users don't over-trust it.
+
+- **Moderation dashboard.** nostream's built-in admin UI (`admin.enabled`,
+  currently `false`) covers settings, metrics and health — it has **no**
+  moderation surface. The `admin-app` in this repo is the storage control
+  plane (roster/storage), not relay moderation, so this is greenfield.
+  Minimum useful set: mute/ban pubkeys (writes to
+  `limits.event.pubkey.blacklist`), delete/hide events, and a review queue for
+  kind `1984` reports (nostream stores them as ordinary events — no report
+  handling exists). Protocol primitives already exist for deletion (kind 5,
+  `is_vanished`, request-to-vanish) but there is no operator UI over them, and
+  a static `settings.yaml` list is the only current way to block an author.
+
 ## Rehearsed (what was tested before this guide)
 
 Through a live gateway + 2-provider topology (raw pgwire, the real code
