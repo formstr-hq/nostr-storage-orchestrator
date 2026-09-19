@@ -303,6 +303,27 @@ docker exec nso_postgres psql -U orchestrator -d orchestrator \
   (removes the manual PATCH); decide nostream's public exposure (:8008) and
   whether `proxy/relay` should include it as a backend.
 
+## Deferred work (post community-release evaluation)
+
+- **NIP-50 (search)** — scope and implement. Scoped after the community
+  release is evaluated, not before.
+  - Today nostream advertises `50` in NIP-11 `supported_nips` while the same
+    document reports `limitation.search_supported: false`, because
+    `nip50.enabled` is `false`. The contradiction is in nostream:
+    `supported_nips` is read straight from the image's `package.json` and is
+    only filtered for NIP-43 (when `nip43.enabled` is false); it is not
+    derived from other feature flags, and is not settable from `settings.yaml`.
+  - Implementing search means: (a) make `supported_nips` derive from enabled
+    flags (same pattern as 43) so the doc is honest either way; (b) a
+    `tsvector` column + GIN index on `events`, propagated to providers as a
+    schema change; (c) confirm the pg-gateway's SQL subset passes
+    `to_tsvector`/`plainto_tsquery` and the `ts_rank` ORDER BY through to
+    providers (the README's `search_supported` flag and the aggregate planner
+    are the likely blockers); (d) nostream's `event-repository.ts` already has
+    the NIP-50 query path (`isSearchQuery`) ready to drive it.
+  - Decide separately whether to enable it at all — search over a small
+    community relay may not be worth the schema/index cost.
+
 ## Rehearsed (what was tested before this guide)
 
 Through a live gateway + 2-provider topology (raw pgwire, the real code
