@@ -219,20 +219,21 @@ impl ReadEngine {
         }
         let mut rows: Vec<Value> = merged_index.into_values().collect();
         rows.extend(extra_rows);
-        // Buffer overlay: pending rows shadow provider rows. Skipped for joins
-        // and set operations — the overlay keys on the base table's pk and
-        // cannot re-check a join/UNION predicate against a pending row (would
-        // surface non-matching rows).
-        if !crate::sqlanalyze::has_join(sql) && !crate::sqlanalyze::has_set_operation(sql) {
-        if let Ok(table_name) = sql_table_name(sql) {
-            for (row_id, pending_row) in self.store.pending_rows(&table_name).await? {
-                let Some(row) = pending_row else { continue };
-                rows.retain(|existing| {
-                    existing.get(pk_column).and_then(value_as_string).as_deref() != Some(row_id.as_str())
-                });
-                rows.push(row);
+        // Read-your-writes overlay: pending (unflushed) rows shadow provider
+        // rows. It can only be applied when the query has no predicate — the
+        // overlay injects a whole row and cannot re-evaluate a WHERE, so on a
+        // filtered read it would surface non-matching rows. Skipping it is also
+        // the fast path: it avoids a central-DB round-trip on every scan.
+        if crate::sqlanalyze::overlay_is_safe(sql) {
+            if let Ok(table_name) = sql_table_name(sql) {
+                for (row_id, pending_row) in self.store.pending_rows(&table_name).await? {
+                    let Some(row) = pending_row else { continue };
+                    rows.retain(|existing| {
+                        existing.get(pk_column).and_then(value_as_string).as_deref() != Some(row_id.as_str())
+                    });
+                    rows.push(row);
+                }
             }
-        }
         }
         tracing::info!(
             target: "query_metrics",

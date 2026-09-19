@@ -1263,6 +1263,35 @@ pub fn has_set_operation(sql: &str) -> bool {
     })
 }
 
+/// True when a read is safe to overlay with buffered (not-yet-dispatched)
+/// rows. The overlay injects an entire pending row into the result and cannot
+/// re-evaluate the query's predicate, so it is only correct for a plain,
+/// unfiltered, unjoined single-table SELECT — where every pending row in the
+/// table genuinely matches.
+///
+/// This is load-bearing, not an optimization. `hasActiveRequestToVanish` runs
+/// `SELECT event_id FROM events WHERE event_pubkey = ? AND event_kind = 62
+/// AND deleted_at IS NULL LIMIT 1`. With a predicate-blind overlay, a buffered
+/// kind-1 note from any other user satisfied that query, so nostream read it as
+/// "this pubkey has a vanish request" and rejected the publish with
+/// `blocked: request to vanish active for pubkey` — intermittently, under
+/// load.
+pub fn overlay_is_safe(sql: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&GenericDialect {}, sql) else {
+        return false;
+    };
+    for statement in statements {
+        if let Statement::Query(query) = statement {
+            if let SetExpr::Select(select) = query.body.as_ref() {
+                return select.selection.is_none()
+                    && select.having.is_none()
+                    && select.from.iter().all(|from| from.joins.is_empty());
+            }
+        }
+    }
+    false
+}
+
 /// SQL to send to a provider for a read. `nostream`'s UNIONs render as
 /// `(select ...) UNION (select ...)`, which pg-agent rejects because the
 /// statement does not begin with SELECT/WITH (`only_single_select_supported`).
@@ -1525,6 +1554,30 @@ mod tests {
         assert!(!has_join(sql));
         // `select *` on the first branch.
         assert!(matches!(select_projection(sql), Some(None)));
+    }
+
+    #[test]
+    fn overlay_is_safe_only_for_unfiltered_scans() {
+        // The bug: hasActiveRequestToVanish is a filtered scan, so the overlay
+        // must not run — a buffered kind-1 note from another user otherwise
+        // satisfies it and nostream rejects a fresh publish as "vanished".
+        assert!(!overlay_is_safe(
+            "select \"event_id\" from \"events\" where \"event_pubkey\" = decode('ab','hex')::bytea \
+             and \"event_kind\" = 62 and \"deleted_at\" is null limit 1"
+        ));
+        assert!(!overlay_is_safe("select * from \"events\" where \"event_kind\" in (1, 7)"));
+        assert!(!overlay_is_safe("select * from \"users\" where \"pubkey\" = decode('ab','hex')::bytea"));
+        // Joins and set operations never overlay either.
+        assert!(!overlay_is_safe(
+            "select \"events\".* from \"events\" left join \"event_tags\" \
+             on \"events\".\"event_id\" = \"event_tags\".\"event_id\""
+        ));
+        assert!(!overlay_is_safe("select * from \"events\" union select * from \"events\""));
+        // Unfiltered single-table scans are safe (every pending row matches).
+        assert!(overlay_is_safe("select * from \"events\""));
+        assert!(overlay_is_safe("select \"event_id\" from \"events\" limit 100"));
+        // Unparseable: never overlay.
+        assert!(!overlay_is_safe("not sql"));
     }
 
     #[test]
