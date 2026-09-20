@@ -34,7 +34,23 @@ services:
       DB_MIN_POOL_SIZE: ${DB_MIN_POOL_SIZE:-0}
       DB_MAX_POOL_SIZE: ${DB_MAX_POOL_SIZE:-8}
       DB_ACQUIRE_CONNECTION_TIMEOUT: ${DB_ACQUIRE_CONNECTION_TIMEOUT:-60000}
-      READ_REPLICA_ENABLED: "false"
+      # Split reads and writes into separate pools. nostream's REQ streaming
+      # (findByFilters) uses the read-replica client and holds a pooled
+      # connection for the subscription's lifetime; with READ_REPLICA_ENABLED
+      # false that falls back to the master pool, so a burst of subscriptions
+      # shares the connections writes need and starves them (KnexTimeoutError,
+      # publishes never reach the buffer). There is no separate replica, so
+      # RR0_* points at the same gateway.
+      READ_REPLICA_ENABLED: "true"
+      READ_REPLICAS: "1"
+      RR0_DB_HOST: ${DB_HOST:-172.17.0.1}
+      RR0_DB_PORT: ${DB_PORT:-55432}
+      RR0_DB_USER: ${DB_USER:-orchestrator}
+      RR0_DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      RR0_DB_NAME: ${DB_NAME:-nostr_ts_relay}
+      RR0_DB_MIN_POOL_SIZE: ${RR0_DB_MIN_POOL_SIZE:-0}
+      RR0_DB_MAX_POOL_SIZE: ${RR0_DB_MAX_POOL_SIZE:-24}
+      RR0_DB_ACQUIRE_CONNECTION_TIMEOUT: ${RR0_DB_ACQUIRE_CONNECTION_TIMEOUT:-60000}
       REDIS_HOST: nostream-cache
       REDIS_PORT: "6379"
       REDIS_USER: ${REDIS_USER:-default}
