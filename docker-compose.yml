@@ -246,9 +246,17 @@ services:
       # Exclusive database-node placement: each row lands on exactly one
       # provider (hash-distributed). Raise only with a second pg provider.
       PG_DEFAULT_REPLICA_COUNT: "1"
-      # Dispatch/apply diagnostics are debug-level; raise via RUST_LOG.
-      RUST_LOG: "${RUST_LOG:-info,pg_gateway=debug}"
+      # Dispatch/apply diagnostics are debug-level. Keep the gateway at
+      # `info`: the `pg_gateway=debug` scope emits "not catalog: <full SQL>"
+      # for every read, including the entire IN(...) literal list, which grew
+      # the json-file log to ~900MB. Set per_container to re-enable.
+      RUST_LOG: "${RUST_LOG:-info,pg_gateway=info}"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
 volumes:
   nso_postgres_data:
