@@ -55,6 +55,11 @@ services:
       REDIS_PORT: "6379"
       REDIS_USER: ${REDIS_USER:-default}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     user: node:node
     volumes:
       # Settings overrides are source-controlled in this repo and mounted

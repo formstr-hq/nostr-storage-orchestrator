@@ -4,6 +4,15 @@ Declarative deployment for the `nso_nostream` relay that fronts mesh-PG on the
 staging orchestrator host. This replaces a hand-started container that was not
 part of any compose project — so a host reboot used to leave the relay down.
 
+> **Source of truth:** the live relay is composed from the copy inside the
+> **nostream fork** (`abh3po/nostream`, `deploy/nostream-staging/`), checked out
+> on the host at `/root/Servers/nostream`. This directory is a **reference
+> mirror** of that copy — the two drifted once (this one was missing the
+> message rate limit and the container log cap), which is exactly the kind of
+> difference that turns into a regression if it is ever deployed from. When you
+> change relay config, change it in the fork and mirror it here in the same
+> session.
+
 ## Files
 
 | File | Purpose |
