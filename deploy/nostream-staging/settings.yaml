@@ -59,6 +59,25 @@ limits:
     createdAt:
       maxPositiveDelta: 900
       maxNegativeDelta: 3600
+  # Per-IP raw-message budget.
+  #
+  # The upstream default is 240/min. That was sized for a local database where a
+  # REQ costs ~1ms. Here every read fans out over the mesh and waits for the
+  # slowest provider (measured P1 ~183ms RTT, p50 ~200ms, p99 ~3.7s), holding a
+  # pooled connection for the whole round trip. A saturated worker's pool queues
+  # reads without bound (observed: 24/24 used with 26,994 pending), each willing
+  # to wait the full 60s acquire timeout -- that backlog, not the request rate
+  # itself, is what takes the relay down.
+  #
+  # Measured live client rates: typical 2-6 msg/min, worst legitimate 33.6/min.
+  # 60/min keeps ~2x headroom over the heaviest real client and 10x over typical,
+  # while cutting an abusive IP from 240 to 60 (a single IP can no longer consume
+  # a large share of a worker's ~24-connection read capacity).
+  message:
+    rateLimits:
+      - description: 60 raw messages/min
+        period: 60000
+        rate: 60
 
 # NIP-42 read protection for private DMs.
 #
