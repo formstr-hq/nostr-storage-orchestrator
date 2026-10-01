@@ -87,6 +87,10 @@ export class DbClient {
     return this.get<BlobRecord>(`/blobs/${encodeURIComponent(hash)}`);
   }
 
+  totalBlobSize(): Promise<{ totalSize: string }> {
+    return this.getOk("/blobs/total");
+  }
+
   createBlob(data: {
     hash: string;
     npub: string;

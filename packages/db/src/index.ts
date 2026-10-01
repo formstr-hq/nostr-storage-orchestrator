@@ -44,6 +44,12 @@ app.put("/users/:npub", async (req, res) => {
   res.json(userToJson(user));
 });
 
+// Must be registered before /blobs/:hash or "total" is captured as a hash.
+app.get("/blobs/total", async (_req, res) => {
+  const total = await prisma.blob.aggregate({ _sum: { size: true } });
+  res.json({ totalSize: (total._sum.size ?? 0n).toString() });
+});
+
 app.get("/blobs/:hash", async (req, res) => {
   const blob = await prisma.blob.findUnique({ where: { hash: req.params.hash! } });
   if (!blob) {

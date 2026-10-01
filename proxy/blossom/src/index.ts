@@ -9,6 +9,24 @@ import cors from "cors";
 
 const ALLOWED_NPUBS: string[] | null = process.env.ALLOWED_NPUBS ? process.env.ALLOWED_NPUBS.split(",") : null
 
+// Instance-wide capacity cap in MB. -1 (the default) disables the check.
+const GLOBAL_STORAGE_LIMIT_MB = Number(process.env.GLOBAL_STORAGE_LIMIT_MB ?? -1);
+const GLOBAL_STORAGE_LIMIT_BYTES =
+  Number.isFinite(GLOBAL_STORAGE_LIMIT_MB) && GLOBAL_STORAGE_LIMIT_MB >= 0
+    ? BigInt(Math.floor(GLOBAL_STORAGE_LIMIT_MB * 1024 * 1024))
+    : null;
+
+// Quota decisions live in the proxy, never in db-api or the storage backends;
+// db-api only answers the aggregate query. Reads the summed blob sizes on
+// demand so the check is accurate across proxy restarts.
+async function globalLimitExceeded(incomingSize: number): Promise<boolean> {
+  if (GLOBAL_STORAGE_LIMIT_BYTES === null) {
+    return false;
+  }
+  const { totalSize } = await db.totalBlobSize();
+  return BigInt(totalSize) + BigInt(incomingSize) > GLOBAL_STORAGE_LIMIT_BYTES;
+}
+
 const app = express();
 app.use(
   cors({
@@ -145,6 +163,10 @@ app.head("/upload", async (req, res) => {
       res.setHeader("X-Reason", "File exceeds upload limit.");
       return res.status(413).end();
     }
+    if (await globalLimitExceeded(size)) {
+      res.setHeader("X-Reason", "Global storage limit reached.");
+      return res.status(403).end();
+    }
 
     return res.status(200).end();
   } catch (error) {
@@ -225,12 +247,19 @@ app.put("/upload", async (req, res) => {
     const existing = await db.getBlob(hash);
     let createdAt = existing?.createdAt;
 
+    if (!existing && await globalLimitExceeded(size)) {
+      res.setHeader("X-Reason", "Global storage limit reached.");
+      return res.status(403).json({
+        error: "Global storage limit reached. Try again later.",
+      });
+    }
+
     if (!existing) {
       const result = await uploadBlob(
         data,
         hash,
         authHeader!,
-        limits.replicaCount,
+        npub,
       );
       try {
         const created = await db.createBlob({
