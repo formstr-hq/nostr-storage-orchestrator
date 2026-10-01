@@ -119,6 +119,19 @@
   .tabbar button:hover{color:var(--ink);}
   .tabbar button.active{background:var(--ink); color:var(--paper);}
 
+  .masthead-right{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+  .theme-toggle{
+    appearance:none; border:1px solid var(--line); background:var(--card);
+    color:var(--muted); border-radius:10px; width:38px; height:38px;
+    display:flex; align-items:center; justify-content:center; cursor:pointer;
+    flex-shrink:0; transition:color .15s ease, border-color .15s ease;
+  }
+  .theme-toggle:hover{color:var(--ink); border-color:var(--line-strong);}
+  .theme-toggle svg{width:17px; height:17px;}
+  .theme-toggle .ico-moon{display:none;}
+  :root[data-theme="dark"] .theme-toggle .ico-sun{display:none;}
+  :root[data-theme="dark"] .theme-toggle .ico-moon{display:block;}
+
   .panel{display:none;}
   .panel.active{display:block; animation:fade .25s ease;}
   @keyframes fade{from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:none;}}
@@ -433,10 +446,16 @@
         <div class="tag">storage.formstr.app</div>
       </div>
     </div>
-    <div class="tabbar" role="tablist">
-      <button class="active" data-tab="console">Console</button>
-      <button data-tab="payment">Pricing &amp; payment</button>
-      <button data-tab="admin">Admin &amp; moderation</button>
+    <div class="masthead-right">
+      <div class="tabbar" role="tablist">
+        <button class="active" data-tab="console">Console</button>
+        <button data-tab="payment">Pricing &amp; payment</button>
+        <button data-tab="admin">Admin &amp; moderation</button>
+      </div>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle dark mode">
+        <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+      </button>
     </div>
   </div>
 
@@ -806,6 +825,26 @@
 <div class="toast" id="toast"></div>
 
 <script>
+  (function initTheme(){
+    var root = document.documentElement;
+    var stored = null;
+    try { stored = localStorage.getItem('blossom-theme'); } catch(e){}
+    if(stored === 'light' || stored === 'dark'){
+      root.setAttribute('data-theme', stored);
+    } else {
+      var prefersDark = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      root.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+    }
+    var btn = document.getElementById('theme-toggle');
+    if(btn){
+      btn.addEventListener('click', function(){
+        var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        root.setAttribute('data-theme', next);
+        try { localStorage.setItem('blossom-theme', next); } catch(e){}
+      });
+    }
+  })();
+
   function switchTab(name){
     document.querySelectorAll('.tabbar button').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
     document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.id==='panel-'+name));
