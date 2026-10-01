@@ -8,6 +8,6 @@ set -e
 
 mkdir -p data/nostream
 mkdir -p data/blossom
-mkdir -p data/strfry
+mkdir -p data/mesh-pg
 
 sudo docker compose -f docker-compose.dev.yml up --build

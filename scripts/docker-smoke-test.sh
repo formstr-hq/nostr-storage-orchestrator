@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end smoke test for the orchestrator's docker-compose stack.
 #
-# Brings up storage-client's backends (if not already running) plus the root
-# stack (postgres, db-api, blossom proxy, relay proxy), waits for everything
-# to become reachable, then drives the real HTTP/WebSocket protocols through
-# packages/smoke-test.
+# Brings up storage-client's blossom backend (if not already running) plus the
+# root stack (postgres, db-api, blossom proxy), waits for everything to become
+# reachable, then drives the real HTTP protocol through packages/smoke-test.
 #
 # Deliberately uses the meshless docker-compose.dev.yml files (not
 # docker-compose.yml, which requires the NVPN sidecar) so this test stays
@@ -86,17 +85,16 @@ fi
 # Read BLOSSOM_PORT from storage-client/.env for log messages below.
 BLOSSOM_STORAGE_PORT="$(grep -m1 '^BLOSSOM_PORT=' storage-client/.env | cut -d= -f2 || echo 3000)"
 
-log "step 2/5: ensuring storage-client backends are reachable (blossom :${BLOSSOM_STORAGE_PORT}, strfry :7777)"
-if wait_for_tcp localhost "${BLOSSOM_STORAGE_PORT}" 1 && wait_for_tcp localhost 7777 1; then
-  log "storage-client backends already running"
+log "step 2/5: ensuring storage-client blossom backend is reachable (port ${BLOSSOM_STORAGE_PORT})"
+if wait_for_tcp localhost "${BLOSSOM_STORAGE_PORT}" 1; then
+  log "storage-client blossom backend already running"
 else
-  log "starting storage-client backends..."
-  storage_compose up --build -d
+  log "starting storage-client blossom backend..."
+  storage_compose up --build -d blossom
   log "waiting for storage-client blossom backend to become healthy (Deno startup can take ~30s)..."
   wait_for_healthy storage_blossom_id "storage-client blossom backend (:${BLOSSOM_STORAGE_PORT})" 120 || { storage_compose logs blossom; exit 1; }
-  wait_for_tcp localhost 7777 60 || { log "storage-client strfry backend (:7777) did not come up"; exit 1; }
-  log "storage-client backends are up and left running for reuse;"
-  log "stop them manually with: (cd storage-client && docker compose -f docker-compose.dev.yml down)"
+  log "storage-client blossom backend is up and left running for reuse;"
+  log "stop it manually with: (cd storage-client && docker compose -f docker-compose.dev.yml down)"
 fi
 
 log "step 3/5: building and starting the root docker-compose stack"
@@ -105,7 +103,6 @@ root_compose up --build -d
 log "step 4/5: waiting for services to become healthy"
 wait_for_healthy root_db_id "db-api" 120 || { root_compose logs db; exit 1; }
 wait_for_tcp localhost 3001 60 || { log "blossom proxy (:3001) did not come up"; root_compose logs blossom; exit 1; }
-wait_for_tcp localhost 8007 60 || { log "relay proxy (:8007) did not come up"; root_compose logs relay; exit 1; }
 log "all services are up"
 
 log "step 5/5: running protocol-level checks (packages/smoke-test)"

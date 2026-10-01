@@ -230,7 +230,6 @@ pub struct Storage {
     pub owner_npub: String,
     pub tunnel_ip: Option<String>,
     pub blossom_port: Option<u16>,
-    pub relay_port: Option<u16>,
     pub declared_capacity_bytes: Option<String>,
     pub reported_total_bytes: Option<String>,
     pub reported_free_bytes: Option<String>,
@@ -910,7 +909,7 @@ mod tests {
 
         let storages = storages_response(
             200,
-            br#"[{"npub":"npub1storage","ownerNpub":"npub1member","tunnelIp":null,"blossomPort":null,"relayPort":null,"declaredCapacityBytes":"1000000000","reportedTotalBytes":null,"reportedFreeBytes":null,"lifecycle":"linked","liveness":"pending","lastPingAt":null,"createdAt":"2026-08-01T00:00:00Z"}]"#,
+            br#"[{"npub":"npub1storage","ownerNpub":"npub1member","tunnelIp":null,"blossomPort":null,"declaredCapacityBytes":"1000000000","reportedTotalBytes":null,"reportedFreeBytes":null,"lifecycle":"linked","liveness":"pending","lastPingAt":null,"createdAt":"2026-08-01T00:00:00Z"}]"#,
         )
         .unwrap();
         assert_eq!(storages[0].liveness, StorageLiveness::Pending);

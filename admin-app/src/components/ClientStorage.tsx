@@ -51,7 +51,6 @@ function StorageRow({
     ? [
         storage.tunnelIp,
         storage.blossomPort === null ? null : `blossom :${storage.blossomPort}`,
-        storage.relayPort === null ? null : `relay :${storage.relayPort}`,
         `pinged ${relativeTime(storage.lastPingAt)}`,
       ].filter(Boolean).join(" / ")
     : `linked ${relativeTime(storage.createdAt)} / no ping received yet - is storage-agent running?`;

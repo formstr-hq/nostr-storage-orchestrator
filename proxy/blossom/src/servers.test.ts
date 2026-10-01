@@ -6,7 +6,6 @@ const activeStorage = {
   npub: "npub-storage",
   tunnelIp: "10.44.0.8",
   blossomPort: 3000,
-  relayPort: 7777,
 };
 
 test("ServerRegistry maps DB npubs and resolves legacy URLs", async () => {
