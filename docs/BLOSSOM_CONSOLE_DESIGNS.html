@@ -1,0 +1,937 @@
+<title>Blossom Console Designs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#f4f4f3;
+    --card:#ffffff;
+    --ink:#0b0b0c;
+    --ink-light:#2a2a2a;
+    --emphasis:#e5484d;
+    --emphasis-bg:#fbe9e9;
+    --gray-300:#d6d3d1;
+    --gray-400:#9ca3af;
+    --gray-500:#6b7280;
+    --line:#0b0b0c14;
+    --line-strong:#0b0b0c33;
+    --muted:var(--gray-500);
+    --faint:var(--gray-400);
+    --good:#16a34a;
+    --good-bg:#e3f5e9;
+    --warn:#a8691a;
+    --warn-bg:#fbeedb;
+    --bad:#e5484d;
+    --bad-bg:#fbe9e9;
+    --radius:14px;
+    --font-sans:"Inter","SF Pro Text",system-ui,-apple-system,sans-serif;
+    --font-mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,monospace;
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#0b0b0c;
+      --card:#161617;
+      --ink:#f4f4f3;
+      --ink-light:#9ca3af;
+      --emphasis-bg:#3a1f20;
+      --line:#ffffff1a;
+      --line-strong:#ffffff33;
+      --muted:var(--gray-400);
+      --faint:#6b7280;
+      --good-bg:#103a20;
+      --warn-bg:#3a2a10;
+      --bad-bg:#3a1f20;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#0b0b0c;
+    --card:#161617;
+    --ink:#f4f4f3;
+    --ink-light:#9ca3af;
+    --emphasis-bg:#3a1f20;
+    --line:#ffffff1a;
+    --line-strong:#ffffff33;
+    --muted:var(--gray-400);
+    --faint:#6b7280;
+    --good-bg:#103a20;
+    --warn-bg:#3a2a10;
+    --bad-bg:#3a1f20;
+    color-scheme: dark;
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--font-sans);
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+    padding-inline:16px;
+  }
+
+  h1,h2,h3,h4{text-wrap:balance; margin:0;}
+  p{margin:0;}
+  a{color:inherit;}
+  button{font-family:inherit;}
+  ::selection{background:var(--emphasis-bg);}
+
+  /* ---------- shell ---------- */
+  .shell{max-width:1180px; margin:0 auto; padding-block:28px 64px;}
+
+  .masthead{
+    display:flex; align-items:center; justify-content:space-between;
+    gap:16px; flex-wrap:wrap;
+    padding-block:4px 20px;
+    border-bottom:1px solid var(--line);
+    margin-bottom:22px;
+  }
+  .brand{display:flex; align-items:center; gap:11px;}
+  .brand .mark{
+    width:38px; height:38px; border-radius:11px;
+    background:var(--emphasis);
+    display:flex; align-items:center; justify-content:center;
+    flex-shrink:0;
+  }
+  .brand .mark svg{width:19px; height:19px;}
+  .brand .name{font-weight:800; font-size:1.05rem; letter-spacing:-0.02em;}
+  .brand .tag{
+    font-family:var(--font-mono); font-size:0.68rem; color:var(--faint);
+    text-transform:uppercase; letter-spacing:0.08em; margin-top:1px;
+  }
+
+  .tabbar{
+    display:flex; gap:4px;
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:12px; padding:4px;
+  }
+  .tabbar button{
+    appearance:none; border:none; background:transparent;
+    padding:9px 16px; border-radius:9px;
+    font-weight:600; font-size:0.86rem; color:var(--muted);
+    cursor:pointer; transition:background .15s ease, color .15s ease;
+    white-space:nowrap;
+  }
+  .tabbar button:hover{color:var(--ink);}
+  .tabbar button.active{background:var(--ink); color:var(--paper);}
+
+  .panel{display:none;}
+  .panel.active{display:block; animation:fade .25s ease;}
+  @keyframes fade{from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:none;}}
+
+  .eyebrow{
+    font-family:var(--font-mono); text-transform:uppercase; letter-spacing:0.1em;
+    font-size:0.72rem; color:var(--gray-500); font-weight:700;
+  }
+  .heading{font-size:1.9rem; font-weight:800; letter-spacing:-0.025em; margin-top:7px;}
+  .sub{color:var(--muted); margin-top:7px; max-width:60ch; line-height:1.55;}
+  .section-head{margin-bottom:22px;}
+
+  /* ---------- cards ---------- */
+  .card{background:var(--card); border:1px solid var(--line); border-radius:16px;}
+
+  .grid{display:grid; gap:16px;}
+  .grid.cols-3{grid-template-columns:repeat(3,1fr);}
+  .grid.cols-2{grid-template-columns:repeat(2,1fr);}
+  @media (max-width:760px){ .grid.cols-3, .grid.cols-2{grid-template-columns:1fr;} }
+
+  .stat{padding:18px 20px;}
+  .stat .label{font-size:0.74rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--gray-500); font-weight:700;}
+  .stat .value{font-family:var(--font-mono); font-variant-numeric:tabular-nums; font-size:1.7rem; font-weight:700; margin-top:8px; letter-spacing:-0.01em;}
+  .stat .delta{font-size:0.78rem; color:var(--muted); margin-top:4px;}
+
+  .pill{
+    display:inline-flex; align-items:center; gap:6px;
+    padding:4px 10px; border-radius:999px;
+    font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;
+  }
+  .pill.good{background:var(--good-bg); color:var(--good);}
+  .pill.warn{background:var(--warn-bg); color:var(--warn);}
+  .pill.bad{background:var(--bad-bg); color:var(--bad);}
+  .pill .dot{width:6px; height:6px; border-radius:50%; background:currentColor;}
+
+  .btn{
+    appearance:none; border:none; border-radius:10px;
+    padding:11px 18px; font-weight:700; font-size:0.88rem; cursor:pointer;
+    display:inline-flex; align-items:center; gap:8px;
+    transition:background .15s ease, transform .12s ease, opacity .12s ease;
+  }
+  .btn:active{transform:scale(0.97);}
+  .btn.primary{background:var(--ink); color:var(--paper);}
+  .btn.primary:hover{background:var(--ink-light);}
+  .btn.ghost{background:transparent; border:1.5px solid var(--line-strong); color:var(--ink);}
+  .btn.ghost:hover{border-color:var(--ink);}
+  .btn.danger{background:var(--bad-bg); color:var(--bad);}
+  .btn.danger:hover{filter:brightness(0.95);}
+  .btn:disabled{opacity:0.4; cursor:not-allowed;}
+  .btn.small{padding:7px 12px; font-size:0.78rem; border-radius:8px;}
+
+  table{width:100%; border-collapse:collapse;}
+  th{
+    text-align:left; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.07em;
+    color:var(--gray-500); font-weight:700; padding:0 14px 10px; border-bottom:1px solid var(--line);
+  }
+  td{padding:13px 14px; border-bottom:1px solid var(--line); font-size:0.86rem; vertical-align:middle;}
+  tr:last-child td{border-bottom:none;}
+  .mono{font-family:var(--font-mono); font-size:0.8rem;}
+  .table-wrap{overflow-x:auto;}
+
+  .bar-track{height:10px; border-radius:999px; background:var(--line-strong); overflow:hidden;}
+  .bar-fill{height:100%; border-radius:999px; background:var(--ink); transition:width .4s ease;}
+  .bar-fill.over{background:var(--emphasis);}
+
+  /* ---------- CONSOLE TAB ---------- */
+  .console-top{display:grid; grid-template-columns:1.3fr 1fr; gap:16px; margin-bottom:16px;}
+  @media (max-width:820px){ .console-top{grid-template-columns:1fr;} }
+
+  .plan-card{padding:22px;}
+  .plan-card .row1{display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;}
+  .plan-card .plan-name{font-size:1.25rem; font-weight:800;}
+  .plan-card .plan-meta{color:var(--muted); font-size:0.85rem; margin-top:3px;}
+  .plan-card .storage-row{margin-top:18px;}
+  .plan-card .storage-row .labels{display:flex; justify-content:space-between; font-size:0.78rem; color:var(--muted); margin-bottom:7px;}
+  .plan-card .actions{display:flex; gap:10px; margin-top:18px; flex-wrap:wrap;}
+
+  .banner{
+    display:flex; gap:12px; align-items:flex-start;
+    padding:14px 16px; border-radius:12px;
+    background:var(--warn-bg); border:1px solid var(--line);
+    margin-bottom:16px;
+  }
+  .banner svg{flex-shrink:0; color:var(--warn); margin-top:1px;}
+  .banner .btitle{font-weight:700; font-size:0.9rem;}
+  .banner .btext{font-size:0.82rem; color:var(--muted); margin-top:2px; line-height:1.45;}
+
+  .countdown-ring-card{
+    padding:22px; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; gap:6px;
+  }
+  .countdown-ring-card .n{font-family:var(--font-mono); font-size:2.1rem; font-weight:700;}
+  .countdown-ring-card .l{font-size:0.78rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.07em;}
+
+  .section-title{font-weight:800; font-size:1.05rem; margin-bottom:12px; display:flex; align-items:center; justify-content:space-between;}
+
+  .blob-name{display:flex; align-items:center; gap:10px;}
+  .blob-ico{
+    width:30px; height:30px; border-radius:8px;
+    background:var(--line); color:var(--ink);
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+  }
+
+  .tabs-inline{display:flex; gap:6px; margin-bottom:14px;}
+  .tabs-inline button{
+    appearance:none; border:1px solid var(--line); background:var(--card);
+    padding:7px 13px; border-radius:9px; font-size:0.8rem; font-weight:600; color:var(--muted); cursor:pointer;
+  }
+  .tabs-inline button.active{background:var(--ink); color:var(--paper); border-color:var(--ink);}
+
+  .subpanel{display:none;}
+  .subpanel.active{display:block;}
+
+  .notif-item{display:flex; gap:12px; padding:12px 0; border-bottom:1px solid var(--line);}
+  .notif-item:last-child{border-bottom:none;}
+  .notif-ico{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+  .notif-ico.ch{background:var(--good-bg); color:var(--good);}
+  .notif-ico.wn{background:var(--warn-bg); color:var(--warn);}
+  .notif-item .ntitle{font-size:0.85rem; font-weight:600;}
+  .notif-item .nmeta{font-size:0.76rem; color:var(--faint); margin-top:2px;}
+
+  /* ---------- PAYMENT TAB ---------- */
+  .plans-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:18px; margin-top:4px;}
+  @media (max-width:760px){ .plans-grid{grid-template-columns:1fr;} }
+
+  .plan-option{position:relative; padding:24px; cursor:pointer; transition:border-color .15s ease, transform .15s ease;}
+  .plan-option:hover{transform:translateY(-2px);}
+  .plan-option.selected{border-color:var(--emphasis); box-shadow:0 0 0 3px var(--emphasis-bg);}
+  .plan-option .tier-tag{
+    position:absolute; top:-10px; right:18px;
+    background:var(--emphasis); color:#fff;
+    font-size:0.68rem; font-weight:800; text-transform:uppercase; letter-spacing:0.05em;
+    padding:4px 10px; border-radius:999px;
+  }
+  .plan-option h3{font-size:1.15rem; font-weight:800;}
+  .plan-option .price{font-family:var(--font-mono); font-size:1.9rem; font-weight:700; margin-top:10px;}
+  .plan-option .price span{font-size:0.9rem; color:var(--muted); font-weight:500;}
+  .plan-option ul{list-style:none; padding:0; margin:16px 0 0; display:flex; flex-direction:column; gap:9px;}
+  .plan-option li{display:flex; gap:8px; align-items:flex-start; font-size:0.84rem; color:var(--muted);}
+  .plan-option li svg{color:var(--emphasis); flex-shrink:0; margin-top:2px;}
+  .plan-option .radio{position:absolute; top:22px; right:22px; width:18px; height:18px; border-radius:50%; border:2px solid var(--line-strong);}
+  .plan-option.selected .radio{border-color:var(--emphasis); background:var(--emphasis); box-shadow:inset 0 0 0 3px var(--card);}
+
+  .purchase-flow{margin-top:24px; padding:22px;}
+  .flow-steps{display:flex; gap:0; margin-bottom:22px; flex-wrap:wrap;}
+  .flow-step{
+    display:flex; align-items:center; gap:8px; font-size:0.8rem; font-weight:600; color:var(--faint);
+    padding-right:18px; margin-right:18px; border-right:1px solid var(--line);
+  }
+  .flow-step:last-child{border-right:none;}
+  .flow-step .num{
+    width:20px;height:20px;border-radius:50%; background:var(--line); color:var(--faint);
+    display:flex;align-items:center;justify-content:center; font-size:0.68rem; font-weight:800;
+  }
+  .flow-step.done .num{background:var(--good); color:#fff;}
+  .flow-step.done{color:var(--ink);}
+  .flow-step.current .num{background:var(--emphasis); color:#fff;}
+  .flow-step.current{color:var(--ink);}
+
+  .connect-row{display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;}
+  .signer-chip{
+    display:flex; align-items:center; gap:10px;
+    background:var(--good-bg); color:var(--good);
+    padding:9px 14px; border-radius:10px; font-size:0.82rem; font-weight:700;
+  }
+  .signer-chip .npub{font-family:var(--font-mono); font-weight:500; color:var(--ink); opacity:0.8;}
+
+  .tnc-row{display:flex; gap:10px; align-items:flex-start; margin-top:18px; padding-top:18px; border-top:1px solid var(--line);}
+  .tnc-row input{margin-top:3px; width:16px; height:16px; accent-color:var(--emphasis);}
+  .tnc-row label{font-size:0.85rem; color:var(--muted); line-height:1.5;}
+  .tnc-row a{color:var(--ink); font-weight:600; text-decoration:underline; text-underline-offset:3px;}
+
+  .checkout-summary{
+    display:flex; justify-content:space-between; align-items:center;
+    margin-top:18px; padding-top:18px; border-top:1px solid var(--line);
+    flex-wrap:wrap; gap:12px;
+  }
+  .checkout-summary .total{font-family:var(--font-mono); font-size:1.4rem; font-weight:700;}
+  .checkout-summary .total span{font-size:0.78rem; color:var(--muted); font-weight:500; display:block; font-family:var(--font-sans);}
+
+  /* invoice modal */
+  .modal-backdrop{
+    position:fixed; inset:0; background:rgba(11,11,12,0.5);
+    display:none; align-items:center; justify-content:center; z-index:50; padding:16px;
+    backdrop-filter:blur(2px);
+  }
+  .modal-backdrop.open{display:flex;}
+  .modal{
+    background:var(--card); border-radius:18px; width:100%; max-width:420px; padding:26px;
+    box-shadow:0 30px 60px -20px rgba(0,0,0,0.35); position:relative;
+  }
+  .modal .close{
+    position:absolute; top:14px; right:14px; width:30px; height:30px; border-radius:50%;
+    border:none; background:var(--line); display:flex; align-items:center; justify-content:center;
+    cursor:pointer; color:var(--muted);
+  }
+  .modal h3{font-size:1.1rem; font-weight:800;}
+  .modal .modal-sub{color:var(--muted); font-size:0.82rem; margin-top:4px;}
+  .qr-box{
+    width:100%; aspect-ratio:1; max-width:220px; margin:20px auto 16px;
+    border-radius:14px; border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:center;
+    background:repeating-conic-gradient(var(--ink) 0% 25%, var(--card) 0% 50%) 0 0/16px 16px;
+    position:relative; overflow:hidden;
+  }
+  .qr-box::after{content:""; position:absolute; inset:14px; background:var(--card); border-radius:8px;}
+  .qr-box svg{position:relative; z-index:1; width:40%; height:40%; color:var(--emphasis);}
+  .invoice-string{
+    font-family:var(--font-mono); font-size:0.72rem; background:var(--line);
+    border-radius:10px; padding:11px 12px; word-break:break-all; color:var(--muted);
+    line-height:1.5; max-height:4.6em; overflow:hidden;
+  }
+  .modal .copy-row{display:flex; gap:8px; margin-top:10px;}
+  .status-row{display:flex; align-items:center; gap:10px; justify-content:center; margin-top:18px; font-size:0.85rem; font-weight:600;}
+  .spinner{
+    width:15px; height:15px; border-radius:50%;
+    border:2px solid var(--line-strong); border-top-color:var(--emphasis);
+    animation:spin 0.8s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .paid-check{
+    width:52px; height:52px; border-radius:50%; background:var(--good-bg); color:var(--good);
+    display:flex; align-items:center; justify-content:center; margin:6px auto 4px;
+  }
+
+  /* ---------- ADMIN TAB ---------- */
+  .admin-stats{margin-bottom:18px;}
+  .filter-row{display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center;}
+  .filter-row input[type=text]{
+    flex:1; min-width:180px; padding:9px 13px; border-radius:10px; border:1px solid var(--line-strong);
+    font-size:0.85rem; font-family:inherit; background:var(--card); color:var(--ink);
+  }
+  .filter-row select{
+    padding:9px 13px; border-radius:10px; border:1px solid var(--line-strong);
+    font-size:0.85rem; font-family:inherit; background:var(--card); color:var(--ink);
+  }
+
+  .npub-chip{font-family:var(--font-mono); font-size:0.78rem; color:var(--muted);}
+
+  .moderation-panel{margin-top:24px;}
+  .audit-log{display:flex; flex-direction:column; gap:0; max-height:340px; overflow-y:auto;}
+  .audit-item{display:flex; gap:12px; padding:12px 0; border-bottom:1px solid var(--line);}
+  .audit-item:last-child{border-bottom:none;}
+  .audit-ico{
+    width:30px;height:30px;border-radius:8px;flex-shrink:0;
+    background:var(--bad-bg); color:var(--bad); display:flex; align-items:center; justify-content:center;
+  }
+  .audit-title{font-size:0.84rem; font-weight:600;}
+  .audit-meta{font-size:0.76rem; color:var(--faint); margin-top:3px; font-family:var(--font-mono);}
+  .audit-new{animation:slidein .4s ease;}
+  @keyframes slidein{from{opacity:0; transform:translateX(-8px);} to{opacity:1; transform:none;}}
+
+  .modal.mod-modal{max-width:460px;}
+  .mod-field{margin-top:14px;}
+  .mod-field label{font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--gray-500);}
+  .mod-field textarea{
+    width:100%; margin-top:7px; padding:10px 12px; border-radius:10px;
+    border:1px solid var(--line-strong); font-family:inherit; font-size:0.86rem;
+    resize:vertical; min-height:72px; background:var(--paper); color:var(--ink);
+  }
+  .mod-field .reason-chips{display:flex; gap:7px; margin-top:8px; flex-wrap:wrap;}
+  .mod-field .reason-chip{
+    border:1px solid var(--line-strong); background:transparent; border-radius:999px;
+    padding:5px 11px; font-size:0.74rem; cursor:pointer; color:var(--muted);
+  }
+  .mod-field .reason-chip.active{background:var(--ink); color:var(--paper); border-color:var(--ink);}
+  .mod-hash{
+    font-family:var(--font-mono); font-size:0.8rem; background:var(--line);
+    border-radius:10px; padding:10px 12px; display:flex; justify-content:space-between; gap:10px; align-items:center;
+  }
+  .toast{
+    position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(10px);
+    background:var(--ink); color:var(--paper);
+    padding:12px 18px; border-radius:12px; font-size:0.85rem; font-weight:600;
+    display:flex; align-items:center; gap:10px;
+    opacity:0; pointer-events:none; transition:opacity .25s ease, transform .25s ease;
+    z-index:80; box-shadow:0 12px 30px -10px rgba(0,0,0,0.4);
+  }
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+
+  .admin-kicker{
+    display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:0.72rem; color:var(--muted);
+    background:var(--card); border:1px solid var(--line); border-radius:999px; padding:6px 12px; width:fit-content; margin-bottom:12px;
+  }
+  .admin-kicker .dot{width:7px;height:7px;border-radius:50%;background:var(--good); box-shadow:0 0 0 3px var(--good-bg);}
+
+  footer.note{
+    margin-top:50px; padding-top:20px; border-top:1px solid var(--line);
+    font-size:0.78rem; color:var(--faint); display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
+  }
+
+  @media (max-width:600px){
+    .masthead{flex-direction:column; align-items:flex-start;}
+    .tabbar{width:100%; overflow-x:auto;}
+  }
+</style>
+
+<div class="shell">
+
+  <div class="masthead">
+    <div class="brand">
+      <div class="mark">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 20V6" stroke="#F4F4F3" stroke-width="2.4" stroke-linecap="round"/>
+          <path d="M5 9.5 12 3l7 6.5" stroke="#F4F4F3" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M8 13.5h8" stroke="#F4F4F3" stroke-width="2.4" stroke-linecap="round"/>
+          <circle cx="12" cy="17.5" r="1.6" fill="#F4F4F3"/>
+        </svg>
+      </div>
+      <div>
+        <div class="name">Blossom</div>
+        <div class="tag">storage.formstr.app</div>
+      </div>
+    </div>
+    <div class="tabbar" role="tablist">
+      <button class="active" data-tab="console">Console</button>
+      <button data-tab="payment">Pricing &amp; payment</button>
+      <button data-tab="admin">Admin &amp; moderation</button>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- CONSOLE -->
+  <!-- ============================================================ -->
+  <div class="panel active" id="panel-console">
+    <div class="section-head">
+      <div class="eyebrow">Your account</div>
+      <h1 class="heading">Dashboard</h1>
+      <p class="sub">Everything you've stored on Blossom, how much room you have left, and when your plan renews.</p>
+    </div>
+
+    <div class="banner" id="quota-banner">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>
+      <div>
+        <div class="btitle">You're over your storage allowance — in grace until Oct 12</div>
+        <div class="btext">Using 2.3 GB of your 2 GB Pro allowance. Delete blobs below or upgrade to avoid uploads being blocked on Oct 12.</div>
+      </div>
+    </div>
+
+    <div class="console-top">
+      <div class="card plan-card">
+        <div class="row1">
+          <div>
+            <div class="plan-name">Pro plan</div>
+            <div class="plan-meta">Auto-renew is off · renew manually from Pricing</div>
+          </div>
+          <span class="pill warn"><span class="dot"></span>Grace period</span>
+        </div>
+        <div class="storage-row">
+          <div class="labels">
+            <span><strong style="color:var(--ink); font-family:var(--font-mono)">2.3 GB</strong> used of 2 GB</span>
+            <span>115%</span>
+          </div>
+          <div class="bar-track"><div class="bar-fill over" style="width:100%;"></div></div>
+        </div>
+        <div class="actions">
+          <button class="btn primary" onclick="switchTab('payment')">Upgrade plan</button>
+          <button class="btn ghost" onclick="showToast('2 blobs deleted — you\'re back within your allowance')">Free up space</button>
+        </div>
+      </div>
+      <div class="card countdown-ring-card">
+        <div class="eyebrow">Plan expires</div>
+        <div class="n">6d 14h</div>
+        <div class="l">Oct 7, 2026 · 09:12 UTC</div>
+      </div>
+    </div>
+
+    <div class="tabs-inline">
+      <button class="active" data-sub="blobs" onclick="switchSub(this,'blobs')">Blobs</button>
+      <button data-sub="billing" onclick="switchSub(this,'billing')">Billing</button>
+      <button data-sub="notifs" onclick="switchSub(this,'notifs')">Notifications</button>
+    </div>
+
+    <div class="subpanel active card" id="sub-blobs" style="padding:18px;">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Blob</th><th>Size</th><th>Uploaded</th><th>Hash</th><th></th></tr></thead>
+          <tbody id="blob-rows">
+            <tr>
+              <td><div class="blob-name"><div class="blob-ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>portfolio-hero.png</div></td>
+              <td class="mono">4.1 MB</td>
+              <td>Sep 29, 2026</td>
+              <td class="npub-chip">a93f2c1e…08b4</td>
+              <td><button class="btn small danger" onclick="deleteBlob(this)">Delete</button></td>
+            </tr>
+            <tr>
+              <td><div class="blob-name"><div class="blob-ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></div>meeting-notes.pdf</td>
+              <td class="mono">812 KB</td>
+              <td>Sep 27, 2026</td>
+              <td class="npub-chip">7c41de90…f2a1</td>
+              <td><button class="btn small danger" onclick="deleteBlob(this)">Delete</button></td>
+            </tr>
+            <tr>
+              <td><div class="blob-name"><div class="blob-ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></div>demo-recording.mp4</td>
+              <td class="mono">1.9 GB</td>
+              <td>Sep 21, 2026</td>
+              <td class="npub-chip">55d0ab3c…9e7c</td>
+              <td><button class="btn small danger" onclick="deleteBlob(this)">Delete</button></td>
+            </tr>
+            <tr>
+              <td><div class="blob-name"><div class="blob-ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>cover-art-v2.jpg</td>
+              <td class="mono">3.4 MB</td>
+              <td>Sep 14, 2026</td>
+              <td class="npub-chip">01af77e2…4bd0</td>
+              <td><button class="btn small danger" onclick="deleteBlob(this)">Delete</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="subpanel card" id="sub-billing" style="padding:18px;">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>Sep 5, 2026</td><td>Pro plan — 30 days, upgrade</td><td class="mono">15,000 sats</td><td><span class="pill good"><span class="dot"></span>Paid</span></td><td><button class="btn ghost small">Receipt</button></td></tr>
+            <tr><td>Aug 5, 2026</td><td>Basic plan — 30 days, renewal</td><td class="mono">5,000 sats</td><td><span class="pill good"><span class="dot"></span>Paid</span></td><td><button class="btn ghost small">Receipt</button></td></tr>
+            <tr><td>Jul 5, 2026</td><td>Basic plan — 30 days, first purchase</td><td class="mono">5,000 sats</td><td><span class="pill good"><span class="dot"></span>Paid</span></td><td><button class="btn ghost small">Receipt</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="subpanel card" id="sub-notifs" style="padding:18px;">
+      <div class="notif-item">
+        <div class="notif-ico wn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg></div>
+        <div><div class="ntitle">Storage over allowance — grace period started</div><div class="nmeta">Oct 1, 2026 · sent via DM + email</div></div>
+      </div>
+      <div class="notif-item">
+        <div class="notif-ico ch"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg></div>
+        <div><div class="ntitle">Upgrade confirmed — Pro plan active</div><div class="nmeta">Sep 5, 2026 · sent via DM + email</div></div>
+      </div>
+      <div class="notif-item">
+        <div class="notif-ico wn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg></div>
+        <div><div class="ntitle">Plan expires in 3 days</div><div class="nmeta">Sep 2, 2026 · sent via DM + email</div></div>
+      </div>
+      <div class="notif-item">
+        <div class="notif-ico ch"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg></div>
+        <div><div class="ntitle">Purchase confirmed — Basic plan active</div><div class="nmeta">Jul 5, 2026 · sent via DM + email</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- PAYMENT -->
+  <!-- ============================================================ -->
+  <div class="panel" id="panel-payment">
+    <div class="section-head">
+      <div class="eyebrow">Pricing</div>
+      <h1 class="heading">Choose a plan</h1>
+      <p class="sub">Storage allowance and plan time only — no per-file limits, no free tier. Renewing adds days; upgrading applies immediately.</p>
+    </div>
+
+    <div class="plans-grid">
+      <div class="card plan-option" data-plan="basic" data-price="5,000" onclick="selectPlan(this)">
+        <div class="radio"></div>
+        <h3>Basic</h3>
+        <div class="price">5,000 <span>sats / 30 days</span></div>
+        <ul>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>500 MB total storage</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>30-day plan, renews additively</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>Dashboard + expiry reminders</li>
+        </ul>
+      </div>
+      <div class="card plan-option selected" data-plan="pro" data-price="15,000" onclick="selectPlan(this)">
+        <div class="tier-tag">Most storage</div>
+        <div class="radio"></div>
+        <h3>Pro</h3>
+        <div class="price">15,000 <span>sats / 30 days</span></div>
+        <ul>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>2 GB total storage</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>30-day plan, renews additively</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>Priority replica placement</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card purchase-flow">
+      <div class="flow-steps">
+        <div class="flow-step done" id="step-1"><span class="num">✓</span>Connect signer</div>
+        <div class="flow-step current" id="step-2"><span class="num">2</span>Accept terms</div>
+        <div class="flow-step" id="step-3"><span class="num">3</span>Pay invoice</div>
+      </div>
+
+      <div class="connect-row">
+        <div class="signer-chip">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+          Signer connected <span class="npub">npub1q8…k2vr</span>
+        </div>
+        <span style="font-size:0.8rem; color:var(--muted)" id="mode-line">Mode: <strong style="color:var(--ink)">Upgrade</strong> (Basic → Pro, immediate)</span>
+      </div>
+
+      <div class="tnc-row">
+        <input type="checkbox" id="tnc-check" onchange="onTncChange(this)">
+        <label for="tnc-check">I accept the <a href="#">Terms &amp; Conditions</a> and <a href="#">Privacy Policy</a> (version 2026-10-01). Required before any purchase.</label>
+      </div>
+
+      <div class="checkout-summary">
+        <div class="total" id="total-line">15,000 sats <span>Pro · 30 days · upgrade, remaining days carried over</span></div>
+        <button class="btn primary" id="buy-btn" disabled onclick="openInvoice()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z"/></svg>
+          Generate invoice
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- ADMIN -->
+  <!-- ============================================================ -->
+  <div class="panel" id="panel-admin">
+    <div class="section-head">
+      <div class="eyebrow">Unified admin</div>
+      <h1 class="heading">Admin console</h1>
+      <p class="sub">All users, all blobs, lifecycle and moderation. Gated by <span class="mono">users.role = admin</span> in formstr-backend.</p>
+    </div>
+    <div class="admin-kicker"><span class="dot"></span>Signed in as admin · npub1zx4…71qe</div>
+
+    <div class="grid cols-3 admin-stats">
+      <div class="card stat">
+        <div class="label">Total users</div>
+        <div class="value">1,284</div>
+        <div class="delta">+18 this week</div>
+      </div>
+      <div class="card stat">
+        <div class="label">Storage in use</div>
+        <div class="value">412 GB</div>
+        <div class="delta">across 38,201 blobs</div>
+      </div>
+      <div class="card stat">
+        <div class="label">Lifecycle attention</div>
+        <div class="value" style="color:var(--warn)">37</div>
+        <div class="delta">9 grace · 21 write-blocked · 7 read-blocked</div>
+      </div>
+    </div>
+
+    <div class="section-title">Users</div>
+    <div class="filter-row">
+      <input type="text" placeholder="Search by npub or hash…" oninput="filterUsers(this.value)">
+      <select onchange="filterStatus(this.value)">
+        <option value="">All statuses</option>
+        <option value="ACTIVE">Active</option>
+        <option value="GRACE">Grace</option>
+        <option value="WRITE_BLOCKED">Write blocked</option>
+        <option value="READ_BLOCKED">Read blocked</option>
+      </select>
+    </div>
+    <div class="card table-wrap">
+      <table>
+        <thead><tr><th>User</th><th>Plan</th><th>Used / allowance</th><th>Status</th><th>Expires</th><th></th></tr></thead>
+        <tbody id="user-rows">
+          <tr data-status="ACTIVE">
+            <td class="npub-chip">npub1a92…7fc3</td>
+            <td>Pro</td>
+            <td class="mono">1.1 GB / 2 GB</td>
+            <td><span class="pill good"><span class="dot"></span>Active</span></td>
+            <td>Oct 29, 2026</td>
+            <td><button class="btn ghost small" onclick="scrollToModeration()">Blobs</button></td>
+          </tr>
+          <tr data-status="GRACE">
+            <td class="npub-chip">npub1q8s…k2vr</td>
+            <td>Pro</td>
+            <td class="mono">2.3 GB / 2 GB</td>
+            <td><span class="pill warn"><span class="dot"></span>Grace</span></td>
+            <td>Oct 7, 2026</td>
+            <td><button class="btn ghost small" onclick="scrollToModeration()">Blobs</button></td>
+          </tr>
+          <tr data-status="WRITE_BLOCKED">
+            <td class="npub-chip">npub1f31…9ab2</td>
+            <td>Basic</td>
+            <td class="mono">498 MB / 500 MB</td>
+            <td><span class="pill bad"><span class="dot"></span>Write blocked</span></td>
+            <td>Expired Sep 20</td>
+            <td><button class="btn ghost small" onclick="scrollToModeration()">Blobs</button></td>
+          </tr>
+          <tr data-status="ACTIVE">
+            <td class="npub-chip">npub1dd0…e441</td>
+            <td>Basic</td>
+            <td class="mono">120 MB / 500 MB</td>
+            <td><span class="pill good"><span class="dot"></span>Active</span></td>
+            <td>Nov 2, 2026</td>
+            <td><button class="btn ghost small" onclick="scrollToModeration()">Blobs</button></td>
+          </tr>
+          <tr data-status="READ_BLOCKED">
+            <td class="npub-chip">npub1c77…02f9</td>
+            <td>Basic</td>
+            <td class="mono">500 MB / 500 MB</td>
+            <td><span class="pill bad"><span class="dot"></span>Read blocked</span></td>
+            <td>Purges Oct 4</td>
+            <td><button class="btn ghost small" onclick="scrollToModeration()">Blobs</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="moderation-panel" id="moderation-panel">
+      <div class="section-title">Moderation</div>
+      <div class="grid cols-2">
+        <div class="card" style="padding:18px;">
+          <div style="font-weight:700; font-size:0.92rem; margin-bottom:12px;">Flagged blob</div>
+          <div class="mod-hash">
+            <span>b7e4d2…a019 · demo-recording.mp4 · 1.9 GB</span>
+            <span class="npub-chip">owner npub1q8s…k2vr</span>
+          </div>
+          <div style="font-size:0.8rem; color:var(--muted); margin-top:8px;">Reported via BUD-09 report, flagged 2 hours ago.</div>
+          <button class="btn danger" style="margin-top:16px;" onclick="openModeration()">Delete &amp; notify owner</button>
+        </div>
+        <div class="card" style="padding:18px;">
+          <div style="font-weight:700; font-size:0.92rem; margin-bottom:12px;">Audit log</div>
+          <div class="audit-log" id="audit-log">
+            <div class="audit-item">
+              <div class="audit-ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14Z"/></svg></div>
+              <div><div class="audit-title">Deleted cover-leak.jpg — copyright claim</div><div class="audit-meta">npub1f31…9ab2 · by admin npub1zx4…71qe · Sep 30, 2026</div></div>
+            </div>
+            <div class="audit-item">
+              <div class="audit-ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14Z"/></svg></div>
+              <div><div class="audit-title">Deleted spam-upload.zip — T&amp;C violation</div><div class="audit-meta">npub1c77…02f9 · by admin npub1zx4…71qe · Sep 28, 2026</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="note">
+    <span>Design reference for BLOSSOM_PRODUCTIONISATION_PLAN.md — console, payment flow, admin + moderation</span>
+    <span>Theme matched to relay.formstr.app</span>
+  </footer>
+</div>
+
+<!-- Invoice modal -->
+<div class="modal-backdrop" id="invoice-modal">
+  <div class="modal">
+    <button class="close" onclick="closeInvoice()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <div id="invoice-pending">
+      <h3>Pay with Lightning</h3>
+      <div class="modal-sub" id="invoice-sub">15,000 sats · Pro plan upgrade, 30 days added</div>
+      <div class="qr-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z"/></svg>
+      </div>
+      <div class="invoice-string" id="invoice-string">lnbc150u1p3xyz9kpp5q7f2m8n4r1v6t9w0s3k5j8h2g4d6f8c0b2a4y6u8i0o2p4a6s8d0qdqqcqzzsxqyz5vqsp5...</div>
+      <div class="copy-row">
+        <button class="btn ghost small" style="flex:1;" onclick="copyInvoice()">Copy invoice</button>
+        <button class="btn ghost small" style="flex:1;">Open in wallet</button>
+      </div>
+      <div class="status-row" style="color:var(--muted);"><div class="spinner"></div>Waiting for payment…</div>
+    </div>
+    <div id="invoice-paid" style="display:none; text-align:center;">
+      <div class="paid-check"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg></div>
+      <h3>Payment received</h3>
+      <div class="modal-sub">Pro plan is active immediately. Your dashboard now shows 2 GB.</div>
+      <button class="btn primary" style="width:100%; justify-content:center; margin-top:18px;" onclick="closeInvoice(); switchTab('console');">Go to dashboard</button>
+    </div>
+  </div>
+</div>
+
+<!-- Moderation modal -->
+<div class="modal-backdrop" id="mod-modal">
+  <div class="modal mod-modal">
+    <button class="close" onclick="closeModeration()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <h3>Delete blob &amp; notify owner</h3>
+    <div class="modal-sub">This deletes bytes on every replica, removes the row, and writes a ModerationAction audit entry.</div>
+    <div class="mod-hash" style="margin-top:14px;">
+      <span>b7e4d2…a019 · demo-recording.mp4</span>
+    </div>
+    <div class="mod-field">
+      <label>Reason (required, sent to owner)</label>
+      <div class="reason-chips">
+        <button type="button" class="reason-chip active" onclick="pickReason(this,'Copyright claim')">Copyright claim</button>
+        <button type="button" class="reason-chip" onclick="pickReason(this,'T&amp;C violation')">T&amp;C violation</button>
+        <button type="button" class="reason-chip" onclick="pickReason(this,'Malware')">Malware</button>
+        <button type="button" class="reason-chip" onclick="pickReason(this,'Other')">Other</button>
+      </div>
+      <textarea id="mod-reason">Copyright claim received from rights holder — content removed under T&C section 4.2.</textarea>
+    </div>
+    <button class="btn danger" style="width:100%; justify-content:center; margin-top:16px;" onclick="confirmModeration()">Confirm deletion</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  function switchTab(name){
+    document.querySelectorAll('.tabbar button').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
+    document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.id==='panel-'+name));
+    window.scrollTo({top:0, behavior:'smooth'});
+  }
+  document.querySelectorAll('.tabbar button').forEach(b=>b.addEventListener('click', ()=>switchTab(b.dataset.tab)));
+
+  function switchSub(btn, name){
+    btn.parentElement.querySelectorAll('button').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.subpanel').forEach(p=>p.classList.toggle('active', p.id==='sub-'+name));
+  }
+
+  function showToast(msg){
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(window.__toastTimer);
+    window.__toastTimer = setTimeout(()=>t.classList.remove('show'), 2600);
+  }
+
+  function deleteBlob(btn){
+    const row = btn.closest('tr');
+    row.style.transition = 'opacity .2s ease';
+    row.style.opacity = '0';
+    setTimeout(()=>row.remove(), 200);
+    showToast('Blob deleted — allowance freed up');
+  }
+
+  // ---- Payment flow ----
+  function selectPlan(card){
+    document.querySelectorAll('.plan-option').forEach(c=>c.classList.remove('selected'));
+    card.classList.add('selected');
+    const price = card.dataset.price, plan = card.dataset.plan;
+    document.getElementById('total-line').innerHTML =
+      price + ' sats <span>' + (plan==='pro' ? 'Pro' : 'Basic') + ' · 30 days · ' + (plan==='pro' ? 'upgrade, remaining days carried over' : 'renews current plan') + '</span>';
+    document.getElementById('mode-line').innerHTML =
+      'Mode: <strong style="color:var(--ink)">' + (plan==='pro' ? 'Upgrade' : 'Extend') + '</strong> ' + (plan==='pro' ? '(Basic → Pro, immediate)' : '(same tier, adds 30 days)');
+    document.getElementById('invoice-sub').textContent = price + ' sats · ' + (plan==='pro' ? 'Pro plan upgrade' : 'Basic plan renewal') + ', 30 days added';
+  }
+
+  function onTncChange(cb){
+    document.getElementById('buy-btn').disabled = !cb.checked;
+    const s2 = document.getElementById('step-2'), s3 = document.getElementById('step-3');
+    if(cb.checked){
+      s2.classList.remove('current'); s2.classList.add('done'); s2.querySelector('.num').textContent='✓';
+      s3.classList.add('current');
+    } else {
+      s2.classList.add('current'); s2.classList.remove('done'); s2.querySelector('.num').textContent='2';
+      s3.classList.remove('current');
+    }
+  }
+
+  function openInvoice(){
+    document.getElementById('invoice-modal').classList.add('open');
+    document.getElementById('invoice-pending').style.display='block';
+    document.getElementById('invoice-paid').style.display='none';
+    clearTimeout(window.__payTimer);
+    window.__payTimer = setTimeout(()=>{
+      document.getElementById('invoice-pending').style.display='none';
+      document.getElementById('invoice-paid').style.display='block';
+      const s3 = document.getElementById('step-3');
+      s3.classList.remove('current'); s3.classList.add('done'); s3.querySelector('.num').textContent='✓';
+    }, 3200);
+  }
+  function closeInvoice(){
+    document.getElementById('invoice-modal').classList.remove('open');
+    clearTimeout(window.__payTimer);
+  }
+  function copyInvoice(){
+    const text = document.getElementById('invoice-string').textContent;
+    (navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(text) : Promise.reject())
+      .then(()=>showToast('Invoice copied'))
+      .catch(()=>{
+        const r = document.createRange(); r.selectNode(document.getElementById('invoice-string'));
+        window.getSelection().removeAllRanges(); window.getSelection().addRange(r);
+        showToast('Invoice selected — copy with your device shortcut');
+      });
+  }
+
+  // ---- Admin ----
+  function filterUsers(q){
+    q = q.trim().toLowerCase();
+    document.querySelectorAll('#user-rows tr').forEach(r=>{
+      r.style.display = r.innerText.toLowerCase().includes(q) ? '' : 'none';
+    });
+  }
+  function filterStatus(s){
+    document.querySelectorAll('#user-rows tr').forEach(r=>{
+      r.style.display = (!s || r.dataset.status===s) ? '' : 'none';
+    });
+  }
+  function scrollToModeration(){
+    document.getElementById('moderation-panel').scrollIntoView({behavior:'smooth', block:'start'});
+  }
+
+  function pickReason(btn, label){
+    btn.parentElement.querySelectorAll('.reason-chip').forEach(c=>c.classList.remove('active'));
+    btn.classList.add('active');
+    const map = {
+      'Copyright claim':'Copyright claim received from rights holder — content removed under T&C section 4.2.',
+      'T&amp;C violation':'Content violates the Terms & Conditions and has been removed.',
+      'Malware':'File flagged as malicious by automated scanning and removed for user safety.',
+      'Other':'Removed by admin review.'
+    };
+    document.getElementById('mod-reason').value = map[label] || map['Other'];
+  }
+
+  function openModeration(){ document.getElementById('mod-modal').classList.add('open'); }
+  function closeModeration(){ document.getElementById('mod-modal').classList.remove('open'); }
+  function confirmModeration(){
+    const reason = document.getElementById('mod-reason').value.trim() || 'Removed by admin review.';
+    closeModeration();
+    const log = document.getElementById('audit-log');
+    const item = document.createElement('div');
+    item.className = 'audit-item audit-new';
+    item.innerHTML = '<div class="audit-ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14Z"/></svg></div>'
+      + '<div><div class="audit-title">Deleted demo-recording.mp4 — ' + reason.split(' — ')[0].split('.')[0] + '</div>'
+      + '<div class="audit-meta">npub1q8s…k2vr · by admin npub1zx4…71qe · just now</div></div>';
+    log.prepend(item);
+    document.querySelector('.moderation-panel .card').style.opacity = '0.5';
+    showToast('Blob deleted on all replicas — owner notified via DM + email');
+  }
+
+  // close modals on backdrop click
+  document.querySelectorAll('.modal-backdrop').forEach(bd=>{
+    bd.addEventListener('click', e=>{ if(e.target===bd) bd.classList.remove('open'); });
+  });
+</script>
