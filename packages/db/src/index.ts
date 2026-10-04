@@ -1,9 +1,12 @@
 import express from "express";
 import { prisma } from "./prisma.js";
-import { PLAN_CONFIG } from "./plan.js";
 import { blobToJson, userToJson } from "./serialize.js";
 import { membersRouter } from "./routes/members.js";
 import { storagesRouter } from "./routes/storages.js";
+import { usersRouter } from "./routes/users.js";
+import { notificationsRouter } from "./routes/notifications.js";
+import { moderationRouter } from "./routes/moderation.js";
+import { adminRouter } from "./routes/admin.js";
 
 const app = express();
 app.use(express.json());
@@ -19,21 +22,19 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-app.get("/plans", (_req, res) => {
-  res.json(PLAN_CONFIG);
-});
-
 app.use("/members", membersRouter);
 app.use("/storages", storagesRouter);
 
-app.get("/users/:npub", async (req, res) => {
-  const user = await prisma.user.findUnique({ where: { npub: req.params.npub! } });
-  if (!user) {
-    return res.status(404).json({ error: "not_found" });
-  }
-  res.json(userToJson(user));
-});
+// Entitlement/account/admin routes. See
+// docs/BLOSSOM_PRODUCTIONISATION_PLAN.md and src/routes/users.ts.
+app.use("/users", usersRouter);
+app.use("/notifications", notificationsRouter);
+app.use("/moderation", moderationRouter);
+app.use("/", adminRouter);
 
+// Kept for compatibility with the control-plane and blossom proxy, which
+// upsert a user row on first contact. The extended serialization includes the
+// entitlement fields; plan writes go through /users/:npub/entitlement only.
 app.put("/users/:npub", async (req, res) => {
   const npub = req.params.npub!;
   const user = await prisma.user.upsert({
@@ -68,7 +69,15 @@ app.post("/blobs", async (req, res) => {
   try {
     const sizeBig = BigInt(size);
     const { blob, user } = await prisma.$transaction(async (tx) => {
-      await tx.user.findUniqueOrThrow({ where: { npub } });
+      const current = await tx.user.findUniqueOrThrow({ where: { npub } });
+      // Guard the allowance inside the same transaction as the increment so
+      // two concurrent uploads cannot overshoot storageBytes.
+      if (
+        current.storageBytes !== null &&
+        current.usedStorage + sizeBig > current.storageBytes
+      ) {
+        throw new QuotaExceededError();
+      }
       const blob = await tx.blob.create({
         data: { hash, npub, size: sizeBig, replicas },
       });
@@ -80,6 +89,9 @@ app.post("/blobs", async (req, res) => {
     });
     res.status(201).json({ ...blobToJson(blob), usedStorage: user.usedStorage.toString() });
   } catch (error) {
+    if (error instanceof QuotaExceededError) {
+      return res.status(409).json({ error: "quota_exceeded" });
+    }
     const code = prismaErrorCode(error);
     if (code === "P2025") {
       return res.status(404).json({ error: "user_not_found" });
@@ -91,6 +103,8 @@ app.post("/blobs", async (req, res) => {
     res.status(500).json({ error: "internal_error" });
   }
 });
+
+class QuotaExceededError extends Error {}
 
 app.delete("/blobs/:hash", async (req, res) => {
   const hash = req.params.hash!;

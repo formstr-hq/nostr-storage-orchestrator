@@ -7,7 +7,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "pnpm run build && NODE_ENV=test node --test dist/servers.test.js"
+    "test": "pnpm run build && NODE_ENV=test node --test dist/*.test.js"
   },
   "keywords": [],
   "author": "",
@@ -27,6 +27,9 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "nostr-tools": "^2.23.5"
+    "nostr-tools": "^2.23.5",
+    "@orchestrator/lifecycle": "workspace:*",
+    "@orchestrator/notifier": "workspace:*",
+    "@orchestrator/nip98": "workspace:*"
   }
 }

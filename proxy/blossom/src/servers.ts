@@ -9,20 +9,12 @@ config({ path: path.resolve(__dirname, "../../../.env") });
 
 export type ServerCandidate = { id: string; url: string };
 
-const FALLBACK_SERVERS = (process.env.BLOSSOM_SERVERS ?? "")
-  .split(",")
-  .map((url) => url.trim().replace(/\/+$/, ""))
-  .filter(Boolean);
-const POLL_MS = positiveNumber(process.env.STORAGE_REGISTRY_POLL_MS, 15_000);
-// How long a pk-seeded placement stays fixed before it rotates. Defaults to
-// one hour; the same bucket is used by every upload within the window.
-const TIME_SLOT_MS = positiveNumber(process.env.BLOSSOM_PLACEMENT_SLOT_MS, 3_600_000);
+// How often the active-storage roster is re-read from db-api (and how long a
+// pk-seeded placement stays fixed before it rotates). Constants, not config:
+// liveness latency is not a per-deployment concern.
+const POLL_MS = 15_000;
+const TIME_SLOT_MS = 3_600_000;
 const RAW_URL = /^(?:https?|wss?):\/\//i;
-
-function positiveNumber(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 function hostForUrl(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -30,20 +22,12 @@ function hostForUrl(host: string): string {
 
 export class ServerRegistry {
   private byId = new Map<string, string>();
-  private warnedFallback = false;
 
-  constructor(
-    private readonly db: Pick<DbClient, "listActiveStorages">,
-    private readonly fallbackUrls = FALLBACK_SERVERS,
-  ) {}
+  constructor(private readonly db: Pick<DbClient, "listActiveStorages">) {}
 
   async refresh(): Promise<void> {
     try {
       const active = await this.db.listActiveStorages();
-      if (active.length === 0) {
-        this.useFallback();
-        return;
-      }
       this.byId = new Map(active.map((storage) => [
         storage.npub,
         `http://${hostForUrl(storage.tunnelIp)}:${storage.blossomPort}`,
@@ -57,16 +41,20 @@ export class ServerRegistry {
     return [...this.byId].map(([id, url]) => ({ id, url }));
   }
 
-  resolve(id: string): string | undefined {
-    return RAW_URL.test(id) ? id : this.byId.get(id);
+  /**
+   * Candidates, re-reading db-api first if the roster is empty. A provider
+   * that just came active is served on the next upload rather than after the
+   * poll interval; a genuinely empty roster still costs only one read.
+   */
+  async freshCandidates(): Promise<ServerCandidate[]> {
+    if (this.byId.size === 0) {
+      await this.refresh();
+    }
+    return this.candidates();
   }
 
-  private useFallback(): void {
-    this.byId = new Map(this.fallbackUrls.map((url) => [url, url]));
-    if (this.fallbackUrls.length > 0 && process.env.NODE_ENV === "production" && !this.warnedFallback) {
-      this.warnedFallback = true;
-      console.warn("Using BLOSSOM_SERVERS fallback because the DB active storage list is empty");
-    }
+  resolve(id: string): string | undefined {
+    return RAW_URL.test(id) ? id : this.byId.get(id);
   }
 }
 
@@ -119,10 +107,10 @@ export async function uploadBlob(
   hash: string,
   authHeader: string,
   npub: string,
-  registry: Pick<ServerRegistry, "candidates"> = serverRegistry,
+  registry: Pick<ServerRegistry, "freshCandidates"> = serverRegistry,
   now = Date.now(),
 ) {
-  const remaining = registry.candidates();
+  const remaining = await registry.freshCandidates();
   if (remaining.length === 0) {
     throw new Error("No storage providers available");
   }

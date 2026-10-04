@@ -16,7 +16,9 @@
     "migrate:deploy": "prisma migrate deploy",
     "studio": "prisma studio",
     "start": "node dist/src/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "test": "tsc && node --test dist/src/*.test.js",
+    "register:service": "tsx src/scripts/registerService.ts"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
@@ -30,6 +32,8 @@
     "@prisma/client": "^7.8.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "pg": "^8.21.0"
+    "pg": "^8.21.0",
+    "@orchestrator/nip98": "workspace:*",
+    "nostr-tools": "^2.23.5"
   }
 }

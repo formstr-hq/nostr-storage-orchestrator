@@ -1,0 +1,197 @@
+import { Router, type Router as ExpressRouter } from "express";
+import { prisma } from "../prisma.js";
+import { requireInternalRole } from "../internal-auth.js";
+import {
+  EntitlementError,
+  computeEntitlement,
+  parseEntitlementRequest,
+} from "../entitlement.js";
+import { blobToJson, isUserStatus, notificationToJson, userToJson } from "../serialize.js";
+import { paginated, parsePagination, queryString } from "../pagination.js";
+
+export const usersRouter: ExpressRouter = Router();
+
+// Users due for lifecycle/notification evaluation. Registered before
+// /:npub so "attention" is not captured as an npub.
+usersRouter.get("/attention", requireInternalRole, async (req, res) => {
+  const pagination = parsePagination(req.query as Record<string, unknown>);
+  const where = {
+    planExpiresAt: { not: null },
+    status: { not: "CLOSED" as never },
+  };
+  const [items, total] = await Promise.all([
+    prisma.user.findMany({
+      where,
+      orderBy: { planExpiresAt: "asc" },
+      skip: pagination.skip,
+      take: pagination.take,
+    }),
+    prisma.user.count({ where }),
+  ]);
+  res.json(paginated(items.map(userToJson), total, pagination));
+});
+
+// Extended user serialization (no auth — same exposure as before; the proxy
+// authenticates the account owner before exposing it to the console).
+usersRouter.get("/:npub", async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { npub: req.params.npub! } });
+  if (!user) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  res.json(userToJson(user));
+});
+
+// Paginated list with optional status/plan/query filters.
+usersRouter.get("/", requireInternalRole, async (req, res) => {
+  const status = queryString(req.query.status);
+  const plan = queryString(req.query.plan);
+  const query = queryString(req.query.query);
+  const pagination = parsePagination(req.query as Record<string, unknown>);
+
+  const where = {
+    ...(status ? { status: status as never } : {}),
+    ...(plan ? { plan } : {}),
+    ...(query
+      ? { npub: { contains: query, mode: "insensitive" as const } }
+      : {}),
+  };
+
+  const [items, total] = await Promise.all([
+    prisma.user.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: pagination.skip,
+      take: pagination.take,
+    }),
+    prisma.user.count({ where }),
+  ]);
+
+  res.json(paginated(items.map(userToJson), total, pagination));
+});
+
+/**
+ * Atomic entitlement assign/extend/upgrade. See
+ * docs/BLOSSOM_PRODUCTIONISATION_PLAN.md — the transaction is the single
+ * write path for plan state; formstr-backend pushes paid purchases here.
+ */
+usersRouter.post("/:npub/entitlement", requireInternalRole, async (req, res) => {
+  const npub = String(req.params.npub);
+  let request;
+  try {
+    request = parseEntitlementRequest(req.body);
+  } catch (error) {
+    if (error instanceof EntitlementError) {
+      return res.status(error.status).json({ error: error.code });
+    }
+    throw error;
+  }
+
+  try {
+    const user = await prisma.$transaction(async (tx) => {
+      // A purchase can arrive before the user has ever contacted the proxy
+      // (db-api only learns about users from proxy upserts), so the
+      // entitlement write creates the row when missing.
+      const current = await tx.user.upsert({
+        where: { npub },
+        update: {},
+        create: { npub },
+      });
+      const effect = computeEntitlement(current, request);
+
+      return tx.user.update({
+        where: { npub },
+        data: {
+          plan: effect.plan,
+          planExpiresAt: effect.planExpiresAt,
+          storageBytes: effect.storageBytes,
+          status: effect.status,
+          statusChangedAt: new Date(),
+          termsVersion: effect.termsVersion,
+          termsAcceptedAt: effect.termsAcceptedAt,
+        },
+      });
+    });
+    res.json(userToJson(user));
+  } catch (error) {
+    if (error instanceof EntitlementError) {
+      return res.status(error.status).json({ error: error.code });
+    }
+    console.error(error);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// Notifier/admin lifecycle mirror.
+usersRouter.patch("/:npub/status", requireInternalRole, async (req, res) => {
+  const npub = String(req.params.npub);
+  const { status } = req.body as { status?: string };
+  if (!isUserStatus(status)) {
+    return res.status(400).json({ error: "invalid_status" });
+  }
+  try {
+    const user = await prisma.user.update({
+      where: { npub },
+      data: { status, statusChangedAt: new Date() },
+    });
+    res.json(userToJson(user));
+  } catch (error) {
+    if ((error as { code?: string }).code === "P2025") {
+      return res.status(404).json({ error: "not_found" });
+    }
+    console.error(error);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+usersRouter.get("/:npub/blobs", async (req, res) => {
+  const npub = req.params.npub!;
+  const pagination = parsePagination(req.query as Record<string, unknown>);
+  const [items, total] = await Promise.all([
+    prisma.blob.findMany({
+      where: { npub },
+      orderBy: { createdAt: "desc" },
+      skip: pagination.skip,
+      take: pagination.take,
+    }),
+    prisma.blob.count({ where: { npub } }),
+  ]);
+  res.json(paginated(items.map(blobToJson), total, pagination));
+});
+
+// Transactional bulk delete (purge): returns deleted rows, or the deletion
+// is rolled back entirely.
+usersRouter.delete("/:npub/blobs", requireInternalRole, async (req, res) => {
+  const npub = String(req.params.npub);
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const blobs = await tx.blob.findMany({ where: { npub } });
+      if (blobs.length > 0) {
+        await tx.blob.deleteMany({ where: { npub } });
+        await tx.user.update({
+          where: { npub },
+          data: { usedStorage: 0n },
+        });
+      }
+      return blobs;
+    });
+    res.json({ deleted: result.length, blobs: result.map(blobToJson) });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+usersRouter.get("/:npub/notifications", async (req, res) => {
+  const npub = req.params.npub!;
+  const pagination = parsePagination(req.query as Record<string, unknown>);
+  const [items, total] = await Promise.all([
+    prisma.notificationLog.findMany({
+      where: { npub },
+      orderBy: { sentAt: "desc" },
+      skip: pagination.skip,
+      take: pagination.take,
+    }),
+    prisma.notificationLog.count({ where: { npub } }),
+  ]);
+  res.json(paginated(items.map(notificationToJson), total, pagination));
+});

@@ -26,6 +26,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@orchestrator/nip98':
+        specifier: workspace:*
+        version: link:../nip98
       '@prisma/adapter-pg':
         specifier: ^7.8.0
         version: 7.8.0
@@ -38,6 +41,9 @@ importers:
       express:
         specifier: ^5.2.1
         version: 5.2.1
+      nostr-tools:
+        specifier: ^2.23.5
+        version: 2.23.5(typescript@6.0.3)
       pg:
         specifier: ^8.21.0
         version: 8.21.0
@@ -59,6 +65,10 @@ importers:
         version: 6.0.3
 
   packages/db-client:
+    dependencies:
+      '@orchestrator/nip98':
+        specifier: workspace:*
+        version: link:../nip98
     devDependencies:
       '@types/node':
         specifier: ^26.1.1
@@ -67,8 +77,68 @@ importers:
         specifier: ^6.0.3
         version: 6.0.3
 
+  packages/lifecycle:
+    dependencies:
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
+  packages/nip98:
+    dependencies:
+      nostr-tools:
+        specifier: ^2.23.5
+        version: 2.23.5(typescript@6.0.3)
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
+  packages/notifier:
+    dependencies:
+      '@orchestrator/db-client':
+        specifier: workspace:*
+        version: link:../db-client
+      '@orchestrator/lifecycle':
+        specifier: workspace:*
+        version: link:../lifecycle
+      '@orchestrator/nip98':
+        specifier: workspace:*
+        version: link:../nip98
+      axios:
+        specifier: ^1.16.1
+        version: 1.18.0
+      dotenv:
+        specifier: ^17.4.2
+        version: 17.4.2
+      nostr-tools:
+        specifier: ^2.23.5
+        version: 2.23.5(typescript@6.0.3)
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
   packages/smoke-test:
     dependencies:
+      '@orchestrator/nip98':
+        specifier: workspace:*
+        version: link:../nip98
       nostr-tools:
         specifier: ^2.23.5
         version: 2.23.5(typescript@6.0.3)
@@ -88,6 +158,15 @@ importers:
       '@orchestrator/db-client':
         specifier: workspace:*
         version: link:../../packages/db-client
+      '@orchestrator/lifecycle':
+        specifier: workspace:*
+        version: link:../../packages/lifecycle
+      '@orchestrator/nip98':
+        specifier: workspace:*
+        version: link:../../packages/nip98
+      '@orchestrator/notifier':
+        specifier: workspace:*
+        version: link:../../packages/notifier
       '@types/cors':
         specifier: ^2.8.19
         version: 2.8.19
@@ -1408,6 +1487,11 @@ packages:
     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
     engines: {node: '>=0.4'}
 
+  yaml@2.9.1:
+    resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
   yn@3.1.1:
     resolution: {integrity: sha512-Ux4ygGWsu2c7isFWe8Yu1YluJmqVhxqK2cLXNQA5AcC3QfbGNpM7fu0Y8b/z16pXLnFxZYvWhd3fhBY9DLmC6Q==}
     engines: {node: '>=6'}
@@ -1789,7 +1873,7 @@ snapshots:
   '@types/body-parser@1.19.6':
     dependencies:
       '@types/connect': 3.4.38
-      '@types/node': 25.9.3
+      '@types/node': 26.1.1
 
   '@types/chrome@0.1.43':
     dependencies:
@@ -1798,15 +1882,15 @@ snapshots:
 
   '@types/connect@3.4.38':
     dependencies:
-      '@types/node': 25.9.3
+      '@types/node': 26.1.1
 
   '@types/cors@2.8.19':
     dependencies:
-      '@types/node': 25.9.3
+      '@types/node': 26.1.1
 
   '@types/express-serve-static-core@5.1.1':
     dependencies:
-      '@types/node': 25.9.3
+      '@types/node': 26.1.1
       '@types/qs': 6.15.1
       '@types/range-parser': 1.2.7
       '@types/send': 1.2.1
@@ -1837,7 +1921,7 @@ snapshots:
 
   '@types/pg@8.20.0':
     dependencies:
-      '@types/node': 25.9.3
+      '@types/node': 26.1.1
       pg-protocol: 1.14.0
       pg-types: 2.2.0
 
@@ -1851,12 +1935,12 @@ snapshots:
 
   '@types/send@1.2.1':
     dependencies:
-      '@types/node': 25.9.3
+      '@types/node': 26.1.1
 
   '@types/serve-static@2.2.0':
     dependencies:
       '@types/http-errors': 2.0.5
-      '@types/node': 25.9.3
+      '@types/node': 26.1.1
 
   accepts@2.0.0:
     dependencies:
@@ -2601,6 +2685,8 @@ snapshots:
   wrappy@1.0.2: {}
 
   xtend@4.0.2: {}
+
+  yaml@2.9.1: {}
 
   yn@3.1.1: {}
 

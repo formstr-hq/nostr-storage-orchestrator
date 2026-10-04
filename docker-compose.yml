@@ -177,12 +177,42 @@ services:
       # instead (the code's default is localhost:$DB_API_PORT, which is only
       # right for local dev and docker-compose.dev.yml).
       DB_API_URL: http://db:${DB_API_PORT:-4000}
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
     depends_on:
       db:
         condition: service_healthy
       nvpn:
         condition: service_healthy
         restart: true
+    restart: unless-stopped
+
+  # Lifecycle scheduler: mirrors User.status from derived dates, sends
+  # expiry/quota/moderation notifications over NIP-17 DM + email, and (when
+  # purgeEnabled) calls the proxy's internal purge endpoint.
+  notifier:
+    build:
+      context: .
+      dockerfile: ./packages/notifier/Dockerfile
+    container_name: nso_notifier
+    # Shares the nvpn sidecar namespace so it can call the proxy's internal
+    # purge endpoint on localhost:$BLOSSOM_PORT. db-api is still reached at
+    # db:$DB_API_PORT via the sidecar's bridge attachment.
+    network_mode: "service:nvpn"
+    env_file:
+      - ./.env
+    environment:
+      DB_API_URL: http://db:${DB_API_PORT:-4000}
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+      BLOSSOM_INTERNAL_URL: http://localhost:${BLOSSOM_PORT:-3001}
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      blossom:
+        condition: service_started
     restart: unless-stopped
 
   # Mesh-PG data plane: pgwire server for structured storage. Writes land in

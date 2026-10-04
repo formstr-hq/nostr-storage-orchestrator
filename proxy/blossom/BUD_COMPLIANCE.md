@@ -9,11 +9,13 @@ Files: `src/index.ts`, `src/servers.ts`, `src/nostr.ts`.
 | Endpoint | Behavior |
 |---|---|
 | `PUT /upload` | Accepts raw bytes, hashes them server-side, returns a [Blob Descriptor](https://github.com/hzrd149/blossom/blob/master/buds/02.md#blob-descriptor) (`url`, `sha256`, `size`, `type`, `uploaded`). `201` when newly stored, `200` on dedup. Validates a client-supplied `X-SHA-256` header against the computed hash and responds `409` on mismatch. |
-| `HEAD /upload` | Pre-flight check per BUD-06: reads `X-SHA-256`/`X-Content-Length`/`X-Content-Type`, validates the auth token and plan limits, responds with a status code only (no body). |
+| `HEAD /upload` | Pre-flight check per BUD-06: reads `X-SHA-256`/`X-Content-Length`/`X-Content-Type`, validates the BUD-11 token, the derived lifecycle state, the entitlement allowance, and the operator `MAX_UPLOAD_BYTES` cap, responds with a status code only (no body). |
 | `GET /<sha256>` / `GET /<sha256>.ext` | Returns blob bytes. Optional extension is accepted and ignored for lookup (`HASH_PATTERN` strips it). |
 | `HEAD /<sha256>` | Same checks as GET, no body. |
 | `DELETE /<sha256>` | Removes the blob from the DB record **and** from its backing replicas (`servers.ts:deleteBlob`) — the previous implementation only removed the DB row and silently leaked the blob on replica storage. |
-| `GET /storage` | Non-standard, kept as an app-specific account/usage endpoint (not part of the BUDs), gated by the same BUD-11 token check as every other route. |
+| `GET /storage` | Non-standard, kept as an app-specific account/usage endpoint (not part of the BUDs), gated by the same BUD-11 token check as every other route. Now returns the derived lifecycle `status`, plan, allowance and `purgeAt`. |
+| `GET /account`, `/account/blobs`, `/account/notifications` | Non-standard account endpoints for the console, gated by BUD-11 (`get`/`list`). |
+| `GET/HEAD /<sha256>` | Reads are public by hash but gated by the *owner's* derived state: `READ_BLOCKED`/`CLOSED`/`UNPAID` owners' blobs return 403. |
 | `GET /list/<pubkey>` | Not implemented. BUD-12 marks this endpoint optional and explicitly "unrecommended"; there is no per-npub blob listing in the DB API to back it, so it's left out rather than added speculatively. |
 
 All Blossom routes are now served from the domain root, so a client speaking

@@ -25,7 +25,6 @@ MESH_TIMEOUT="${MESH_TIMEOUT:-180}"
 log() { echo "[mesh-e2e] $*"; }
 
 root_compose() { docker compose -f docker-compose.yml "$@"; }
-mesh_compose() { docker compose -f docker-compose.yml -f compose.mesh-e2e.yml "$@"; }
 client_compose() { (cd storage-client && docker compose "$@"); }
 
 cleanup() {
@@ -106,9 +105,17 @@ if [ -z "${client_ip}" ]; then
 fi
 log "mesh established; client tunnel IP is ${client_ip}"
 
-log "step 6/7: pointing the host's proxy at the client's blossom backend over the mesh"
-export MESH_BLOSSOM_SERVERS="http://${client_ip}:3000"
-mesh_compose up -d --force-recreate blossom
+log "step 6/7: waiting for the control plane to mark the storage active"
+# The DB is the only provider source: the control plane probes the storage
+# through the mesh and only then is it served from /storages/active, which
+# the proxy polls. Wait for the row rather than injecting a URL.
+for _ in $(seq 1 "${MESH_TIMEOUT}"); do
+  if curl -fsS "http://127.0.0.1:${DB_API_PORT:-4000}/storages/active" 2>/dev/null \
+      | jq -e 'length > 0' >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
 
 # The proxy binds inside the sidecar's namespace; the sidecar publishes it.
 waited=0

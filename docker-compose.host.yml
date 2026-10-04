@@ -48,6 +48,28 @@ services:
     network_mode: host
     env_file:
       - ./.env
+    environment:
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  notifier:
+    build:
+      context: .
+      dockerfile: ./packages/notifier/Dockerfile
+    container_name: nso_notifier
+    network_mode: host
+    env_file:
+      - ./.env
+    environment:
+      DB_API_URL: http://localhost:${DB_API_PORT:-4000}
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+      BLOSSOM_INTERNAL_URL: http://localhost:${BLOSSOM_PORT:-3001}
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
     depends_on:
       db:
         condition: service_healthy

@@ -61,12 +61,6 @@ pub struct StorageDb {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanConfig {
-    pub replica_count: u64,
-}
-
 impl DbClient {
     pub fn new(base: String) -> Self {
         Self {
@@ -153,10 +147,6 @@ impl DbClient {
     pub async fn remove_storage(&self, npub: &str) -> Result<StorageDb, ApiError> {
         self.send_json(Method::DELETE, &format!("/storages/{npub}"), None)
             .await
-    }
-
-    pub async fn plans(&self) -> Result<std::collections::HashMap<String, PlanConfig>, ApiError> {
-        self.send_json(Method::GET, "/plans", None).await
     }
 
     pub async fn backfill_replicas(&self) -> Result<(), ApiError> {

@@ -89,15 +89,12 @@ pub async fn roster(
     storage_counts.reported_total_bytes = total_bytes.to_string();
     storage_counts.reported_free_bytes = free_bytes.to_string();
 
-    let replica_count_required = state
-        .db
-        .plans()
-        .await?
-        .into_values()
-        .map(|plan| plan.replica_count)
-        .max()
-        .unwrap_or(0);
-    let replica_shortfall = storage_counts.active < replica_count_required;
+    // Replica count is no longer a plan property (plans sell total storage
+    // allowance only), so the roster cannot derive a target from the plan
+    // catalog. Reported as zero until an operator-owned placement target is
+    // introduced.
+    let replica_count_required = 0_u64;
+    let replica_shortfall = false;
     Ok(Json(RosterResponse {
         members: member_counts,
         storages: storage_counts,

@@ -6,8 +6,9 @@
 # to carry a value between them.
 #
 # It brings up the proxy stack, prints an invite for you to send, waits for
-# the client's npub, approves it, waits for the mesh to come up, then points
-# BLOSSOM_SERVERS at the peer's tunnel IP and restarts only the proxy service.
+# the client's npub, approves it, and waits for the mesh to come up. Storage
+# rows become active through the control plane and are discovered by the
+# proxy from db-api; no URL is written to .env.
 #
 # Safe to re-run: an already-initialized sidecar keeps its identity, so
 # existing approvals and invites survive.
@@ -130,19 +131,9 @@ if [ -z "${peer_ip}" ]; then
 fi
 log "mesh established; client tunnel IP is ${peer_ip}"
 
-# ---- step 6: point the proxies at the peer --------------------------------
+# ---- step 6: wait for the proxy to serve -----------------------------------
 
-log "step 6/6: pointing BLOSSOM_SERVERS at ${peer_ip}"
-cp .env .env.bak
-sed -i \
-  -e "s|^BLOSSOM_SERVERS=.*|BLOSSOM_SERVERS=http://${peer_ip}:3000|" \
-  .env
-log "updated .env (previous version saved as .env.bak):"
-grep -E '^BLOSSOM_SERVERS=' .env >&2
-
-# Only the application service — recreating the sidecar would tear down the
-# network namespace it shares with it.
-docker compose up -d --force-recreate blossom
+log "step 6/6: mesh established with ${peer_ip}; waiting for the proxy to serve"
 
 port="$(grep -E '^BLOSSOM_PORT=' .env | cut -d= -f2)"
 if [ -n "${port}" ]; then
@@ -178,7 +169,7 @@ cat >&2 <<EOF
   Host is live.
 
     blossom proxy   http://localhost:$(grep -E '^BLOSSOM_PORT=' .env | cut -d= -f2)
-    backend peer    ${peer_ip} (over the NVPN tunnel)
+    backend peer    ${peer_ip} (registered in db-api via the control plane)
 
   Verify the full protocol path end to end:
 

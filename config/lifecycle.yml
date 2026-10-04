@@ -1,0 +1,24 @@
+# Blossom lifecycle + notification timing. Mounted read-only into the proxy
+# and the notifier (compose). Parsed and validated at boot: a malformed file
+# fails the service rather than silently changing enforcement.
+#
+# State progression after planExpiresAt:
+#   ACTIVE -> GRACE (graceDays) -> WRITE_BLOCKED (writeBlockedDays)
+#          -> READ_BLOCKED (readBlockedDays) -> CLOSED/purged
+#
+# purgeEnabled gates the only destructive operation; keep false until the
+# operator deliberately opts in.
+
+graceDays: 7
+writeBlockedDays: 30
+readBlockedDays: 30
+purgeEnabled: false
+
+# T&C version recorded with entitlements; bump when the legal copy changes.
+termsVersion: "2026-10-01"
+
+notify:
+  # Days before planExpiresAt to warn, largest first.
+  expiryWarningDays: [14, 3, 1]
+  # Percentage of storageBytes at which to warn.
+  quotaWarningPercent: [80, 100]

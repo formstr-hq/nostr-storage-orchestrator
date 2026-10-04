@@ -12,10 +12,23 @@ datasource db {
   provider = "postgresql"
 }
 
+// Legacy plan enum. No longer referenced by any model — `User.plan` is now a
+// nullable text column holding plan ids owned by formstr-backend. Kept in the
+// schema for now so the additive entitlements migration does not drop the
+// Postgres type; a follow-up cleanup migration may remove it.
 enum Plan {
   FREE
   BASIC
   PRO
+}
+
+enum UserStatus {
+  UNPAID
+  ACTIVE
+  GRACE
+  WRITE_BLOCKED
+  READ_BLOCKED
+  CLOSED
 }
 
 enum MemberRole {
@@ -44,12 +57,56 @@ model Blob {
 }
 
 model User {
-  npub        String   @id
-  plan        Plan     @default(FREE)
-  usedStorage BigInt   @default(0)
-  createdAt   DateTime @default(now())
+  npub            String     @id
+  /**
+   * Internal role. "user" (default) is a blob owner; "service" and "admin"
+   * may call the internal entitlement/admin endpoints. Registered out of
+   * band with scripts/registerService.ts; never set from a request body.
+   */
+  role            String     @default("user")
+  plan            String?
+  planExpiresAt   DateTime?
+  storageBytes    BigInt?
+  status          UserStatus @default(UNPAID)
+  statusChangedAt DateTime?
+  termsVersion    String?
+  termsAcceptedAt DateTime?
+  usedStorage     BigInt     @default(0)
+  createdAt       DateTime   @default(now())
 
   blobs Blob[]
+
+  @@index([status])
+  @@index([planExpiresAt])
+  @@index([role])
+}
+
+// Dedupe log for expiry/quota/moderation/purchase notifications. Both channels
+// are attempted independently; the unique key stops repeat sends for the same
+// (npub, kind, ref, channel).
+model NotificationLog {
+  id      String   @id @default(cuid())
+  npub    String
+  kind    String
+  ref     String?
+  channel String
+  sentAt  DateTime @default(now())
+
+  @@unique([npub, kind, ref, channel])
+  @@index([npub, sentAt])
+}
+
+// Admin moderation audit. Money-related records never live here.
+model ModerationAction {
+  id        String   @id @default(cuid())
+  hash      String
+  npub      String
+  adminNpub String
+  reason    String
+  createdAt DateTime @default(now())
+
+  @@index([hash])
+  @@index([npub])
 }
 
 model Member {
