@@ -16,14 +16,8 @@ const config = parseLifecycleConfig({
 function user(overrides: Partial<UserInfo> = {}): UserInfo {
   return {
     npub: "npub1test",
-    role: "user",
-    plan: "pro",
     planExpiresAt: new Date(NOW.getTime() + 20 * DAY).toISOString(),
     storageBytes: "1000",
-    status: "ACTIVE",
-    statusChangedAt: null,
-    termsVersion: "2026-10-01",
-    termsAcceptedAt: new Date(NOW.getTime() - DAY).toISOString(),
     usedStorage: "100",
     createdAt: new Date(NOW.getTime() - DAY).toISOString(),
     ...overrides,
@@ -33,7 +27,6 @@ function user(overrides: Partial<UserInfo> = {}): UserInfo {
 function accessFor(u: UserInfo) {
   return deriveAccess(
     {
-      plan: u.plan,
       planExpiresAt: u.planExpiresAt,
       storageBytes: u.storageBytes,
       usedStorage: u.usedStorage,
@@ -43,11 +36,10 @@ function accessFor(u: UserInfo) {
   );
 }
 
-test("active user with fresh purchase gets only a purchase confirmation", () => {
+test("active user below every threshold gets no notifications", () => {
   const u = user();
   const due = dueNotifications(u, accessFor(u), config, NOW);
-  assert.ok(due.some((n) => n.kind === "purchase"));
-  assert.ok(!due.some((n) => n.kind.startsWith("expiry_warning")));
+  assert.deepEqual(due, []);
 });
 
 test("expiry warnings fire at each configured threshold, not before", () => {
@@ -87,7 +79,7 @@ test("lifecycle transitions produce grace/write/read notifications", () => {
 });
 
 test("unpaid users produce no notifications", () => {
-  const u = user({ plan: null, planExpiresAt: null, storageBytes: null });
+  const u = user({ planExpiresAt: null, storageBytes: null });
   assert.deepEqual(dueNotifications(u, accessFor(u), config, NOW), []);
 });
 

@@ -57,13 +57,13 @@ export function createAdminIdentity(options: {
 }
 
 /**
- * NIP-98 + role gate for orchestrator-internal endpoints (the purge call from
- * the notifier). The signer's npub must have role service/admin in db-api's
- * User table — the same registry model as the backend's internal APIs. No
- * shared bearer token.
+ * NIP-98 + service-account gate for orchestrator-internal endpoints (the
+ * purge call from the notifier). The signer's npub must have an enabled row in
+ * db-api's service_account table. There is no admin bypass here: admins are
+ * owned by formstr-backend and gate /admin/* through requireAdmin below.
  */
 export function createInternalRoleGate(options: {
-  db: Pick<DbClient, "getUser">;
+  db: Pick<DbClient, "getServiceAccount">;
 }): (req: Request, res: Response, next: NextFunction) => void {
   return (req, res, next) => {
     void (async () => {
@@ -79,9 +79,9 @@ export function createInternalRoleGate(options: {
         throw error;
       }
 
-      const user = await options.db.getUser(npub);
-      if (!user || (user.role !== "service" && user.role !== "admin")) {
-        res.status(403).json({ error: "forbidden_role" });
+      const service = await options.db.getServiceAccount(npub);
+      if (!service || !service.enabled) {
+        res.status(403).json({ error: "forbidden_service_account" });
         return;
       }
       next();

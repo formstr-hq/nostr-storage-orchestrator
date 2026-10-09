@@ -44,7 +44,7 @@ TypeScript/Express service that:
 
 - validates Nostr auth events from `Authorization: Nostr ...` (BUD-11) and NIP-98 for admin routes
 - resolves `npub` from the signed event
-- derives the account lifecycle (UNPAID → ACTIVE → GRACE → WRITE_BLOCKED → READ_BLOCKED → CLOSED) from entitlement dates at request time; the notifier's `User.status` is only a mirror
+- derives the account lifecycle (UNPAID → ACTIVE → GRACE → WRITE_BLOCKED → READ_BLOCKED → CLOSED) from entitlement dates at request time; nothing is stored as a status mirror
 - enforces the plan's total storage allowance and duration only (no free tier, no per-file plan limits); a global operator `MAX_UPLOAD_BYTES` caps a single request
 - selects a single provider deterministically by `fnv1a(npub:timeSlot) % n` over the npub-sorted active roster, rotating the slot (default hourly)
 - on upload failure, drops the failed provider and recomputes the selection over the rest, retrying until one accepts
@@ -96,24 +96,31 @@ lifecycle timings in `config/lifecycle.yml` (grace/write/read windows).
 ## Database schema
 
 - `User` — `npub` (PK), `plan`, `planExpiresAt`, `storageBytes`, `status`,
-  `termsVersion`/`termsAcceptedAt`, `usedStorage`, `createdAt`
+  `usedStorage`, `createdAt`
+- `User` — paid users only: entitlement (`planExpiresAt`, `storageBytes`), usage (`usedStorage`). Plans/labels are owned by formstr-backend
 - `Blob` — `hash` (PK), `npub`, `size`, `replicas`, `createdAt`
+- `ServiceAccount` — machine identities allowed to call the internal db-api endpoints (`enabled` flag for revocation)
 - `NotificationLog` — dedupe key `(npub, kind, ref, channel)` for sent notifications
 - `ModerationAction` — admin moderation audit rows (hash, owner, admin, reason)
-- `Member` — donor/operator npub, role, authorization status, and audit metadata
-- `Storage` — storage-machine npub, owner, tunnel address, reported capacity, lifecycle, and last ping
+- `MeshMember` — storage-mesh membership npub, mesh role, authorization status, and audit metadata
+- `StorageProvider` — storage-machine npub, owner, tunnel address, reported capacity, lifecycle, and last ping
 
-`usedStorage` and `size` are `BigInt` in Postgres; `db-api` serializes them as decimal **strings** over HTTP (JSON can't carry `BigInt`). `packages/db-client` types these fields as `string`; the proxy converts with `Number(...)` where needed, same as before.
+All Prisma-owned tables/columns are lowercase snake_case in Postgres (`@@map`/`@map`); the `pg_*` bookkeeping models keep their original names because the pg-gateway queries them with raw SQL. `usedStorage` and `size` are `BigInt` in Postgres; `db-api` serializes them as decimal **strings** over HTTP (JSON can't carry `BigInt`). `packages/db-client` types these fields as `string`; the proxy converts with `Number(...)` where needed, same as before.
 
 ## `db-api` endpoints
 
 Internal-only. The entitlement/admin/mutation endpoints are gated by **NIP-98
-plus role**, not a shared token: the caller signs the request with a service
-nsec, and the signer's npub must have `role = service|admin` in the `User`
-table. Service identities are registered out of band:
+plus service account**, not a shared token: the caller signs the request with a
+service nsec, and the signer's npub must have an enabled row in the
+`service_account` table. There is no admin role here — admin-ness is owned by
+formstr-backend and checked by the proxy. Service accounts are registered out
+of band (the GET lookup used by the gate is unauthenticated and exposes only
+npub + enabled):
 
 ```bash
-npm run register:service -- <npub>   # role=service by default
+npm run register:service -- <npub>   # create/enable
+npm run register:service -- <npub> --label backend
+npm run register:service -- <npub> --disable   # revoke without deleting
 ```
 
 Pre-existing internal endpoints keep their original unauthenticated behaviour
@@ -125,23 +132,24 @@ the entitlement write is the one atomic quota guard on the write path.
 | Method    | Path                              | Notes                                                             |
 | --------- | --------------------------------- | ----------------------------------------------------------------- |
 | GET       | `/health`                         | compose healthcheck                                               |
-| GET / PUT | `/users/:npub`                    | read / upsert (extended entitlement serialization)                |
-| GET       | `/users`                          | service: paginated list, filters `status`/`plan`/`query`          |
+| GET       | `/users/:npub`                    | read (extended entitlement serialization)                         |
+| GET       | `/users`                          | service: paginated list, filter `query`                           |
 | GET       | `/users/attention`                | service: users due for lifecycle/notification evaluation          |
-| POST      | `/users/:npub/entitlement`        | service: atomic assign/extend/upgrade (+ admin expiry override)   |
-| PATCH     | `/users/:npub/status`             | service: notifier/admin status mirror                             |
+| POST      | `/users/:npub/entitlement`        | service: atomic assign/extend/upgrade (+ admin expiry override); creates the row |
 | GET       | `/users/:npub/blobs`              | paginated own blobs                                               |
 | DELETE    | `/users/:npub/blobs`              | service: transactional bulk delete (purge)                        |
 | GET / POST | `/notifications`                 | service: list / log (409 on duplicate dedupe key)                 |
 | GET / POST | `/moderation`                    | service: moderation audit list / record                           |
+| GET       | `/service-accounts/:npub`         | unauthenticated: enabled lookup used by the NIP-98 gate           |
+| GET       | `/service-accounts`               | service: paginated service-account list                           |
 | GET       | `/blobs`                          | service: global blob search/filter/pagination                     |
-| GET       | `/storage-stats`                  | service: users/blobs/bytes/status counts (no money)               |
+| GET       | `/storage-stats`                  | service: users/blobs/bytes (no money)                             |
 | GET       | `/blobs/total`                    | summed blob size across all users                                 |
 | GET       | `/blobs/:hash`                    | read                                                              |
 | POST      | `/blobs`                          | atomically creates the blob row and increments `usedStorage`      |
 | DELETE    | `/blobs/:hash`                    | atomically deletes and decrements `usedStorage`                   |
-| GET / PUT / DELETE | `/members`, `/members/:npub` | donor roster CRUD and soft revocation                         |
-| GET / POST / PATCH / DELETE | `/storages`, `/storages/:npub` | storage roster CRUD and liveness inputs              |
+| GET / PUT / DELETE | `/members`, `/members/:npub` | mesh roster CRUD and soft revocation                         |
+| GET / POST / PATCH / DELETE | `/storages`, `/storages/:npub` | storage provider roster CRUD and liveness inputs     |
 | GET       | `/storages/active`                | fresh linked blossom backends polled by `proxy/blossom`          |
 | GET       | `/storages/active-pg`             | fresh linked mesh-PG providers polled by `pg-gateway`            |
 
@@ -242,8 +250,8 @@ The defaults in `.env.example` already work for local (non-Docker) dev out of th
 DB_API_PORT=4000
 BLOSSOM_PORT=3001
 # Service identities for internal calls. Each is a nostr secret key; the
-# matching npub is registered with role=service (see the db-api section).
-DB_API_SERVICE_NSEC=nsec1...
+# matching npub is registered as a service account (see the db-api section).
+SERVICE_NSEC=nsec1...
 STORAGE_SERVICE_NSEC=nsec1...
 ```
 
@@ -556,7 +564,7 @@ protocols end to end via `packages/smoke-test`:
 ./scripts/docker-smoke-test.sh
 ```
 
-It creates a missing `.env` from `.env.example`, waits for `postgres`/`db`/`blossom` to become reachable, generates a throwaway service key and registers it with `role=service`, then checks blossom auth rejection, unpaid-upload rejection, NIP-98 entitlement provisioning through `db-api`, quota enforcement, read gating, and upload/download/delete round-trips. By default it tears the root dev stack down afterward (`storage-client`'s blossom backend is left running for reuse); set `KEEP_UP=1` to leave the root stack up too for manual poking.
+It creates a missing `.env` from `.env.example`, waits for `postgres`/`db`/`blossom` to become reachable, generates a throwaway service key and registers it as a service account, then checks blossom auth rejection, unpaid-upload rejection, NIP-98 entitlement provisioning through `db-api`, quota enforcement, read gating, and upload/download/delete round-trips. By default it tears the root dev stack down afterward (`storage-client`'s blossom backend is left running for reuse); set `KEEP_UP=1` to leave the root stack up too for manual poking.
 
 ### Mesh end-to-end test
 
@@ -580,11 +588,11 @@ storage is discovered from `db-api` once the control plane's probe passes.
 
 The paid-storage flow spans this repo and `formstr-backend`:
 
-- **`formstr-backend`** owns money and plans: the plan catalog
-  (`config/storage-plans.json`), Lightning invoices, and the T&C version sent
-  at purchase. It also sends notification emails and answers the unified admin
-  check.
-- **This repo** owns storage, entitlement, and compliance: `User`
+- **`formstr-backend`** owns money, plans and T&C: the plan catalog
+  (`config/storage-plans.json`), Lightning invoices, terms acceptance, and
+  the T&C version sent at purchase. It also sends notification emails and
+  answers the unified admin check.
+- **This repo** owns storage, entitlement, and lifecycle: `User`
   entitlement + lifecycle, blobs, `NotificationLog`, and `ModerationAction`.
 
 Flow: the console (or any client) calls `POST /api/generate-invoice/storage`
@@ -592,13 +600,13 @@ Flow: the console (or any client) calls `POST /api/generate-invoice/storage`
 `extend`/`upgrade` from the buyer's current entitlement and rejects a
 downgrade while a plan is live. On the zap receipt it pushes the entitlement to
 `db-api POST /users/:npub/entitlement`, signed with its NIP-98 service
-identity. T&C acceptance is recorded here (on the user row), not in the backend.
+identity. T&C acceptance and versioning are owned by the backend; this repo no
+longer stores them.
 
-Wiring (all internal APIs are NIP-98 role-gated; no shared tokens):
+Wiring (all internal APIs are NIP-98-gated; no shared tokens):
 
-- `formstr-backend` signs db-api calls with `DB_API_SERVICE_NSEC`; register
-  that npub in this repo: `npm run register:service -- <npub>` (role=service
-  by default, pass `admin` for admin).
+- `formstr-backend` signs db-api calls with `SERVICE_NSEC`; register
+  that npub in this repo: `npm run register:service -- <npub>`.
 - The orchestrator signs backend calls (admin-check, storage notify) with
   `STORAGE_SERVICE_NSEC`; register that npub in the backend:
   `npm run register:service -- <npub>`.
@@ -658,8 +666,10 @@ pnpm -r run build
 ## Notes
 
 - Provider discovery is DB-only: `proxy/blossom` places each blob on one provider by `fnv1a(npub:timeSlot) % n` over the npub-sorted roster from `db-api /storages/active`. `BLOSSOM_PLACEMENT_SLOT_MS` (default 1 hour) sets how long a placement stays fixed. Uploads fail over by dropping the failed provider and recomputing the selection until one accepts. There is no static URL fallback.
-- Entitlement enforcement is date-derived in the proxy (`deriveAccess`); the notifier mirrors `User.status` for dashboards and sends expiry/quota/moderation notifications over NIP-17 DM and email, logging each send to `NotificationLog` for dedupe.
-- `config/lifecycle.yml` owns grace/write/read windows, warning thresholds, the T&C version, and `purgeEnabled` (default false). It is mounted read-only into the proxy and notifier; a malformed file fails the service at boot.
+- Entitlement enforcement is date-derived in the proxy (`deriveAccess`); the notifier sends expiry/quota/moderation notifications over NIP-17 DM and email, logging each send to `NotificationLog` for dedupe.
+- `config/lifecycle.yml` owns grace/write/read windows, warning thresholds, and
+  `purgeEnabled` (default false). It is mounted read-only into the proxy and
+  notifier; a malformed file fails the service at boot.
 - Structured relay storage is served through the mesh-PG data plane (`pg-gateway` + providers' `pg-agent`), not by a relay process in this repo.
 - `db-api` (`packages/db`) is the only service with a Postgres/Prisma dependency; `proxy/blossom` talks to it over HTTP via the dependency-free `packages/db-client`, so its Docker image no longer needs Prisma at all.
 - In local dev (`docker-compose.dev.yml`), `blossom` and `notifier` run with `network_mode: host` (Linux only), so `db-api` is reached via `localhost` — no `host.docker.internal`/`extra_hosts` needed. In production (`docker-compose.yml`), they share the NVPN sidecar's network namespace and reach storage-client backends over the mesh — see [Production: NVPN mesh](#production-nvpn-mesh).

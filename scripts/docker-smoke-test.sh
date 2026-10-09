@@ -100,14 +100,14 @@ else
 fi
 
 log "step 3/6: creating a smoke service identity"
-# Internal db-api calls are NIP-98 signed; this identity is registered with
-# role=service after db-api is up.
+# Internal db-api calls are NIP-98 signed; this identity is registered as a
+# service account after db-api is up.
 SERVICE_IDENTITY="$(pnpm --silent --filter @orchestrator/smoke-test run control-plane identity 2>/dev/null)"
-DB_API_SERVICE_NSEC="$(printf '%s' "${SERVICE_IDENTITY}" | grep -o 'nsec1[a-z0-9]*' | head -n1 || true)"
+SERVICE_NSEC="$(printf '%s' "${SERVICE_IDENTITY}" | grep -o 'nsec1[a-z0-9]*' | head -n1 || true)"
 SERVICE_NPUB="$(printf '%s' "${SERVICE_IDENTITY}" | grep -o 'npub1[a-z0-9]*' | head -n1 || true)"
 unset SERVICE_IDENTITY
-[ -n "${DB_API_SERVICE_NSEC}" ] && [ -n "${SERVICE_NPUB}" ] || { log "could not generate a service identity"; exit 1; }
-export DB_API_SERVICE_NSEC
+[ -n "${SERVICE_NSEC}" ] && [ -n "${SERVICE_NPUB}" ] || { log "could not generate a service identity"; exit 1; }
+export SERVICE_NSEC
 
 log "step 4/6: building and starting the root docker-compose stack"
 root_compose up --build -d
@@ -115,12 +115,12 @@ root_compose up --build -d
 log "step 5/6: waiting for services and registering the service identity"
 wait_for_healthy root_db_id "db-api" 120 || { root_compose logs db; exit 1; }
 wait_for_tcp localhost 3001 60 || { log "blossom proxy (:3001) did not come up"; root_compose logs blossom; exit 1; }
-# Register the service npub in the User table out of band (the endpoint that
-# would do this over HTTP is itself role-gated, so registration is host-side).
-# No role argument: service is the default.
+# Register the service npub in the service_account table out of band (the
+# endpoint that would do this over HTTP is itself gated, so registration is
+# host-side).
 root_compose exec -T db node packages/db/dist/src/scripts/registerService.js \
   "${SERVICE_NPUB}" >/dev/null
-log "registered ${SERVICE_NPUB} with role=service"
+log "registered ${SERVICE_NPUB} as a service account"
 
 log "step 5b/6: registering the local blossom backend as an active storage"
 # The proxy discovers providers only from db-api (no BLOSSOM_SERVERS
@@ -152,7 +152,7 @@ done
 log "step 6/6: running protocol-level checks (packages/smoke-test)"
 pnpm install >/dev/null
 # The smoke suite provisions entitlements through db-api with its NIP-98
-# service identity (DB_API_SERVICE_NSEC, generated above).
+# service identity (SERVICE_NSEC, generated above).
 DB_API_PORT_VALUE="$(grep -m1 '^DB_API_PORT=' .env | cut -d= -f2 || true)"
 export DB_API_URL="${DB_API_URL:-http://localhost:${DB_API_PORT_VALUE:-4000}}"
 pnpm --filter @orchestrator/smoke-test run smoke

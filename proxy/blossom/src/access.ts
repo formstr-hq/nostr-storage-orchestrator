@@ -50,7 +50,6 @@ export interface DerivedUser {
 export function withAccess(user: UserInfo, config: LifecycleConfig, now = new Date()): DerivedUser {
   const access = deriveAccess(
     {
-      plan: user.plan,
       planExpiresAt: user.planExpiresAt,
       storageBytes: user.storageBytes,
       usedStorage: user.usedStorage,
@@ -59,22 +58,9 @@ export function withAccess(user: UserInfo, config: LifecycleConfig, now = new Da
     config,
   );
 
-  // CLOSED is a terminal event (purge completed), not a date boundary, so the
-  // stored mirror wins over date-derivation. A re-purchase writes ACTIVE and
-  // clears it.
-  if (user.status === "CLOSED" && access.status !== "CLOSED" && user.usedStorage === "0") {
-    return {
-      user,
-      access: {
-        ...access,
-        status: "CLOSED",
-        canUpload: false,
-        canRead: false,
-        canDelete: false,
-        reason: "closed",
-      },
-    };
-  }
+  // A purge is terminal until a new purchase: with no live plan the derived
+  // state is already "closed" once the retention window elapses, and a
+  // re-purchase writes a future expiry. No stored mirror is needed.
 
   return { user, access };
 }

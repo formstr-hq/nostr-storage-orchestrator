@@ -5,11 +5,18 @@ import {
   deleteBlob,
   formatBytes,
   getStorage,
+  getStorageSubscription,
   listBlobs,
   listNotifications,
   myInvoices,
 } from "../api";
-import type { Account, Blob, InvoiceRecord, NotificationRecord } from "../types";
+import type {
+  Account,
+  Blob,
+  InvoiceRecord,
+  NotificationRecord,
+  StorageSubscription,
+} from "../types";
 import { ErrorText, StatusPill, Toast, useToast } from "../ui";
 
 type Tab = "blobs" | "billing" | "notifs";
@@ -27,6 +34,7 @@ function countdown(iso: string | null): { big: string; label: string } {
 export function DashboardPage() {
   const { identities } = useSigner();
   const [account, setAccount] = useState<Account | null>(null);
+  const [subscription, setSubscription] = useState<StorageSubscription | null>(null);
   const [blobs, setBlobs] = useState<Blob[]>([]);
   const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
   const [notifications, setNotifications] = useState<NotificationRecord[]>([]);
@@ -57,6 +65,7 @@ export function DashboardPage() {
     void refresh();
 
     if (!identities) return;
+    getStorageSubscription(identities).then(setSubscription).catch(() => undefined);
     myInvoices(identities).then(setInvoices).catch(() => undefined);
     listNotifications(identities).then((page) => setNotifications(page.items)).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -91,6 +100,7 @@ export function DashboardPage() {
   const pct = allowance ? Math.round((used / allowance) * 100) : 0;
   const expiry = countdown(account.planExpiresAt);
   const overQuota = allowance !== null && used > allowance;
+  const hasPlan = account.planExpiresAt !== null && new Date(account.planExpiresAt).getTime() > Date.now();
 
   return (
     <>
@@ -134,7 +144,7 @@ export function DashboardPage() {
         <div className="card plan-card">
           <div className="row1">
             <div>
-              <div className="plan-name">{account.plan ? `${account.plan} plan` : "No plan"}</div>
+              <div className="plan-name">{subscription?.plan ? `${subscription.plan.name} plan` : "No plan"}</div>
               <div className="plan-meta">Renew or change plans from Pricing</div>
             </div>
             <StatusPill status={account.status} />
@@ -158,7 +168,7 @@ export function DashboardPage() {
           </div>
           <div className="actions">
             <Link className="btn primary" to="/pricing">
-              {account.plan ? "Renew or upgrade" : "Choose a plan"}
+              {hasPlan ? "Renew or upgrade" : "Choose a plan"}
             </Link>
             <button className="btn ghost" onClick={() => void refresh()}>
               Refresh

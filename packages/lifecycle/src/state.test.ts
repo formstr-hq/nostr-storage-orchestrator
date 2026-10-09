@@ -17,7 +17,6 @@ const config: LifecycleConfig = parseLifecycleConfig({
 
 function user(overrides: Partial<Parameters<typeof deriveAccess>[0]> = {}) {
   return {
-    plan: "pro",
     planExpiresAt: new Date(NOW.getTime() + 10 * DAY),
     storageBytes: 1_000_000_000n,
     usedStorage: 100n,
@@ -26,7 +25,7 @@ function user(overrides: Partial<Parameters<typeof deriveAccess>[0]> = {}) {
 }
 
 test("no expiry is UNPAID and cannot read or upload", () => {
-  const access = deriveAccess(user({ plan: null, planExpiresAt: null }), NOW, config);
+  const access = deriveAccess(user({ planExpiresAt: null }), NOW, config);
   assert.equal(access.status, "UNPAID");
   assert.equal(access.canUpload, false);
   assert.equal(access.canRead, false);

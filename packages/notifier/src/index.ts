@@ -19,8 +19,8 @@ const INTERVAL_MS = 15 * 60_000;
 async function main() {
   const db = new DbClient({
     baseUrl: process.env.DB_API_URL ?? `http://localhost:${process.env.DB_API_PORT}`,
-    ...(process.env.DB_API_SERVICE_NSEC
-      ? { serviceNsec: process.env.DB_API_SERVICE_NSEC }
+    ...(process.env.SERVICE_NSEC
+      ? { serviceNsec: process.env.SERVICE_NSEC }
       : {}),
   });
 
@@ -34,7 +34,6 @@ async function main() {
           JSON.stringify({
             event: "notify_pass",
             evaluated: result.evaluated,
-            statusMirrored: result.statusMirrored,
             sent: result.sent,
           }),
         );

@@ -1,12 +1,12 @@
 import { Router, type Router as ExpressRouter } from "express";
 import { prisma } from "../prisma.js";
-import { requireInternalRole } from "../internal-auth.js";
+import { requireServiceAccount } from "../internal-auth.js";
 import { moderationToJson } from "../serialize.js";
 import { paginated, parsePagination, queryString } from "../pagination.js";
 
 export const moderationRouter: ExpressRouter = Router();
 
-moderationRouter.use(requireInternalRole);
+moderationRouter.use(requireServiceAccount);
 
 moderationRouter.post("/", async (req, res) => {
   const { hash, npub, adminNpub, reason } = req.body as {

@@ -8,6 +8,7 @@ import type {
   NotificationRecord,
   Paginated,
   StorageStats,
+  StorageSubscription,
   StorageTier,
   UserStatus,
 } from "./types";
@@ -126,6 +127,19 @@ export async function getMe(
   return parse(await fetch(target, { headers: { authorization: auth } }));
 }
 
+/**
+ * The signed-in user's storage plan as owned by the backend (labels, features
+ * and purchase history). The enforced expiry/allowance/usage come from the
+ * orchestrator via `/storage`; this endpoint adds the catalog plan.
+ */
+export async function getStorageSubscription(
+  identities: Identities,
+): Promise<StorageSubscription> {
+  const target = url(BACKEND_URL, "/api/storage/subscription");
+  const auth = await nip98Auth(identities, absolute(BACKEND_URL, "/api/storage/subscription"), "GET");
+  return parse(await fetch(target, { headers: { authorization: auth } }));
+}
+
 export function watchInvoice(
   backendUrl: string,
   paymentHash: string,
@@ -179,7 +193,6 @@ async function adminSend<T>(
 
 export interface AdminUser {
   npub: string;
-  plan: string | null;
   planExpiresAt: string | null;
   storageBytes: string | null;
   status: UserStatus;
@@ -189,7 +202,7 @@ export interface AdminUser {
 
 export function adminListUsers(
   identities: Identities,
-  filters: { status?: string; plan?: string; query?: string; page?: number } = {},
+  filters: { query?: string; page?: number } = {},
 ): Promise<Paginated<AdminUser>> {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {

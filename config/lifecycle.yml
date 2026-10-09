@@ -14,9 +14,6 @@ writeBlockedDays: 30
 readBlockedDays: 30
 purgeEnabled: false
 
-# T&C version recorded with entitlements; bump when the legal copy changes.
-termsVersion: "2026-10-01"
-
 notify:
   # Days before planExpiresAt to warn, largest first.
   expiryWarningDays: [14, 3, 1]

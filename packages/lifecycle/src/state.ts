@@ -16,7 +16,6 @@ export interface LifecycleConfig {
   writeBlockedDays: number;
   readBlockedDays: number;
   purgeEnabled: boolean;
-  termsVersion: string;
   notify: LifecycleNotifyConfig;
 }
 
@@ -25,7 +24,6 @@ export const DEFAULT_LIFECYCLE_CONFIG: LifecycleConfig = {
   writeBlockedDays: 30,
   readBlockedDays: 30,
   purgeEnabled: false,
-  termsVersion: "2026-10-01",
   notify: {
     expiryWarningDays: [14, 3, 1],
     quotaWarningPercent: [80, 100],
@@ -85,10 +83,6 @@ export function parseLifecycleConfig(raw: unknown): LifecycleConfig {
     typeof r["purgeEnabled"] === "boolean"
       ? r["purgeEnabled"]
       : DEFAULT_LIFECYCLE_CONFIG.purgeEnabled;
-  const termsVersion =
-    typeof r["termsVersion"] === "string" && r["termsVersion"].length > 0
-      ? r["termsVersion"]
-      : DEFAULT_LIFECYCLE_CONFIG.termsVersion;
 
   const rawNotify =
     typeof r["notify"] === "object" && r["notify"] !== null
@@ -111,13 +105,11 @@ export function parseLifecycleConfig(raw: unknown): LifecycleConfig {
     writeBlockedDays,
     readBlockedDays,
     purgeEnabled,
-    termsVersion,
     notify: { expiryWarningDays, quotaWarningPercent },
   };
 }
 
 export interface EntitlementDates {
-  plan: string | null;
   planExpiresAt: Date | string | null;
   usedStorage: bigint | number | string;
 }

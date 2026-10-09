@@ -1,12 +1,12 @@
 import { Router, type Router as ExpressRouter } from "express";
 import { prisma } from "../prisma.js";
-import { requireInternalRole } from "../internal-auth.js";
+import { requireServiceAccount } from "../internal-auth.js";
 import { notificationToJson } from "../serialize.js";
 import { paginated, parsePagination, queryString } from "../pagination.js";
 
 export const notificationsRouter: ExpressRouter = Router();
 
-notificationsRouter.use(requireInternalRole);
+notificationsRouter.use(requireServiceAccount);
 
 // Log a notification send; 409 on duplicate so the caller can treat
 // (npub, kind, ref, channel) as the idempotency key.

@@ -29,15 +29,6 @@ export function dueNotifications(
     return [];
   }
 
-  if (user.termsAcceptedAt) {
-    due.push({
-      kind: "purchase",
-      ref: user.termsAcceptedAt,
-      title: `${user.plan ?? "Storage"} plan active`,
-      body: `Your ${user.plan ?? "storage"} plan is active. Total allowance: ${formatBytes(user.storageBytes)}. Plan expires ${expiry.toUTCString()}.`,
-    });
-  }
-
   for (const warningDays of config.notify.expiryWarningDays) {
     const remaining = daysUntil(expiry, now);
     if (remaining >= 0 && remaining <= warningDays) {

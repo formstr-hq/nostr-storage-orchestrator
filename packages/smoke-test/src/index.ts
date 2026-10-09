@@ -6,9 +6,9 @@ import { createNip98Signer } from "@orchestrator/nip98";
 const BLOSSOM_URL = process.env.BLOSSOM_URL ?? "http://localhost:3001";
 const DB_API_URL = process.env.DB_API_URL ?? `http://localhost:${process.env.DB_API_PORT ?? 4000}`;
 // Internal calls are NIP-98-signed with the smoke test's own service identity.
-// The harness registers this npub with role=service before running the suite.
-const DB_API_SERVICE_NSEC = process.env.DB_API_SERVICE_NSEC ?? "";
-const serviceSigner = DB_API_SERVICE_NSEC ? createNip98Signer(DB_API_SERVICE_NSEC) : null;
+// The harness registers this npub as a service account before running the suite.
+const SERVICE_NSEC = process.env.SERVICE_NSEC ?? "";
+const serviceSigner = SERVICE_NSEC ? createNip98Signer(SERVICE_NSEC) : null;
 
 let failures = 0;
 
@@ -69,7 +69,7 @@ async function assignEntitlement(
   npub: string,
   body: Record<string, unknown>,
 ): Promise<void> {
-  assert(serviceSigner, "DB_API_SERVICE_NSEC is required for entitlement provisioning");
+  assert(serviceSigner, "SERVICE_NSEC is required for entitlement provisioning");
   const path = `/users/${encodeURIComponent(npub)}/entitlement`;
   const url = `${DB_API_URL}${path}`;
   const res = await fetch(url, {
@@ -124,9 +124,8 @@ async function runBlossomSuite(): Promise<void> {
     const auth = blossomAuthToken(sk, "get");
     const res = await fetch(`${BLOSSOM_URL}/storage`, { headers: { authorization: auth } });
     assert(res.ok, `expected 2xx, got ${res.status}`);
-    const body = (await res.json()) as { plan: string | null; status: string; used: number };
+    const body = (await res.json()) as { status: string; used: number };
     assert(body.status === "UNPAID", `expected status UNPAID, got ${body.status}`);
-    assert(body.plan === null, `expected no plan, got ${body.plan}`);
     assert(body.used === 0, `expected used=0 for a fresh user, got ${body.used}`);
   });
 
@@ -144,13 +143,11 @@ async function runBlossomSuite(): Promise<void> {
 
   await step("grants a plan via db-api and uploads within quota", async () => {
     await assignEntitlement(npub, {
-      plan: "smoke",
       durationDays: 1,
       storageBytes: "1000000",
       source: "admin",
       mode: "upgrade",
       force: true,
-      termsVersion: "smoke",
     });
 
     const auth = blossomAuthToken(sk, "upload", { hash: payloadHash });
@@ -254,13 +251,11 @@ async function runBlossomSuite(): Promise<void> {
 
   await step("expiring the plan makes reads 403 but deletes still allowed", async () => {
     await assignEntitlement(npub, {
-      plan: "smoke",
       durationDays: 1,
       storageBytes: "1000000",
       source: "admin",
       mode: "upgrade",
       force: true,
-      termsVersion: "smoke",
       planExpiresAt: new Date(Date.now() - 40 * 24 * 3600 * 1000).toISOString(),
     });
 
@@ -274,13 +269,11 @@ async function runBlossomSuite(): Promise<void> {
 
   await step('rejects DELETE /<sha256> when the auth token has no "x" tag', async () => {
     await assignEntitlement(npub, {
-      plan: "smoke",
       durationDays: 1,
       storageBytes: "1000000",
       source: "admin",
       mode: "upgrade",
       force: true,
-      termsVersion: "smoke",
     });
     const auth = blossomAuthToken(sk, "delete");
     const res = await fetch(`${BLOSSOM_URL}/${payloadHash}`, { method: "DELETE", headers: { authorization: auth } });

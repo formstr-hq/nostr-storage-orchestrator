@@ -1,12 +1,16 @@
 # Build the Blossom console SPA first. Kept as a stage so the runtime image
 # never carries the Node/react toolchain, and so `docker build` works from the
-# repo root even before `console/dist` exists on the host.
+# repo root even before `packages/console/dist` exists on the host. The console
+# is a pnpm workspace member (packages/console), so it installs from the root
+# workspace manifests rather than a standalone lockfile.
 FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS console
 WORKDIR /console
-COPY console/package.json console/package-lock.json ./
-RUN npm ci
-COPY console ./
-RUN npm run build
+RUN npm install -g pnpm@10.15.1
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/console/package.json ./packages/console/
+RUN pnpm install --frozen-lockfile --filter @orchestrator/console
+COPY packages/console ./packages/console
+RUN pnpm --filter @orchestrator/console run build
 
 # Pinned by digest so rebuilds are reproducible and an upstream retag
 # cannot silently change the runtime (see README.md "Pinned images").
@@ -36,7 +40,7 @@ COPY proxy/blossom ./proxy/blossom
 # Console SPA build output, served at the blossom hostname. Built by the
 # `console` stage above; an empty placeholder keeps the COPY valid even when
 # the console has not been built (API + hash routes still work).
-COPY --from=console /console/dist ./console/dist
+COPY --from=console /console/packages/console/dist ./packages/console/dist
 
 # Build the workspace dependencies first
 RUN pnpm --filter @orchestrator/nip98 run build \

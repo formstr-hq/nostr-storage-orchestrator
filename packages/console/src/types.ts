@@ -8,13 +8,10 @@ export type UserStatus =
 
 export interface Account {
   npub: string;
-  plan: string | null;
+  /** Plan label is owned by formstr-backend; only the enforced fields live here. */
   planExpiresAt: string | null;
   storageBytes: string | null;
   status: UserStatus;
-  statusChangedAt: string | null;
-  termsVersion: string | null;
-  termsAcceptedAt: string | null;
   usedStorage: string;
   createdAt: string;
   canUpload: boolean;
@@ -63,6 +60,18 @@ export interface StorageTier {
   durationDays: number;
   storageBytes: number;
   features: string[];
+  /** Announced but not yet purchasable; rendered as a "Coming soon" card. */
+  comingSoon?: boolean;
+}
+
+/** Response of formstr-backend GET /api/storage/subscription. */
+export interface StorageSubscription {
+  plan: StorageTier | null;
+  planExpiresAt: string | null;
+  storageBytes: string | null;
+  usedStorage: string | null;
+  termsVersion: string | null;
+  createdAt: string | null;
 }
 
 export interface ModerationRecord {

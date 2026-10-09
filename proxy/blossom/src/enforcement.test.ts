@@ -101,13 +101,8 @@ after(async () => {
 function activeUser() {
   userRow = {
     npub,
-    plan: "pro",
     planExpiresAt: new Date(NOW + 10 * DAY).toISOString(),
     storageBytes: "1000",
-    status: "ACTIVE",
-    statusChangedAt: null,
-    termsVersion: "2026-10-01",
-    termsAcceptedAt: null,
     usedStorage: "100",
     createdAt: new Date(NOW).toISOString(),
   };
@@ -115,10 +110,8 @@ function activeUser() {
 
 test("HEAD /upload rejects an unpaid account", async () => {
   activeUser();
-  userRow["plan"] = null;
   userRow["planExpiresAt"] = null;
   userRow["storageBytes"] = null;
-  userRow["status"] = "UNPAID";
   const res = await fetch(`${base}/upload`, {
     method: "HEAD",
     headers: {
@@ -214,7 +207,6 @@ test("GET /storage reports derived status and limits", async () => {
   const body = await res.json();
   assert.equal(body.status, "ACTIVE");
   assert.equal(body.total, 1000);
-  assert.equal(body.plan, "pro");
 });
 
 test("admin routes reject a non-admin NIP-98 caller", async () => {

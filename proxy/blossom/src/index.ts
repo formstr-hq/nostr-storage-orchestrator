@@ -19,8 +19,8 @@ export const lifecycleConfig: LifecycleConfig = loadLifecycleConfig();
 // stops being true.
 const db = new DbClient({
   baseUrl: process.env.DB_API_URL ?? `http://localhost:${process.env.DB_API_PORT}`,
-  ...(process.env.DB_API_SERVICE_NSEC
-    ? { serviceNsec: process.env.DB_API_SERVICE_NSEC }
+  ...(process.env.SERVICE_NSEC
+    ? { serviceNsec: process.env.SERVICE_NSEC }
     : {}),
 });
 
@@ -39,8 +39,8 @@ const adminIdentity = createAdminIdentity({
   serviceNsec: process.env.STORAGE_SERVICE_NSEC,
 });
 
-// Internal purge is gated by NIP-98 + role service/admin in db-api, not a
-// shared token (same model as the backend's internal APIs).
+// Internal purge is gated by NIP-98 + an enabled service_account row in
+// db-api, not a shared token (same model as the backend's internal APIs).
 const requireInternalRole = createInternalRoleGate({ db });
 
 // Operator per-file hard cap, not a plan feature (the plan sells total
@@ -189,6 +189,21 @@ function sendAccessError(res: Response, user: UserInfo, access: ReturnType<typeo
 
 type LoadedAccess = { user: UserInfo; access: ReturnType<typeof withAccess>["access"] };
 
+/**
+ * A user row exists only after a purchase, so a missing row is simply an
+ * unpaid account. Synthesize the same shape db-api would return so callers
+ * can derive access without special-casing null.
+ */
+function unpaidUser(npub: string): UserInfo {
+  return {
+    npub,
+    planExpiresAt: null,
+    storageBytes: null,
+    usedStorage: "0",
+    createdAt: new Date(0).toISOString(),
+  };
+}
+
 async function loadAccess(npub: string, fresh = false): Promise<LoadedAccess | null> {
   let user: UserInfo | null;
   if (fresh) {
@@ -198,13 +213,7 @@ async function loadAccess(npub: string, fresh = false): Promise<LoadedAccess | n
     user = await accessCache.get(npub);
   }
   if (!user) {
-    try {
-      user = await db.upsertUser(npub);
-      accessCache.invalidate(npub);
-    } catch (error) {
-      console.error("failed to upsert user", error);
-      return null;
-    }
+    user = unpaidUser(npub);
   }
   return withAccess(user, lifecycleConfig);
 }
@@ -246,7 +255,6 @@ app.get("/storage", async (req, res) => {
       used,
       total,
       available: total === null ? null : total - used,
-      plan: user.plan,
       planExpiresAt: user.planExpiresAt,
       storageBytes: user.storageBytes,
       usedStorage: user.usedStorage,
@@ -503,7 +511,7 @@ app.delete(HASH_ROUTE, async (req, res) => {
 app.get("/account", async (req, res) => {
   try {
     const npub = verifyAuthToken(req.headers.authorization, "get");
-    const user = (await db.getUser(npub)) ?? (await db.upsertUser(npub));
+    const user = (await db.getUser(npub)) ?? unpaidUser(npub);
     const { access } = withAccess(user, lifecycleConfig);
     res.json({
       ...user,
@@ -557,8 +565,6 @@ app.get("/admin/users", async (req, res) => {
     const result = await db.listUsers({
       page: Number(req.query["page"] ?? 1),
       pageSize: Number(req.query["pageSize"] ?? 25),
-      ...(typeof req.query["status"] === "string" ? { status: req.query["status"] as never } : {}),
-      ...(typeof req.query["plan"] === "string" ? { plan: req.query["plan"] } : {}),
       ...(typeof req.query["query"] === "string" ? { query: req.query["query"] } : {}),
     });
     res.json(result);
@@ -615,8 +621,9 @@ app.get("/admin/audit", async (req, res) => {
   }
 });
 
-// Manual plan grant / force status. NIP-98 action uses "upload" for writes;
-// the payload hash covers the JSON body.
+// Manual plan grant (admin console). Plan labels/billing live in
+// formstr-backend; this only writes the entitlement fields db-api enforces.
+// NIP-98 action uses "upload" for writes; the payload hash covers the JSON body.
 app.post("/admin/users/:npub/entitlement", express.json(), async (req, res) => {
   if (!adminLimiter.hit(clientIp(req))) return res.status(429).json({ error: "rate_limited" });
   const admin = await requireAdmin(req, res, adminIdentity);
@@ -624,22 +631,6 @@ app.post("/admin/users/:npub/entitlement", express.json(), async (req, res) => {
   try {
     const npub = String(req.params["npub"]);
     const user = await db.assignEntitlement(npub, { ...req.body, source: "admin" });
-    accessCache.invalidate(npub);
-    res.json(user);
-  } catch (error) {
-    if (error instanceof DbApiError) return res.status(error.status).json(error.body);
-    console.error(error);
-    res.status(502).json({ error: "db api failed" });
-  }
-});
-
-app.patch("/admin/users/:npub/status", express.json(), async (req, res) => {
-  if (!adminLimiter.hit(clientIp(req))) return res.status(429).json({ error: "rate_limited" });
-  const admin = await requireAdmin(req, res, adminIdentity);
-  if (!admin) return;
-  try {
-    const npub = String(req.params["npub"]);
-    const user = await db.setUserStatus(npub, req.body?.status);
     accessCache.invalidate(npub);
     res.json(user);
   } catch (error) {
@@ -766,7 +757,6 @@ app.post("/internal/purge/:npub", requireInternalRole, async (req, res) => {
       }
       purged += (await db.purgeUserBlobs(npub)).deleted;
     }
-    await db.setUserStatus(npub, "CLOSED");
     accessCache.invalidate(npub);
     res.json({ purged, status: "CLOSED" });
   } catch (error) {
@@ -776,10 +766,11 @@ app.post("/internal/purge/:npub", requireInternalRole, async (req, res) => {
 });
 
 // ── Console SPA ──────────────────────────────────────────────────────────────
-// The console build is baked into the proxy image at console/dist (see
+// The console build is baked into the proxy image at packages/console/dist (see
 // proxy/blossom/Dockerfile). In production nginx may serve the same dist
 // directly instead; the API routes above are unaffected either way.
-const consoleDist = new URL("../../../console/dist", import.meta.url).pathname;
+const consoleDist = new URL("../../../packages/console/dist", import.meta.url)
+  .pathname;
 app.use(express.static(consoleDist, { index: "index.html" }));
 // The explicit hash route is registered above; this fallback only sees
 // non-API, extension-less paths, so client-side routes work without

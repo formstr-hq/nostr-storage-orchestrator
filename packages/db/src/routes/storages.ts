@@ -1,6 +1,6 @@
 import { Router, type Router as ExpressRouter } from "express";
 import { StorageLifecycle, prisma, type Prisma } from "../prisma.js";
-import { storageToJson } from "../serialize.js";
+import { storageProviderToJson } from "../serialize.js";
 
 export const storagesRouter: ExpressRouter = Router();
 
@@ -40,7 +40,7 @@ function normalizeUrl(value: string): string {
 
 storagesRouter.get("/active", async (_req, res) => {
   const cutoff = new Date(Date.now() - ACTIVE_WINDOW_SECS * 1000);
-  const storages = await prisma.storage.findMany({
+  const storages = await prisma.storageProvider.findMany({
     where: {
       lifecycle: StorageLifecycle.LINKED,
       lastPingAt: { gt: cutoff },
@@ -48,7 +48,7 @@ storagesRouter.get("/active", async (_req, res) => {
       blossomPort: { not: null },
     },
   });
-  res.json(storages.map(storageToJson));
+  res.json(storages.map(storageProviderToJson));
 });
 
 // Mesh-PG providers: active storages that also expose a pg-agent. The
@@ -56,7 +56,7 @@ storagesRouter.get("/active", async (_req, res) => {
 // postgres stack never enter the mesh-PG placement pool.
 storagesRouter.get("/active-pg", async (_req, res) => {
   const cutoff = new Date(Date.now() - ACTIVE_WINDOW_SECS * 1000);
-  const storages = await prisma.storage.findMany({
+  const storages = await prisma.storageProvider.findMany({
     where: {
       lifecycle: StorageLifecycle.LINKED,
       lastPingAt: { gt: cutoff },
@@ -65,7 +65,7 @@ storagesRouter.get("/active-pg", async (_req, res) => {
       pgAgentPort: { not: null },
     },
   });
-  res.json(storages.map(storageToJson));
+  res.json(storages.map(storageProviderToJson));
 });
 
 // One-shot internal migration helper. Unknown URLs remain untouched so no
@@ -77,7 +77,7 @@ storagesRouter.post("/backfill-replicas", async (req, res) => {
     return res.status(400).json({ error: "invalid_dry_run" });
   }
 
-  const storages = await prisma.storage.findMany();
+  const storages = await prisma.storageProvider.findMany();
   const aliases = new Map<string, string>();
   const ambiguousAliases = new Set<string>();
   const addAlias = (url: string, npub: string) => {
@@ -129,16 +129,16 @@ storagesRouter.get("/", async (req, res) => {
   if (req.query.ownerNpub !== undefined && typeof req.query.ownerNpub !== "string") {
     return res.status(400).json({ error: "invalid_filter" });
   }
-  const storages = await prisma.storage.findMany({
+  const storages = await prisma.storageProvider.findMany({
     where: typeof req.query.ownerNpub === "string" ? { ownerNpub: req.query.ownerNpub } : {},
   });
-  res.json(storages.map(storageToJson));
+  res.json(storages.map(storageProviderToJson));
 });
 
 storagesRouter.get("/:npub", async (req, res) => {
-  const storage = await prisma.storage.findUnique({ where: { npub: req.params.npub! } });
+  const storage = await prisma.storageProvider.findUnique({ where: { npub: req.params.npub! } });
   if (!storage) return res.status(404).json({ error: "not_found" });
-  res.json(storageToJson(storage));
+  res.json(storageProviderToJson(storage));
 });
 
 storagesRouter.post("/", async (req, res) => {
@@ -148,44 +148,44 @@ storagesRouter.post("/", async (req, res) => {
   }
   try {
     const declaredCapacityBytes = parseBigInt(body.declaredCapacityBytes);
-    const existing = await prisma.storage.findUnique({ where: { npub: body.npub } });
+    const existing = await prisma.storageProvider.findUnique({ where: { npub: body.npub } });
     if (existing && existing.ownerNpub !== body.ownerNpub) {
       return res.status(409).json({ error: "owner_conflict" });
     }
     const storage = existing
-      ? await prisma.storage.update({
+      ? await prisma.storageProvider.update({
         where: { npub: body.npub, ownerNpub: body.ownerNpub },
         data: {
           lifecycle: StorageLifecycle.LINKED,
           ...(declaredCapacityBytes !== undefined ? { declaredCapacityBytes } : {}),
         },
       })
-      : await prisma.storage.create({ data: {
+      : await prisma.storageProvider.create({ data: {
         npub: body.npub,
         ownerNpub: body.ownerNpub,
         lifecycle: StorageLifecycle.LINKED,
         ...(declaredCapacityBytes !== undefined ? { declaredCapacityBytes } : {}),
       } });
-    res.status(existing ? 200 : 201).json(storageToJson(storage));
+    res.status(existing ? 200 : 201).json(storageProviderToJson(storage));
   } catch (error) {
     if (error instanceof Error && error.message === "invalid_bigint") {
       return res.status(400).json({ error: "invalid_bigint" });
     }
     if (error && typeof error === "object" && "code" in error && error.code === "P2002") {
-      const existing = await prisma.storage.findUnique({ where: { npub: body.npub } });
+      const existing = await prisma.storageProvider.findUnique({ where: { npub: body.npub } });
       if (existing && existing.ownerNpub !== body.ownerNpub) {
         return res.status(409).json({ error: "owner_conflict" });
       }
       if (existing) {
         const declaredCapacityBytes = parseBigInt(body.declaredCapacityBytes);
-        const storage = await prisma.storage.update({
+        const storage = await prisma.storageProvider.update({
           where: { npub: body.npub, ownerNpub: body.ownerNpub },
           data: {
             lifecycle: StorageLifecycle.LINKED,
             ...(declaredCapacityBytes !== undefined ? { declaredCapacityBytes } : {}),
           },
         });
-        return res.json(storageToJson(storage));
+        return res.json(storageProviderToJson(storage));
       }
     }
     throw error;
@@ -210,7 +210,7 @@ storagesRouter.patch("/:npub", async (req, res) => {
     if (body.tunnelIp !== undefined && body.tunnelIp !== null && typeof body.tunnelIp !== "string") {
       return res.status(400).json({ error: "invalid_storage" });
     }
-    const data: Prisma.StorageUpdateInput = {};
+    const data: Prisma.StorageProviderUpdateInput = {};
     if (body.tunnelIp === null || typeof body.tunnelIp === "string") data.tunnelIp = body.tunnelIp;
     if (blossomPort !== undefined) data.blossomPort = blossomPort;
     if (pgAgentPort !== undefined) data.pgAgentPort = pgAgentPort;
@@ -220,8 +220,8 @@ storagesRouter.patch("/:npub", async (req, res) => {
     if (body.lifecycle !== undefined) data.lifecycle = body.lifecycle as StorageLifecycle;
     if (lastPingAt !== undefined) data.lastPingAt = lastPingAt;
     if (createdAt !== undefined && createdAt !== null) data.createdAt = createdAt;
-    const storage = await prisma.storage.update({ where: { npub: req.params.npub! }, data });
-    res.json(storageToJson(storage));
+    const storage = await prisma.storageProvider.update({ where: { npub: req.params.npub! }, data });
+    res.json(storageProviderToJson(storage));
   } catch (error) {
     if (error instanceof Error && error.message === "invalid_bigint") {
       return res.status(400).json({ error: "invalid_bigint" });
@@ -235,11 +235,11 @@ storagesRouter.patch("/:npub", async (req, res) => {
 
 storagesRouter.delete("/:npub", async (req, res) => {
   try {
-    const storage = await prisma.storage.update({
+    const storage = await prisma.storageProvider.update({
       where: { npub: req.params.npub! },
       data: { lifecycle: StorageLifecycle.REMOVED },
     });
-    res.json(storageToJson(storage));
+    res.json(storageProviderToJson(storage));
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "P2025") {
       return res.status(404).json({ error: "not_found" });

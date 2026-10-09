@@ -1,19 +1,10 @@
-import type { NotificationLog, UserStatus, User } from "./prisma.js";
-import { UserStatus as UserStatusValues } from "./prisma.js";
-
-export type { UserStatus };
+import type { NotificationLog, User } from "./prisma.js";
 
 export function userToJson(user: User) {
   return {
     npub: user.npub,
-    role: user.role,
-    plan: user.plan,
     planExpiresAt: user.planExpiresAt?.toISOString() ?? null,
     storageBytes: user.storageBytes?.toString() ?? null,
-    status: user.status,
-    statusChangedAt: user.statusChangedAt?.toISOString() ?? null,
-    termsVersion: user.termsVersion,
-    termsAcceptedAt: user.termsAcceptedAt?.toISOString() ?? null,
     usedStorage: user.usedStorage.toString(),
     createdAt: user.createdAt.toISOString(),
   };
@@ -35,7 +26,7 @@ export function blobToJson(blob: {
   };
 }
 
-export function memberToJson(member: {
+export function meshMemberToJson(member: {
   npub: string;
   role: string;
   status: string;
@@ -54,7 +45,7 @@ export function memberToJson(member: {
   };
 }
 
-export function storageToJson(storage: {
+export function storageProviderToJson(storage: {
   npub: string;
   ownerNpub: string;
   tunnelIp: string | null;
@@ -109,11 +100,4 @@ export function moderationToJson(action: {
     reason: action.reason,
     createdAt: action.createdAt.toISOString(),
   };
-}
-
-export function isUserStatus(value: unknown): value is UserStatus {
-  return (
-    typeof value === "string" &&
-    (Object.values(UserStatusValues) as string[]).includes(value)
-  );
 }

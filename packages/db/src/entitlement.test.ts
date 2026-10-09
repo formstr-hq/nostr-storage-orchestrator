@@ -11,18 +11,15 @@ const NOW = new Date("2026-10-01T00:00:00.000Z");
 
 function user(overrides: Partial<Parameters<typeof computeEntitlement>[0]> = {}) {
   return {
-    plan: null as string | null,
     planExpiresAt: null as Date | null,
     storageBytes: null as bigint | null,
     usedStorage: 0n,
-    termsVersion: null as string | null,
     ...overrides,
   };
 }
 
 function request(overrides: Partial<Parameters<typeof parseEntitlementRequest>[0]> = {}) {
   return parseEntitlementRequest({
-    plan: "basic",
     durationDays: 30,
     storageBytes: "500000000",
     source: "payment",
@@ -31,42 +28,32 @@ function request(overrides: Partial<Parameters<typeof parseEntitlementRequest>[0
   });
 }
 
-test("first purchase sets plan, expiry, allowance and terms", () => {
-  const effect = computeEntitlement(
-    user({ termsVersion: null }),
-    request({ termsVersion: "2026-10-01" }),
-    NOW,
-  );
-  assert.equal(effect.plan, "basic");
+test("first purchase sets expiry and allowance", () => {
+  const effect = computeEntitlement(user(), request(), NOW);
   assert.equal(effect.storageBytes, 500000000n);
   assert.equal(effect.planExpiresAt.getTime(), NOW.getTime() + 30 * DAY);
-  assert.equal(effect.status, "ACTIVE");
-  assert.equal(effect.termsVersion, "2026-10-01");
 });
 
-test("extend adds days to the live expiry without changing plan", () => {
+test("extend adds days to the live expiry without changing the allowance", () => {
   const expiry = new Date(NOW.getTime() + 10 * DAY);
   const effect = computeEntitlement(
-    user({ plan: "pro", planExpiresAt: expiry, storageBytes: 2_000_000_000n }),
-    request({ plan: "pro", durationDays: 30, storageBytes: "2000000000", mode: "extend" }),
+    user({ planExpiresAt: expiry, storageBytes: 2_000_000_000n }),
+    request({ durationDays: 30, storageBytes: "2000000000", mode: "extend" }),
     NOW,
   );
-  assert.equal(effect.plan, "pro");
   assert.equal(effect.storageBytes, 2_000_000_000n);
   assert.equal(effect.planExpiresAt.getTime(), expiry.getTime() + 30 * DAY);
 });
 
-test("extend from an expired plan adds days from now and swaps the plan", () => {
+test("extend from an expired plan adds days from now and applies the new allowance", () => {
   const effect = computeEntitlement(
     user({
-      plan: "pro",
       planExpiresAt: new Date(NOW.getTime() - 5 * DAY),
       storageBytes: 2_000_000_000n,
     }),
-    request({ plan: "basic", durationDays: 30, storageBytes: "500000000", mode: "extend" }),
+    request({ durationDays: 30, storageBytes: "500000000", mode: "extend" }),
     NOW,
   );
-  assert.equal(effect.plan, "basic");
   assert.equal(effect.storageBytes, 500_000_000n);
   assert.equal(effect.planExpiresAt.getTime(), NOW.getTime() + 30 * DAY);
 });
@@ -74,43 +61,40 @@ test("extend from an expired plan adds days from now and swaps the plan", () => 
 test("upgrade applies immediately and preserves remaining days", () => {
   const expiry = new Date(NOW.getTime() + 10 * DAY);
   const effect = computeEntitlement(
-    user({ plan: "basic", planExpiresAt: expiry, storageBytes: 500_000_000n }),
-    request({ plan: "pro", durationDays: 30, storageBytes: "2000000000", mode: "upgrade" }),
+    user({ planExpiresAt: expiry, storageBytes: 500_000_000n }),
+    request({ durationDays: 30, storageBytes: "2000000000", mode: "upgrade" }),
     NOW,
   );
-  assert.equal(effect.plan, "pro");
   assert.equal(effect.storageBytes, 2_000_000_000n);
   assert.equal(effect.planExpiresAt.getTime(), expiry.getTime() + 30 * DAY);
 });
 
-test("downgrade after expiry with data over the new allowance enters GRACE", () => {
+test("downgrade after expiry applies the smaller allowance", () => {
   const effect = computeEntitlement(
     user({
-      plan: "pro",
       planExpiresAt: new Date(NOW.getTime() - DAY),
       storageBytes: 2_000_000_000n,
       usedStorage: 800_000_000n,
     }),
-    request({ plan: "basic", durationDays: 30, storageBytes: "500000000", mode: "extend" }),
+    request({ durationDays: 30, storageBytes: "500000000", mode: "extend" }),
     NOW,
   );
-  assert.equal(effect.plan, "basic");
-  assert.equal(effect.status, "GRACE");
+  assert.equal(effect.storageBytes, 500_000_000n);
 });
 
-test("renewal that leaves the user over quota enters GRACE", () => {
+test("renewal that leaves the user over quota keeps the allowance and sets a future expiry", () => {
   const expiry = new Date(NOW.getTime() + 10 * DAY);
   const effect = computeEntitlement(
     user({
-      plan: "pro",
       planExpiresAt: expiry,
       storageBytes: 2_000_000_000n,
       usedStorage: 2_500_000_000n,
     }),
-    request({ plan: "pro", durationDays: 30, storageBytes: "2000000000", mode: "extend" }),
+    request({ durationDays: 30, storageBytes: "2000000000", mode: "extend" }),
     NOW,
   );
-  assert.equal(effect.status, "GRACE");
+  assert.equal(effect.storageBytes, 2_000_000_000n);
+  assert.equal(effect.planExpiresAt.getTime(), expiry.getTime() + 30 * DAY);
 });
 
 test("live plan without a mode is rejected", () => {
@@ -118,11 +102,10 @@ test("live plan without a mode is rejected", () => {
     () =>
       computeEntitlement(
         user({
-          plan: "pro",
           planExpiresAt: new Date(NOW.getTime() + DAY),
           storageBytes: 2_000_000_000n,
         }),
-        request({ plan: "pro", mode: undefined }),
+        request({ mode: undefined }),
         NOW,
       ),
     (error: unknown) => error instanceof EntitlementError && error.code === "mode_required",
@@ -132,14 +115,13 @@ test("live plan without a mode is rejected", () => {
 test("admin force can downgrade a live plan", () => {
   const effect = computeEntitlement(
     user({
-      plan: "pro",
       planExpiresAt: new Date(NOW.getTime() + DAY),
       storageBytes: 2_000_000_000n,
     }),
-    request({ plan: "basic", storageBytes: "500000000", source: "admin", mode: "extend", force: true }),
+    request({ storageBytes: "500000000", source: "admin", mode: "extend", force: true }),
     NOW,
   );
-  assert.equal(effect.plan, "basic");
+  assert.equal(effect.storageBytes, 500_000_000n);
 });
 
 test("request parsing rejects bad input", () => {

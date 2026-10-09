@@ -1,12 +1,13 @@
 import express from "express";
 import { prisma } from "./prisma.js";
-import { blobToJson, userToJson } from "./serialize.js";
+import { blobToJson } from "./serialize.js";
 import { membersRouter } from "./routes/members.js";
 import { storagesRouter } from "./routes/storages.js";
 import { usersRouter } from "./routes/users.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { moderationRouter } from "./routes/moderation.js";
 import { adminRouter } from "./routes/admin.js";
+import { serviceAccountsRouter } from "./routes/service-accounts.js";
 
 const app = express();
 app.use(express.json());
@@ -30,20 +31,8 @@ app.use("/storages", storagesRouter);
 app.use("/users", usersRouter);
 app.use("/notifications", notificationsRouter);
 app.use("/moderation", moderationRouter);
+app.use("/service-accounts", serviceAccountsRouter);
 app.use("/", adminRouter);
-
-// Kept for compatibility with the control-plane and blossom proxy, which
-// upsert a user row on first contact. The extended serialization includes the
-// entitlement fields; plan writes go through /users/:npub/entitlement only.
-app.put("/users/:npub", async (req, res) => {
-  const npub = req.params.npub!;
-  const user = await prisma.user.upsert({
-    where: { npub },
-    update: {},
-    create: { npub },
-  });
-  res.json(userToJson(user));
-});
 
 // Must be registered before /blobs/:hash or "total" is captured as a hash.
 app.get("/blobs/total", async (_req, res) => {

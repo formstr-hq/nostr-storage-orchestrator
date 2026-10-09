@@ -5,16 +5,16 @@ import type {
   BlobRecord,
   EntitlementRequest,
   MemberRecord,
-  MemberRole,
-  MemberStatus,
+  MeshRole,
+  MeshStatus,
   NotificationRecord,
   ModerationRecord,
   Paginated,
+  ServiceAccountRecord,
   StorageRecord,
   StorageStats,
   StorageUpdate,
   UserInfo,
-  UserStatus,
 } from "./types.js";
 
 export class DbApiError extends Error {
@@ -102,10 +102,6 @@ export class DbClient {
     return this.get<UserInfo>(`/users/${encodeURIComponent(npub)}`);
   }
 
-  upsertUser(npub: string): Promise<UserInfo> {
-    return this.mutate<UserInfo>("PUT", `/users/${encodeURIComponent(npub)}`, {});
-  }
-
   getBlob(hash: string): Promise<BlobRecord | null> {
     return this.get<BlobRecord>(`/blobs/${encodeURIComponent(hash)}`);
   }
@@ -134,11 +130,9 @@ export class DbClient {
   }
 
   listUsers(
-    filters: { status?: UserStatus; plan?: string; query?: string; page?: number; pageSize?: number } = {},
+    filters: { query?: string; page?: number; pageSize?: number } = {},
   ): Promise<Paginated<UserInfo>> {
     const query = new URLSearchParams();
-    if (filters.status) query.set("status", filters.status);
-    if (filters.plan) query.set("plan", filters.plan);
     if (filters.query) query.set("query", filters.query);
     if (filters.page) query.set("page", String(filters.page));
     if (filters.pageSize) query.set("pageSize", String(filters.pageSize));
@@ -148,10 +142,6 @@ export class DbClient {
 
   listAttentionUsers(page = 1, pageSize = 100): Promise<Paginated<UserInfo>> {
     return this.getOk(`/users/attention?page=${page}&pageSize=${pageSize}`);
-  }
-
-  setUserStatus(npub: string, status: UserStatus): Promise<UserInfo> {
-    return this.mutate("PATCH", `/users/${encodeURIComponent(npub)}/status`, { status });
   }
 
   listUserBlobs(npub: string, page = 1, pageSize = 25): Promise<Paginated<BlobRecord>> {
@@ -230,11 +220,24 @@ export class DbClient {
     return this.getOk(`/moderation${suffix}`);
   }
 
+  getServiceAccount(npub: string): Promise<ServiceAccountRecord | null> {
+    return this.get<ServiceAccountRecord>(`/service-accounts/${encodeURIComponent(npub)}`);
+  }
+
+  listServiceAccounts(filters: { enabled?: boolean; page?: number; pageSize?: number } = {}): Promise<Paginated<ServiceAccountRecord>> {
+    const query = new URLSearchParams();
+    if (filters.enabled !== undefined) query.set("enabled", String(filters.enabled));
+    if (filters.page) query.set("page", String(filters.page));
+    if (filters.pageSize) query.set("pageSize", String(filters.pageSize));
+    const suffix = query.size > 0 ? `?${query}` : "";
+    return this.getOk(`/service-accounts${suffix}`);
+  }
+
   getMember(npub: string): Promise<MemberRecord | null> {
     return this.get<MemberRecord>(`/members/${encodeURIComponent(npub)}`);
   }
 
-  listMembers(filters: { role?: MemberRole; status?: MemberStatus } = {}): Promise<Array<MemberRecord & { storageCount: number }>> {
+  listMembers(filters: { role?: MeshRole; status?: MeshStatus } = {}): Promise<Array<MemberRecord & { storageCount: number }>> {
     const query = new URLSearchParams();
     if (filters.role) query.set("role", filters.role);
     if (filters.status) query.set("status", filters.status);
@@ -242,7 +245,7 @@ export class DbClient {
     return this.getOk(`/members${suffix}`);
   }
 
-  putMember(npub: string, data: { role?: MemberRole; addedByNpub?: string | null }): Promise<MemberRecord> {
+  putMember(npub: string, data: { role?: MeshRole; addedByNpub?: string | null }): Promise<MemberRecord> {
     return this.mutate("PUT", `/members/${encodeURIComponent(npub)}`, data);
   }
 

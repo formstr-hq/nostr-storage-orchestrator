@@ -7,9 +7,12 @@ the previous incremental framing: the existing `PLAN_CONFIG` (per-plan
 replicas, global cap, FREE tier) is **not** carried forward. The new service
 has no free tier, enforces only **total storage allowance** and **plan time**,
 holds no payment records, and derives all payment/billing data from
-`formstr-backend`. T&C acceptance is recorded here (orchestrator), not in the
-backend. The prior draft's `PlanGrant`, notification preferences, and
-backend-side T&C fields are removed rather than iterated on.
+`formstr-backend`. T&C acceptance is owned by `formstr-backend`; the
+orchestrator does not store it (the `User.termsVersion`/`termsAcceptedAt`
+columns added by the initial entitlements migration were dropped by
+`20261009150000_remove_user_terms`). The prior draft's `PlanGrant`,
+notification preferences, and backend-side T&C fields are removed rather than
+iterated on.
 
 ## Goal
 
@@ -47,7 +50,7 @@ Turn `proxy/blossom` into a self-serve, paid storage service:
 | 7 | Console | New React + Vite SPA in this repo, served at the blossom hostname |
 | 8 | Notifications | NIP-17 DM + email, both best-effort, no per-user channel preferences |
 | 9 | Admin identity | Single registry: `formstr-backend.users.role='admin'`; both systems check it |
-| 10 | T&C | Recorded in the orchestrator (`db-api`); acceptance is a required field of the purchase request. Only payment info lives in the backend |
+| 10 | T&C | Owned by `formstr-backend`; acceptance is a required field of the purchase request and the accepted version is kept on the backend side |
 
 ## Architecture
 
@@ -73,13 +76,13 @@ Turn `proxy/blossom` into a self-serve, paid storage service:
                           └ email → formstr-backend /api/storage/notify
 ```
 
-- **formstr-backend owns money and plans**: plan catalog (config file),
-  invoices, prices, payment receipts. It exposes billing and role endpoints
-  the console uses.
-- **Orchestrator owns storage, entitlement, and compliance**: who may upload,
-  how much total storage, until when; blob metadata; T&C acceptance records;
-  notifications already sent; moderation audit. It stores no amounts,
-  invoices, or hashes.
+- **formstr-backend owns money, plans, and T&C**: plan catalog (config file),
+  invoices, prices, payment receipts, terms acceptance. It exposes billing and
+  role endpoints the console uses.
+- **Orchestrator owns storage, entitlement, and lifecycle**: who may upload,
+  how much total storage, until when; blob metadata; notifications already
+  sent; moderation audit. It stores no amounts, invoices, hashes, or T&C
+  acceptance records.
 
 ## Plans
 
@@ -131,6 +134,18 @@ integer prices in sats, positive durations, positive storage allowances):
 
 ## Entitlement model (`proxy/blossom` + `db-api`)
 
+> **Current implementation (supersedes the schema details below).** The
+> orchestrator stores only `planExpiresAt`, `storageBytes`, and `usedStorage`
+> per user, in a snake_case `user` table that contains **paid users only**.
+> `plan` (the catalog id), `status`, and `statusChangedAt` were removed: plan
+> labels/history are owned by `formstr-backend`, and lifecycle status is
+> derived at request time (`deriveAccess`) with no stored mirror. Machine
+> callers live in a separate `service_account` table, not `User.role`. The
+> entitlement wire request no longer carries `plan` or `termsVersion` —
+> `{ durationDays, storageBytes, source, mode?, force?, planExpiresAt? }`.
+> `formstr-backend` exposes the plan catalog + enforced values to the console
+> at `GET /api/storage/subscription`.
+
 The only per-user state the orchestrator stores:
 
 - `plan` — plan id string (nullable; null = never purchased)
@@ -153,7 +168,6 @@ Assignment is a single atomic `db-api` transaction
   "plan": "pro",
   "durationDays": 30,
   "storageBytes": 2147483648,
-  "termsVersion": "2026-10-01",
   "source": "payment",       // or "admin"
   "mode": "extend"           // "extend" (same/lower plan) | "upgrade"
 }
@@ -165,8 +179,7 @@ Assignment is a single atomic `db-api` transaction
 //   "upgrade":
 //     plan = request.plan; storageBytes = request.storageBytes   (immediate)
 //     planExpiresAt = max(now, user.planExpiresAt ?? now) + durationDays
-//   both: termsVersion = request.termsVersion; termsAcceptedAt = now
-//         status = ACTIVE if usedStorage <= storageBytes, else GRACE
+//   both: status = ACTIVE if usedStorage <= storageBytes, else GRACE
 ```
 
 `mode` is optional on the wire and derived when absent: `request.plan`'s
@@ -255,8 +268,8 @@ Additive migration (own commit, reviewed before it runs anywhere):
   - `status UserStatus @default(UNPAID)`
   - `statusChangedAt DateTime?`
   - existing `usedStorage` (checked against `storageBytes`), `createdAt`
-  - `termsVersion String?`, `termsAcceptedAt DateTime?` (compliance record;
-    written by the entitlement call, versioned by the lifecycle/T&C config)
+  - **no** terms columns (initially added, dropped by
+    `20261009150000_remove_user_terms`; T&C is owned by `formstr-backend`)
   - indexes on `status`, `planExpiresAt`
   - **no** `notifyNostr` / `notifyEmail` (no per-user prefs; both channels
     are attempted whenever configured)
@@ -267,7 +280,8 @@ Additive migration (own commit, reviewed before it runs anywhere):
 - `ModerationAction` — `id`, `hash`, `npub`, `adminNpub`, `reason`,
   `createdAt`.
 - **No `PlanGrant`** — all money-related rows (invoices, amounts, payment
-  hashes) live in `formstr-backend`; T&C acceptance lives here, on `User`.
+  hashes) live in `formstr-backend`; T&C acceptance is owned by the backend
+  too, so the orchestrator keeps no compliance record.
 
 Existing rows are untouched; legacy FREE users land in `UNPAID` under the new
 derivation (no plan expiry) and simply cannot upload until they purchase or
@@ -288,12 +302,13 @@ in its own commit and reviewed before it runs anywhere. Generated with
 | `ALTER TABLE "User"` | column | `storageBytes BIGINT` (nullable) |
 | `ALTER TABLE "User"` | column | `status "UserStatus" NOT NULL DEFAULT 'UNPAID'` |
 | `ALTER TABLE "User"` | column | `statusChangedAt TIMESTAMP(3)` (nullable) |
-| `ALTER TABLE "User"` | column | `termsVersion TEXT` (nullable) |
-| `ALTER TABLE "User"` | column | `termsAcceptedAt TIMESTAMP(3)` (nullable) |
 | `CREATE INDEX` | `User` | `User_status_idx (status)` |
 | `CREATE INDEX` | `User` | `User_planExpiresAt_idx (planExpiresAt)` |
 | `CREATE TABLE` | `NotificationLog` | `id`, `npub TEXT`, `kind TEXT`, `ref TEXT?`, `channel TEXT`, `sentAt TIMESTAMP(3)`, unique `(npub, kind, ref, channel)` |
 | `CREATE TABLE` | `ModerationAction` | `id`, `hash TEXT`, `npub TEXT`, `adminNpub TEXT`, `reason TEXT`, `createdAt TIMESTAMP(3)`, indexes on `hash`, `npub` |
+
+A follow-up migration, `20261009150000_remove_user_terms`, drops the two
+terms columns; T&C acceptance/versioning is owned by `formstr-backend`.
 
 Notes:
 
@@ -320,7 +335,7 @@ keep their current behaviour. Reachability from `formstr-backend` is via the
 
 | Method | Path | Auth | Purpose |
 | ------ | ---- | ---- | ------- |
-| POST | `/users/:npub/entitlement` | service | atomic assign/extend/upgrade (plan, durationDays, storageBytes, termsVersion, source, mode?) |
+| POST | `/users/:npub/entitlement` | service | atomic assign/extend/upgrade (plan, durationDays, storageBytes, source, mode?) |
 | GET | `/users` | service | paginated list with filters (`status`, `plan`, `query`) |
 | GET | `/users/:npub` | none | extended serialization (plan, expiry, storageBytes, status, usedStorage) |
 | PATCH | `/users/:npub/status` | service | notifier/admin status mirror |
@@ -368,7 +383,7 @@ gains typed methods; `serialize.ts` covers the new fields.
    list blobs → delete bytes on all replicas via `servers.ts` → delete rows →
    set `CLOSED`; returns counts. Keeps byte deletion in the service that owns
    the storage registry.
-5. **Serve the console**: static `console/dist` + SPA fallback, registered
+5. **Serve the console**: static `packages/console/dist` + SPA fallback, registered
    before an explicit hash route (`/^[a-f0-9]{64}(\.[a-z0-9]+)?$/`) so the
    old `/:hashWithExt` catch-all cannot swallow `/dashboard`, `/admin`,
    `/legal/*`. nginx may serve the same `dist` instead; both documented.
@@ -381,8 +396,7 @@ gains typed methods; `serialize.ts` covers the new fields.
    serves it for the console.
 2. `paymentController.ts`: `generateStorageInvoiceHandler` — NIP-98 auth,
    `{plan, termsAccepted, termsVersion}` body; reject unknown plan or
-   unaccepted terms (the backend validates only that acceptance was sent — the
-   authoritative record is written by the orchestrator on entitlement);
+   unaccepted terms (the backend is the authoritative T&C record);
    resolve the buyer's current plan/expiry from `db-api` and reject a
    lower-rank purchase while a plan is live (`downgrade_not_allowed`); derive
    `mode` (`upgrade` when rank is higher, else `extend`); zap request with
@@ -399,9 +413,8 @@ gains typed methods; `serialize.ts` covers the new fields.
 4. `services/paymentCheck.ts` + `scripts/reconcilePendingStoragePlans.ts`
    follow the mail reconciler so a missed live receipt still grants.
 5. T&C acceptance is carried through the purchase (`termsAccepted` +
-   `termsVersion` in the request) but is **recorded by the orchestrator** on
-   the entitlement write — the pending/invoice rows only note the version
-   sent, keeping the compliance record in one place.
+   `termsVersion` in the request); `formstr-backend` owns the acceptance
+   record and the version stamped on the invoice.
 6. `POST /api/storage/notify` (service token): `{pubkey, event, data}` →
    resolve an address from the mail/nip-05 tables → render a template
    (`storage-expiry.md`, `storage-quota.md`, `storage-moderation.md`,
@@ -432,7 +445,6 @@ is matched against:
 | `amount_sats` | integer | amount actually invoiced, from the catalog, never the request |
 | `ln_invoice` | text | BOLT11 can run long — `text`, matching `pendingMails`/`pendingDomainOrders` |
 | `payment_hash` | string | **unique**, notNullable — the zap-request pubkey the receipt carries in `#p` |
-| `terms_version` | string | version the buyer accepted, kept so provisioning/audit can see what was shown |
 | `granted_at` | timestamp | nullable; set when entitlement is written, so duplicate receipts are detectable |
 | `created_at` / `updated_at` | timestamp | default `now()` |
 | index | `pubkey` | buyer lookups |
@@ -444,8 +456,8 @@ is matched against:
 | `ALTER TABLE invoices` | `terms_version TEXT` (nullable) | version sent with the storage purchase; null for mail/form/workspace invoices |
 
 No changes to `users`, `invoices` other than the above, or any other table.
-T&C acceptance itself is **not** stored here (orchestrator owns it); the
-backend only records which version the purchase carried.
+T&C acceptance and the accepted version are owned by `formstr-backend`; the
+orchestrator stores neither.
 
 Rollback for both is `down()` (drop table / drop column) and is not run
 automatically.
@@ -472,9 +484,9 @@ automatically.
   1. `GET /users/attention`; derive each user's state.
   2. Mirror changed states via `PATCH /users/:npub/status`.
   3. Send due notifications (dedupe key `npub + kind + ref`):
-     purchase confirmation, expiry warnings at the configured days
-     (14/3/1), grace entered, uploads blocked, reads blocked (with purge
-     date), purged/closed, moderation deletion.
+     expiry warnings at the configured days (14/3/1), grace entered, uploads
+     blocked, reads blocked (with purge date), purged/closed, moderation
+     deletion. Purchase confirmations are sent by `formstr-backend`.
   4. Both channels attempted independently; a missing email address or
      unreachable DM relay is logged, not retried forever.
   5. If `purgeEnabled` and the retention window elapsed, call
@@ -482,7 +494,7 @@ automatically.
 - No preference storage: DMs are always sent; email is sent when the user
   has an address.
 
-## Console (`console/`, `@orchestrator/console`)
+## Console (`packages/console/`, `@orchestrator/console`)
 
 React + Vite + TypeScript, NIP-07 signer connect (`window.nostr`,
 compatible with `packages/browser-signer`), helpers to sign BUD-11 and

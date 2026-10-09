@@ -1,23 +1,24 @@
 import { Router, type Router as ExpressRouter } from "express";
 import { prisma } from "../prisma.js";
-import { requireInternalRole } from "../internal-auth.js";
+import { requireServiceAccount } from "../internal-auth.js";
 import {
   EntitlementError,
   computeEntitlement,
   parseEntitlementRequest,
 } from "../entitlement.js";
-import { blobToJson, isUserStatus, notificationToJson, userToJson } from "../serialize.js";
+import { blobToJson, notificationToJson, userToJson } from "../serialize.js";
 import { paginated, parsePagination, queryString } from "../pagination.js";
 
 export const usersRouter: ExpressRouter = Router();
 
 // Users due for lifecycle/notification evaluation. Registered before
-// /:npub so "attention" is not captured as an npub.
-usersRouter.get("/attention", requireInternalRole, async (req, res) => {
+// /:npub so "attention" is not captured as an npub. Anyone with an expiry is
+// due for evaluation; the derived access state decides what, if anything, is
+// sent.
+usersRouter.get("/attention", requireServiceAccount, async (req, res) => {
   const pagination = parsePagination(req.query as Record<string, unknown>);
   const where = {
     planExpiresAt: { not: null },
-    status: { not: "CLOSED" as never },
   };
   const [items, total] = await Promise.all([
     prisma.user.findMany({
@@ -41,16 +42,12 @@ usersRouter.get("/:npub", async (req, res) => {
   res.json(userToJson(user));
 });
 
-// Paginated list with optional status/plan/query filters.
-usersRouter.get("/", requireInternalRole, async (req, res) => {
-  const status = queryString(req.query.status);
-  const plan = queryString(req.query.plan);
+// Paginated list with an optional npub substring filter.
+usersRouter.get("/", requireServiceAccount, async (req, res) => {
   const query = queryString(req.query.query);
   const pagination = parsePagination(req.query as Record<string, unknown>);
 
   const where = {
-    ...(status ? { status: status as never } : {}),
-    ...(plan ? { plan } : {}),
     ...(query
       ? { npub: { contains: query, mode: "insensitive" as const } }
       : {}),
@@ -73,8 +70,10 @@ usersRouter.get("/", requireInternalRole, async (req, res) => {
  * Atomic entitlement assign/extend/upgrade. See
  * docs/BLOSSOM_PRODUCTIONISATION_PLAN.md — the transaction is the single
  * write path for plan state; formstr-backend pushes paid purchases here.
+ * The upsert creates the row: this is the only place a user is created, so
+ * the user table contains paid users only.
  */
-usersRouter.post("/:npub/entitlement", requireInternalRole, async (req, res) => {
+usersRouter.post("/:npub/entitlement", requireServiceAccount, async (req, res) => {
   const npub = String(req.params.npub);
   let request;
   try {
@@ -88,9 +87,6 @@ usersRouter.post("/:npub/entitlement", requireInternalRole, async (req, res) => 
 
   try {
     const user = await prisma.$transaction(async (tx) => {
-      // A purchase can arrive before the user has ever contacted the proxy
-      // (db-api only learns about users from proxy upserts), so the
-      // entitlement write creates the row when missing.
       const current = await tx.user.upsert({
         where: { npub },
         update: {},
@@ -101,13 +97,8 @@ usersRouter.post("/:npub/entitlement", requireInternalRole, async (req, res) => 
       return tx.user.update({
         where: { npub },
         data: {
-          plan: effect.plan,
           planExpiresAt: effect.planExpiresAt,
           storageBytes: effect.storageBytes,
-          status: effect.status,
-          statusChangedAt: new Date(),
-          termsVersion: effect.termsVersion,
-          termsAcceptedAt: effect.termsAcceptedAt,
         },
       });
     });
@@ -115,28 +106,6 @@ usersRouter.post("/:npub/entitlement", requireInternalRole, async (req, res) => 
   } catch (error) {
     if (error instanceof EntitlementError) {
       return res.status(error.status).json({ error: error.code });
-    }
-    console.error(error);
-    res.status(500).json({ error: "internal_error" });
-  }
-});
-
-// Notifier/admin lifecycle mirror.
-usersRouter.patch("/:npub/status", requireInternalRole, async (req, res) => {
-  const npub = String(req.params.npub);
-  const { status } = req.body as { status?: string };
-  if (!isUserStatus(status)) {
-    return res.status(400).json({ error: "invalid_status" });
-  }
-  try {
-    const user = await prisma.user.update({
-      where: { npub },
-      data: { status, statusChangedAt: new Date() },
-    });
-    res.json(userToJson(user));
-  } catch (error) {
-    if ((error as { code?: string }).code === "P2025") {
-      return res.status(404).json({ error: "not_found" });
     }
     console.error(error);
     res.status(500).json({ error: "internal_error" });
@@ -160,7 +129,7 @@ usersRouter.get("/:npub/blobs", async (req, res) => {
 
 // Transactional bulk delete (purge): returns deleted rows, or the deletion
 // is rolled back entirely.
-usersRouter.delete("/:npub/blobs", requireInternalRole, async (req, res) => {
+usersRouter.delete("/:npub/blobs", requireServiceAccount, async (req, res) => {
   const npub = String(req.params.npub);
   try {
     const result = await prisma.$transaction(async (tx) => {

@@ -5,7 +5,6 @@ import { SignerProvider, SignerChip, useSigner } from "./signer";
 import { WelcomePage } from "./pages/Welcome";
 import { PricingPage } from "./pages/Pricing";
 import { DashboardPage } from "./pages/Dashboard";
-import { AdminPage } from "./pages/Admin";
 import { LegalPage } from "./pages/Legal";
 import "./styles.css";
 
@@ -35,7 +34,6 @@ function ThemeToggle() {
 }
 
 function Masthead() {
-  const { identities } = useSigner();
   return (
     <header className="masthead">
       <NavLink to="/" className="brand" style={{ textDecoration: "none" }}>
@@ -62,11 +60,6 @@ function Masthead() {
           <NavLink to="/dashboard" className={({ isActive }) => (isActive ? "active" : "")}>
             Dashboard
           </NavLink>
-          {identities && (
-            <NavLink to="/admin" className={({ isActive }) => (isActive ? "active" : "")}>
-              Admin
-            </NavLink>
-          )}
         </nav>
         <SignerChip />
         <ThemeToggle />
@@ -96,14 +89,6 @@ function App() {
                 element={
                   <Protected>
                     <DashboardPage />
-                  </Protected>
-                }
-              />
-              <Route
-                path="/admin"
-                element={
-                  <Protected>
-                    <AdminPage />
                   </Protected>
                 }
               />

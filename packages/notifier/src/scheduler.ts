@@ -20,26 +20,24 @@ export interface NotifierOptions {
 
 export interface NotifierResult {
   evaluated: number;
-  statusMirrored: number;
   sent: number;
 }
 
 /**
- * One scheduler pass: mirror lifecycle state, then send every due
- * notification on both channels. Dedupe is enforced server-side by the
- * NotificationLog unique key, so a crash between send and log at worst sends
- * a duplicate, never drops one.
+ * One scheduler pass: send every due notification on both channels and purge
+ * accounts past the retention window. Dedupe is enforced server-side by the
+ * NotificationLog unique key, so a crash between send and log at worst sends a
+ * duplicate, never drops one.
  */
 export async function runOnce(options: NotifierOptions): Promise<NotifierResult> {
   const now = (options.now ?? (() => new Date()))();
   const pageSize = 100;
 
   let evaluated = 0;
-  let statusMirrored = 0;
   let sent = 0;
 
-  // Page through the attention set. Status mirrors and notification logs are
-  // idempotent, so overlapping passes are safe.
+  // Page through the attention set. Notification logs are idempotent, so
+  // overlapping passes are safe.
   for (let page = 1; ; page += 1) {
     const result = await options.db.listAttentionUsers(page, pageSize);
     evaluated += result.items.length;
@@ -47,7 +45,6 @@ export async function runOnce(options: NotifierOptions): Promise<NotifierResult>
     for (const user of result.items) {
       const access = deriveAccess(
         {
-          plan: user.plan,
           planExpiresAt: user.planExpiresAt,
           storageBytes: user.storageBytes,
           usedStorage: user.usedStorage,
@@ -55,15 +52,6 @@ export async function runOnce(options: NotifierOptions): Promise<NotifierResult>
         now,
         options.config,
       );
-
-      if (user.status !== access.status) {
-        try {
-          await options.db.setUserStatus(user.npub, access.status);
-          statusMirrored += 1;
-        } catch (error) {
-          console.error(`failed to mirror status for ${user.npub}`, error);
-        }
-      }
 
       const due = dueNotifications(user, access, options.config, now);
       sent += await deliverAll(options, user, due);
@@ -94,7 +82,7 @@ export async function runOnce(options: NotifierOptions): Promise<NotifierResult>
     if (result.items.length < pageSize || page * pageSize >= result.total) break;
   }
 
-  return { evaluated, statusMirrored, sent };
+  return { evaluated, sent };
 }
 
 async function deliverAll(

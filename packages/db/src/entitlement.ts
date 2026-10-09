@@ -3,11 +3,15 @@ import type { User } from "./prisma.js";
 export type EntitlementMode = "extend" | "upgrade";
 export type EntitlementSource = "payment" | "admin";
 
+/**
+ * An entitlement write. Deliberately carries no plan id: the plan catalog and
+ * the mapping of plan to allowance live in formstr-backend, which owns the
+ * purchase. This repo stores and enforces only the resulting expiry and
+ * allowance.
+ */
 export interface EntitlementRequest {
-  plan: string;
   durationDays: number;
   storageBytes: number | string;
-  termsVersion?: string | null;
   source: EntitlementSource;
   mode?: EntitlementMode;
   force?: boolean;
@@ -45,13 +49,9 @@ export function parseEntitlementRequest(body: unknown): ParsedEntitlementRequest
   }
   const b = body as Record<string, unknown>;
 
-  const plan = b.plan;
   const durationDays = b.durationDays;
   const source = b.source;
 
-  if (typeof plan !== "string" || plan.length === 0 || plan.length > 64) {
-    throw new EntitlementError(400, "invalid_plan");
-  }
   if (
     typeof durationDays !== "number" ||
     !Number.isInteger(durationDays) ||
@@ -85,15 +85,11 @@ export function parseEntitlementRequest(body: unknown): ParsedEntitlementRequest
   }
 
   const result: ParsedEntitlementRequest = {
-    plan,
     durationDays,
     storageBytes: b.storageBytes as number | string,
     source,
     storageBytesBig,
   };
-  if (typeof b.termsVersion === "string" && b.termsVersion.length > 0) {
-    result.termsVersion = b.termsVersion;
-  }
   if (mode === "extend" || mode === "upgrade") result.mode = mode;
   if (force) result.force = true;
 
@@ -111,18 +107,11 @@ export function parseEntitlementRequest(body: unknown): ParsedEntitlementRequest
 }
 
 export interface EntitlementEffect {
-  plan: string;
   planExpiresAt: Date;
   storageBytes: bigint;
-  status: "ACTIVE" | "GRACE";
-  termsVersion: string | null;
-  termsAcceptedAt: Date;
 }
 
-type UserEntitlement = Pick<
-  User,
-  "plan" | "planExpiresAt" | "storageBytes" | "usedStorage" | "termsVersion"
->;
+type UserEntitlement = Pick<User, "planExpiresAt" | "storageBytes" | "usedStorage">;
 
 /**
  * Pure computation of the new entitlement fields for a user. Kept separate
@@ -132,8 +121,8 @@ type UserEntitlement = Pick<
  * `mode` is normally supplied by formstr-backend, which owns the plan
  * catalog and derives it from `rank`. When it is absent db-api can only
  * safely extend a non-live plan; extending a live plan without knowing the
- * ranks could silently downgrade, so that combination is rejected with
- * `mode_required` as a final invariant.
+ * ranks could silently downgrade the allowance, so that combination is
+ * rejected with `mode_required` as a final invariant.
  */
 export function computeEntitlement(
   user: UserEntitlement,
@@ -141,7 +130,6 @@ export function computeEntitlement(
   now: Date = new Date(),
 ): EntitlementEffect {
   const live =
-    user.plan !== null &&
     user.planExpiresAt !== null &&
     user.planExpiresAt.getTime() > now.getTime();
 
@@ -154,33 +142,14 @@ export function computeEntitlement(
   const base = Math.max(now.getTime(), user.planExpiresAt?.getTime() ?? 0);
   const planExpiresAt = new Date(base + request.durationDays * DAY_MS);
 
-  let plan: string;
-  let storageBytes: bigint;
-  let termsVersion: string | null;
-
-  if (mode === "upgrade") {
-    plan = request.plan;
-    storageBytes = request.storageBytesBig;
-    termsVersion = request.termsVersion ?? null;
-  } else {
-    // extend: only set the plan when there is no live plan. A renewal of a
-    // still-live plan leaves plan/allowance untouched. An admin force is an
-    // explicit override and always applies the requested plan/allowance.
-    const preserve = live && !request.force;
-    plan = preserve ? user.plan! : request.plan;
-    storageBytes = preserve ? user.storageBytes! : request.storageBytesBig;
-    termsVersion = request.termsVersion ?? user.termsVersion ?? null;
-  }
-
-  // Admin expiry override wins over the computed expiry (ops reconciliation).
-  const status = user.usedStorage > storageBytes ? "GRACE" : "ACTIVE";
+  // extend: a renewal of a still-live plan leaves the allowance untouched.
+  // upgrade: always applies the requested allowance. An admin force is an
+  // explicit override and always applies the requested allowance.
+  const preserve = mode === "extend" && live && !request.force;
+  const storageBytes = preserve ? user.storageBytes! : request.storageBytesBig;
 
   return {
-    plan,
     planExpiresAt: request.planExpiresAt ? new Date(request.planExpiresAt) : planExpiresAt,
     storageBytes,
-    status,
-    termsVersion,
-    termsAcceptedAt: now,
   };
 }

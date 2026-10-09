@@ -873,78 +873,6 @@ tr:last-child td {
   font-size: 0.78rem;
   color: var(--muted);
 }
-.audit-log {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  max-height: 340px;
-  overflow-y: auto;
-}
-.audit-item {
-  display: flex;
-  gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
-}
-.audit-item:last-child {
-  border-bottom: none;
-}
-.audit-ico {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  flex-shrink: 0;
-  background: var(--bad-bg);
-  color: var(--bad);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.audit-title {
-  font-size: 0.84rem;
-  font-weight: 600;
-}
-.audit-meta {
-  font-size: 0.76rem;
-  color: var(--faint);
-  margin-top: 3px;
-  font-family: var(--font-mono);
-}
-.mod-field {
-  margin-top: 14px;
-}
-.mod-field label {
-  font-size: 0.78rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--gray-500);
-}
-.mod-field textarea {
-  width: 100%;
-  margin-top: 7px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--line-strong);
-  font-family: inherit;
-  font-size: 0.86rem;
-  resize: vertical;
-  min-height: 72px;
-  background: var(--paper);
-  color: var(--ink);
-}
-.mod-hash {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  background: var(--line);
-  border-radius: 10px;
-  padding: 10px 12px;
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-}
 .toast {
   position: fixed;
   bottom: 24px;
@@ -964,26 +892,6 @@ tr:last-child td {
 .toast.show {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
-}
-.admin-kicker {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  color: var(--muted);
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 6px 12px;
-  width: fit-content;
-  margin-bottom: 12px;
-}
-.admin-kicker .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--good);
 }
 .muted {
   color: var(--muted);

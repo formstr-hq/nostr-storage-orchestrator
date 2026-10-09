@@ -1,22 +1,7 @@
-export type UserStatus =
-  | "UNPAID"
-  | "ACTIVE"
-  | "GRACE"
-  | "WRITE_BLOCKED"
-  | "READ_BLOCKED"
-  | "CLOSED";
-
 export interface UserInfo {
   npub: string;
-  /** Internal role: "user" | "service" | "admin". */
-  role: string;
-  plan: string | null;
   planExpiresAt: string | null;
   storageBytes: string | null;
-  status: UserStatus;
-  statusChangedAt: string | null;
-  termsVersion: string | null;
-  termsAcceptedAt: string | null;
   usedStorage: string;
   createdAt: string;
 }
@@ -37,10 +22,8 @@ export interface Paginated<T> {
 }
 
 export interface EntitlementRequest {
-  plan: string;
   durationDays: number;
   storageBytes: string | number;
-  termsVersion?: string;
   source: "payment" | "admin";
   mode?: "extend" | "upgrade";
   force?: boolean;
@@ -68,18 +51,23 @@ export interface StorageStats {
   users: number;
   blobs: number;
   bytes: string;
-  byStatus: Record<string, number>;
-  byPlan: Record<string, number>;
 }
 
-export type MemberRole = "CLIENT" | "ADMIN";
-export type MemberStatus = "ACTIVE" | "REVOKED";
+export interface ServiceAccountRecord {
+  npub: string;
+  label: string | null;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export type MeshRole = "CLIENT" | "ADMIN";
+export type MeshStatus = "ACTIVE" | "REVOKED";
 export type StorageLifecycle = "LINKED" | "REMOVED";
 
 export interface MemberRecord {
   npub: string;
-  role: MemberRole;
-  status: MemberStatus;
+  role: MeshRole;
+  status: MeshStatus;
   addedByNpub: string | null;
   createdAt: string;
   updatedAt: string;
