@@ -68,6 +68,61 @@ storagesRouter.get("/active-pg", async (_req, res) => {
   res.json(storages.map(storageProviderToJson));
 });
 
+// Capacity for new signups. Sums the free space the active providers last
+// reported. Every blob is stored on up to BLOSSOM_REPLICAS providers, so the
+// room for *new* data is the free space divided by the replica count (never
+// more replicas than there are providers). New buyers are turned away once that
+// drops below SIGNUPS_MIN_FREE_BYTES; existing users can always renew. With
+// SIGNUPS_COUNT_COMMITMENTS=true the unused part of every live allowance is
+// subtracted too, so the service cannot sell more than it can hold.
+storagesRouter.get("/capacity", async (_req, res) => {
+  const cutoff = new Date(Date.now() - ACTIVE_WINDOW_SECS * 1000);
+  const providers = await prisma.storageProvider.findMany({
+    where: {
+      lifecycle: StorageLifecycle.LINKED,
+      lastPingAt: { gt: cutoff },
+      tunnelIp: { not: null },
+      blossomPort: { not: null },
+    },
+    select: { reportedFreeBytes: true, reportedTotalBytes: true },
+  });
+
+  let freeBytes = 0n;
+  let totalBytes = 0n;
+  for (const provider of providers) {
+    freeBytes += provider.reportedFreeBytes ?? 0n;
+    totalBytes += provider.reportedTotalBytes ?? 0n;
+  }
+
+  const configuredReplicas = Math.max(1, Math.floor(positiveNumber(process.env.BLOSSOM_REPLICAS, 2)));
+  const replicas = Math.max(1, Math.min(configuredReplicas, providers.length));
+  const rawAvailable = providers.length === 0 ? 0n : freeBytes / BigInt(replicas);
+
+  let committedBytes = 0n;
+  const committed = await prisma.$queryRaw<Array<{ committed: bigint | null }>>`
+    SELECT COALESCE(SUM(GREATEST(storage_bytes - used_storage, 0)), 0)::bigint AS committed
+    FROM "user"
+    WHERE plan_expires_at > now() AND storage_bytes IS NOT NULL`;
+  committedBytes = committed[0]?.committed ?? 0n;
+
+  const countCommitments = process.env.SIGNUPS_COUNT_COMMITMENTS === "true";
+  const available = countCommitments
+    ? rawAvailable > committedBytes ? rawAvailable - committedBytes : 0n
+    : rawAvailable;
+  const minFree = BigInt(Math.floor(positiveNumber(process.env.SIGNUPS_MIN_FREE_BYTES, 1_073_741_824)));
+
+  res.json({
+    providers: providers.length,
+    replicas,
+    totalBytes: totalBytes.toString(),
+    freeBytes: freeBytes.toString(),
+    committedBytes: committedBytes.toString(),
+    availableBytes: available.toString(),
+    minFreeBytes: minFree.toString(),
+    signupsOpen: providers.length > 0 && available >= minFree,
+  });
+});
+
 // One-shot internal migration helper. Unknown URLs remain untouched so no
 // durable replica pointer is lost when it cannot be attributed safely.
 storagesRouter.post("/backfill-replicas", async (req, res) => {
@@ -100,7 +155,7 @@ storagesRouter.post("/backfill-replicas", async (req, res) => {
   let changedRows = 0;
   let replacedValues = 0;
   let unmatchedValues = 0;
-  const updates: Array<ReturnType<typeof prisma.blob.update>> = [];
+  const updates: Array<ReturnType<typeof prisma.blob.updateMany>> = [];
   const rewrite = (replicas: string[]) => replicas.map((replica) => {
     if (!/^https?:\/\//i.test(replica) && !/^wss?:\/\//i.test(replica)) return replica;
     const replacement = aliases.get(normalizeUrl(replica));
@@ -112,12 +167,15 @@ storagesRouter.post("/backfill-replicas", async (req, res) => {
     return replacement;
   });
 
-  const blobs = await prisma.blob.findMany({ select: { hash: true, replicas: true } });
+  const blobs = await prisma.blob.findMany({
+    select: { hash: true, replicas: true },
+    distinct: ["hash"],
+  });
   for (const blob of blobs) {
     const replicas = rewrite(blob.replicas);
     if (replicas.some((value, index) => value !== blob.replicas[index])) {
       changedRows += 1;
-      if (!dryRun) updates.push(prisma.blob.update({ where: { hash: blob.hash }, data: { replicas } }));
+      if (!dryRun) updates.push(prisma.blob.updateMany({ where: { hash: blob.hash }, data: { replicas } }));
     }
   }
   if (updates.length > 0) await prisma.$transaction(updates);

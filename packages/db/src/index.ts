@@ -40,14 +40,28 @@ app.get("/blobs/total", async (_req, res) => {
   res.json({ totalSize: (total._sum.size ?? 0n).toString() });
 });
 
+// All owner rows for a hash. The first row stands for the blob itself (size,
+// replicas and createdAt are identical across owners); `owners` lists who is
+// billed for it. 404 when nobody owns it.
 app.get("/blobs/:hash", async (req, res) => {
-  const blob = await prisma.blob.findUnique({ where: { hash: req.params.hash! } });
-  if (!blob) {
+  const rows = await prisma.blob.findMany({
+    where: { hash: req.params.hash! },
+    orderBy: { createdAt: "asc" },
+  });
+  const first = rows[0];
+  if (!first) {
     return res.status(404).json({ error: "not_found" });
   }
-  res.json(blobToJson(blob));
+  res.json({ ...blobToJson(first), owners: rows.map((row) => row.npub) });
 });
 
+class QuotaExceededError extends Error {}
+class AlreadyExistsError extends Error {}
+
+// Records `npub` as an owner of `hash` and bills them for it. The user row is
+// locked for the whole transaction, so two uploads racing for the same user are
+// checked one after the other against the real running total instead of both
+// passing against the same stale number.
 app.post("/blobs", async (req, res) => {
   const { hash, npub, size, replicas } = req.body as {
     hash: string;
@@ -58,12 +72,20 @@ app.post("/blobs", async (req, res) => {
   try {
     const sizeBig = BigInt(size);
     const { blob, user } = await prisma.$transaction(async (tx) => {
-      const current = await tx.user.findUniqueOrThrow({ where: { npub } });
-      // Guard the allowance inside the same transaction as the increment so
-      // two concurrent uploads cannot overshoot storageBytes.
+      const locked = await tx.$queryRaw<
+        Array<{ used_storage: bigint; storage_bytes: bigint | null }>
+      >`SELECT used_storage, storage_bytes FROM "user" WHERE npub = ${npub} FOR UPDATE`;
+      const current = locked[0];
+      if (!current) {
+        throw Object.assign(new Error("user_not_found"), { code: "P2025" });
+      }
+      // Same owner uploading the same content again is a no-op, checked before
+      // quota so a re-upload never fails for being "over".
+      const dup = await tx.blob.findUnique({ where: { hash_npub: { hash, npub } } });
+      if (dup) throw new AlreadyExistsError();
       if (
-        current.storageBytes !== null &&
-        current.usedStorage + sizeBig > current.storageBytes
+        current.storage_bytes !== null &&
+        current.used_storage + sizeBig > current.storage_bytes
       ) {
         throw new QuotaExceededError();
       }
@@ -81,6 +103,9 @@ app.post("/blobs", async (req, res) => {
     if (error instanceof QuotaExceededError) {
       return res.status(409).json({ error: "quota_exceeded" });
     }
+    if (error instanceof AlreadyExistsError) {
+      return res.status(409).json({ error: "already_exists" });
+    }
     const code = prismaErrorCode(error);
     if (code === "P2025") {
       return res.status(404).json({ error: "user_not_found" });
@@ -93,20 +118,36 @@ app.post("/blobs", async (req, res) => {
   }
 });
 
-class QuotaExceededError extends Error {}
-
+// Removes ownership rows for a hash and gives each owner their bytes back.
+// `?npub=` removes one owner's row; `?all=true` (moderation) removes every
+// owner. `remainingOwners` tells the caller whether the bytes on the storage
+// nodes are still needed.
 app.delete("/blobs/:hash", async (req, res) => {
   const hash = req.params.hash!;
+  const npub = typeof req.query["npub"] === "string" ? req.query["npub"] : undefined;
+  const all = req.query["all"] === "true";
+  if (!npub && !all) {
+    return res.status(400).json({ error: "npub_or_all_required" });
+  }
   try {
-    const user = await prisma.$transaction(async (tx) => {
-      const blob = await tx.blob.findUniqueOrThrow({ where: { hash } });
-      await tx.blob.delete({ where: { hash } });
-      return tx.user.update({
-        where: { npub: blob.npub },
-        data: { usedStorage: { decrement: blob.size } },
+    const result = await prisma.$transaction(async (tx) => {
+      const rows = await tx.blob.findMany({
+        where: { hash, ...(all ? {} : { npub: npub! }) },
       });
+      if (rows.length === 0) throw Object.assign(new Error("not_found"), { code: "P2025" });
+      let lastUsed = "0";
+      for (const row of rows) {
+        await tx.blob.delete({ where: { hash_npub: { hash, npub: row.npub } } });
+        const user = await tx.user.update({
+          where: { npub: row.npub },
+          data: { usedStorage: { decrement: row.size } },
+        });
+        lastUsed = user.usedStorage.toString();
+      }
+      const remainingOwners = await tx.blob.count({ where: { hash } });
+      return { usedStorage: lastUsed, remainingOwners };
     });
-    res.json({ deleted: true, usedStorage: user.usedStorage.toString() });
+    res.json({ deleted: true, ...result });
   } catch (error) {
     if (prismaErrorCode(error) === "P2025") {
       return res.status(404).json({ error: "not_found" });

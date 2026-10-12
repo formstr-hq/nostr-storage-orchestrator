@@ -14,6 +14,22 @@ export interface BlobRecord {
   createdAt: string;
 }
 
+/** A blob as returned by GET /blobs/:hash: one row plus everyone billed for it. */
+export interface BlobWithOwners extends BlobRecord {
+  owners: string[];
+}
+
+export interface CapacityRecord {
+  providers: number;
+  replicas: number;
+  totalBytes: string;
+  freeBytes: string;
+  committedBytes: string;
+  availableBytes: string;
+  minFreeBytes: string;
+  signupsOpen: boolean;
+}
+
 export interface Paginated<T> {
   items: T[];
   total: number;
@@ -27,6 +43,8 @@ export interface EntitlementRequest {
   source: "payment" | "admin";
   mode?: "extend" | "upgrade";
   force?: boolean;
+  /** Required for source "payment"; makes the grant idempotent. */
+  paymentHash?: string;
 }
 
 export interface NotificationRecord {

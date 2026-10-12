@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
+import type { NextFunction } from "express";
 import express, { type Express, type Request, type Response } from "express";
 import { DbClient, DbApiError, type UserInfo } from "@orchestrator/db-client";
 import { loadLifecycleConfig, type LifecycleConfig } from "@orchestrator/lifecycle";
 import { AuthError, verifyAuthToken } from "./nostr.js";
 import { Nip98Error, verifyNip98 } from "@orchestrator/nip98";
-import { uploadBlob, serverRegistry } from "./servers.js";
-import { downloadBlob, deleteBlob } from "./servers.js";
+import { uploadBlob, serverRegistry, openBlobStream, deleteBlob } from "./servers.js";
 import { createAccessCache, withAccess, STATUS_ERROR_CODES } from "./access.js";
 import { createAdminIdentity, createInternalRoleGate, requireAdmin } from "./admin-auth.js";
 import { clientIp, createRateLimiter } from "./rate-limit.js";
@@ -115,10 +115,10 @@ const uploadLimiter = createRateLimiter({ windowMs: RATE_WINDOW_MS, max: 30 });
 const accountLimiter = createRateLimiter({ windowMs: RATE_WINDOW_MS, max: 120 });
 const adminLimiter = createRateLimiter({ windowMs: RATE_WINDOW_MS, max: 60 });
 
-// Raw bodies for octet-stream uploads and JSON for everything else. The raw
-// parser runs only for octet-stream so JSON endpoints (and NIP-98 payload
-// hashing) see an untouched Buffer.
-app.use(express.raw({ type: "application/octet-stream", limit: MAX_UPLOAD_BYTES }));
+// The raw body parser is attached to PUT /upload only, behind `uploadGate`, so
+// nothing is buffered for a caller who has not proven who they are and that
+// they may store this many bytes.
+const rawUpload = express.raw({ type: "application/octet-stream", limit: MAX_UPLOAD_BYTES });
 
 // sha256 hex string, optionally followed by a file extension (BUD-01).
 const HASH_PATTERN = /^([a-f0-9]{64})(?:\.[a-zA-Z0-9]+)?$/;
@@ -231,6 +231,18 @@ async function loadAccessForDenialCheck(
   return loadAccess(npub, true);
 }
 
+// Internal: how much room the storage providers have left. NIP-98 + an enabled
+// service_account row, like /internal/purge. The public signal for the UI is
+// formstr-backend's GET /api/storage/availability, not this.
+app.get("/capacity", requireInternalRole, async (_req, res) => {
+  try {
+    res.json(await db.getCapacity());
+  } catch (error) {
+    console.error("capacity lookup failed", error);
+    res.status(502).json({ error: "capacity_unavailable" });
+  }
+});
+
 // Non-Blossom endpoint: exposes this account's entitlement/usage. Gated by
 // BUD-11 so it shares one auth code path with the rest of the protocol.
 app.get("/storage", async (req, res) => {
@@ -325,16 +337,80 @@ app.head("/upload", async (req, res) => {
   }
 });
 
+// Upload bytes currently being received. The body is held in memory until it
+// has been hashed and handed to the storage nodes, so the total is capped:
+// beyond it new uploads get 503 and retry, instead of the proxy running out of
+// memory.
+const MAX_INFLIGHT_UPLOAD_BYTES =
+  Number(process.env["UPLOAD_INFLIGHT_BYTES"]) > 0
+    ? Number(process.env["UPLOAD_INFLIGHT_BYTES"])
+    : 2 * 1024 * 1024 * 1024;
+let inflightUploadBytes = 0;
+
+/**
+ * Runs before the body is read. Rate limit, a valid upload token, a known
+ * Content-Length, plan state and quota (for that length) are all decided from
+ * headers, so an unauthenticated or unpaid caller never gets a megabyte
+ * buffered. The handler still verifies the token against the real hash once the
+ * body has arrived.
+ */
+async function uploadGate(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!uploadLimiter.hit(clientIp(req))) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
+    const npub = verifyAuthToken(req.headers.authorization, "upload", { requireHashScope: true });
+
+    const length = Number(firstHeader(req.headers["content-length"]));
+    if (!firstHeader(req.headers["content-length"])) {
+      res.setHeader("X-Reason", "Content-Length header is required");
+      return res.status(411).json({ error: "Content-Length header is required" });
+    }
+    if (!Number.isInteger(length) || length <= 0) {
+      return res.status(400).json({ error: "Request body must contain binary data" });
+    }
+    if (length > MAX_UPLOAD_BYTES) {
+      res.setHeader("X-Reason", "File exceeds the operator upload cap.");
+      return res.status(413).json({ error: "File exceeds the operator upload cap." });
+    }
+
+    const cached = await loadAccess(npub);
+    const loaded = await loadAccessForDenialCheck(npub, cached);
+    if (!loaded) return res.status(500).json({ error: "Upload failed" });
+    const { user, access } = loaded;
+    if (!access.canUpload) return sendAccessError(res, user, access);
+    if (user.storageBytes !== null && BigInt(user.usedStorage) + BigInt(length) > BigInt(user.storageBytes)) {
+      return sendAccessError(res, user, { ...access, canUpload: false, reason: "grace_over_quota" });
+    }
+
+    if (inflightUploadBytes + length > MAX_INFLIGHT_UPLOAD_BYTES) {
+      res.setHeader("Retry-After", "5");
+      return res.status(503).json({ error: "server_busy" });
+    }
+    inflightUploadBytes += length;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      inflightUploadBytes -= length;
+    };
+    res.on("close", release);
+    res.on("finish", release);
+    return next();
+  } catch (error) {
+    if (error instanceof AuthError) return sendAuthError(res, error);
+    console.error(error);
+    return res.status(500).json({ error: "Upload failed" });
+  }
+}
+
 // BUD-02: PUT /upload
-app.put("/upload", async (req, res) => {
+app.put("/upload", uploadGate, rawUpload, async (req, res) => {
   try {
     const data = req.body as Buffer;
     if (!Buffer.isBuffer(data) || data.length === 0) {
       res.setHeader("X-Reason", "Request body must contain binary data");
       return res.status(400).json({ error: "Request body must contain binary data" });
-    }
-    if (!uploadLimiter.hit(clientIp(req))) {
-      return res.status(429).json({ error: "rate_limited" });
     }
 
     const hash = sha256Hex(data);
@@ -374,21 +450,42 @@ app.put("/upload", async (req, res) => {
       console.error("blob lookup failed", error);
       return res.status(502).json({ error: "Blob lookup failed" });
     }
+    const alreadyMine = existing?.owners.includes(npub) ?? false;
     let createdAt = existing?.createdAt;
 
-    if (!existing) {
-      const result = await uploadBlob(data, hash, authHeader!, npub);
+    if (!alreadyMine) {
+      // Same bytes already on the nodes (another account uploaded them): reuse
+      // those copies and bill this account on its own row. Otherwise store them.
+      const storedNow = !existing;
+      const replicas = existing ? existing.replicas : (await uploadBlob(data, hash, authHeader!, npub)).replicas;
       try {
-        const created = await db.createBlob({ hash, npub, size, replicas: result.replicas });
+        const created = await db.createBlob({ hash, npub, size, replicas });
         createdAt = created.createdAt;
         // usedStorage changed; drop the cached row so /storage and the next
         // quota check see it immediately.
         accessCache.invalidate(npub);
       } catch (error) {
-        if (error instanceof DbApiError && error.status === 409) {
+        const reason = error instanceof DbApiError && typeof error.body === "object" && error.body !== null
+          ? (error.body as { error?: string }).error
+          : undefined;
+        if (error instanceof DbApiError && error.status === 409 && reason === "already_exists") {
           const refetched = await db.getBlob(hash);
           createdAt = refetched?.createdAt;
         } else {
+          // The bytes we just stored have no row behind them. Take them off the
+          // nodes again unless someone else claimed the hash in the meantime.
+          if (storedNow) {
+            const claimed = await db.getBlob(hash).catch(() => null);
+            if (!claimed) await deleteBlob(hash, replicas);
+          }
+          if (error instanceof DbApiError && error.status === 409 && reason === "quota_exceeded") {
+            accessCache.invalidate(npub);
+            return sendAccessError(res, user, {
+              ...access,
+              canUpload: false,
+              reason: "grace_over_quota",
+            });
+          }
           throw error;
         }
       }
@@ -402,7 +499,7 @@ app.put("/upload", async (req, res) => {
       ? Math.floor(new Date(createdAt).getTime() / 1000)
       : Math.floor(Date.now() / 1000);
 
-    return res.status(existing ? 200 : 201).json({
+    return res.status(alreadyMine ? 200 : 201).json({
       url: `${baseUrl}/${hash}${extensionForType(contentType)}`,
       sha256: hash,
       size,
@@ -430,22 +527,24 @@ async function handleGetBlob(req: Request, res: Response, includeBody: boolean) 
       return res.status(404).json({ error: "Blob not found" });
     }
 
-    // Read gating is per-owner: a blob is readable unless its owner is in
-    // READ_BLOCKED/CLOSED/UNPAID. Read fresh, never from cache — this is the
-    // path that must stop serving data the moment a plan lapses, so it is
-    // worth one db-api read per blob fetch. Derived (not User.status) so
-    // enforcement never lags the notifier.
-    let owner;
+    // Read gating is per-owner: a blob is readable while at least one of its
+    // owners is outside READ_BLOCKED/CLOSED/UNPAID. Read fresh, never from
+    // cache: this is the path that must stop serving data the moment every
+    // plan lapses. Derived (not User.status) so enforcement never lags the
+    // notifier.
+    let owners: Array<Awaited<ReturnType<typeof db.getUser>>>;
     try {
-      owner = await db.getUser(blob.npub);
+      owners = await Promise.all((blob.owners ?? [blob.npub]).map((owner) => db.getUser(owner)));
     } catch (error) {
       console.error("owner access lookup failed", error);
       return res.status(500).json({ error: "Download failed" });
     }
-    const access = owner ? withAccess(owner, lifecycleConfig).access : null;
-    if (access && !access.canRead) {
-      res.setHeader("X-Reason", STATUS_ERROR_CODES[access.status] ?? access.status);
-      return res.status(403).json({ error: STATUS_ERROR_CODES[access.status] });
+    const accesses = owners.map((owner) => (owner ? withAccess(owner, lifecycleConfig).access : null));
+    const readable = accesses.some((access) => access === null || access.canRead);
+    if (!readable) {
+      const status = accesses[0]!.status;
+      res.setHeader("X-Reason", STATUS_ERROR_CODES[status] ?? status);
+      return res.status(403).json({ error: STATUS_ERROR_CODES[status] });
     }
 
     res.setHeader("Content-Type", "application/octet-stream");
@@ -456,9 +555,15 @@ async function handleGetBlob(req: Request, res: Response, includeBody: boolean) 
       return res.status(200).end();
     }
 
-    const data = await downloadBlob(hash, blob.replicas);
+    // Piped from the storage node, never buffered whole in the proxy.
+    const stream = await openBlobStream(hash, blob.replicas);
     res.setHeader("Content-Disposition", `attachment; filename="${hash}"`);
-    return res.send(data);
+    stream.on("error", (error) => {
+      console.error("blob stream failed", error);
+      res.destroy(error);
+    });
+    stream.pipe(res);
+    return;
   } catch (error) {
     if (error instanceof AuthError) return sendAuthError(res, error);
     console.error(error);
@@ -490,13 +595,17 @@ app.delete(HASH_ROUTE, async (req, res) => {
     if (!blob) {
       return res.status(404).json({ error: "Blob not found" });
     }
-    if (blob.npub !== npub) {
+    if (!(blob.owners ?? [blob.npub]).includes(npub)) {
       return res.status(403).json({ error: "You do not have access to this blob" });
     }
 
-    await deleteBlob(hash, blob.replicas);
-    await db.deleteBlob(hash);
-    accessCache.invalidate(blob.npub);
+    // Row first, so the owner's space is freed even if a storage node is down.
+    // The bytes themselves go only when no other account still owns the blob.
+    const removed = await db.deleteBlob(hash, { npub });
+    accessCache.invalidate(npub);
+    if (removed.remainingOwners === 0) {
+      await deleteBlob(hash, blob.replicas);
+    }
 
     return res.status(200).json({ message: "Blob deleted successfully" });
   } catch (error) {
@@ -654,19 +763,22 @@ app.delete("/admin/blobs/:hash", express.json(), async (req, res) => {
     const blob = await db.getBlob(hash);
     if (!blob) return res.status(404).json({ error: "not_found" });
 
+    // Every owner loses the blob (it is the content that was reported), then
+    // the bytes go from every replica.
+    const owners = blob.owners ?? [blob.npub];
+    await db.deleteBlob(hash, { all: true });
+    for (const owner of owners) accessCache.invalidate(owner);
     await deleteBlob(hash, blob.replicas);
-    await db.deleteBlob(hash);
-    const action = await db.recordModeration({
-      hash,
-      npub: blob.npub,
-      adminNpub: admin,
-      reason,
-    });
 
-    // Best-effort owner notification; never fail the deletion on it.
-    void notifyModeration(blob.npub, hash, reason).catch((error) => {
-      console.error("moderation notification failed", error);
-    });
+    const actions = [];
+    for (const owner of owners) {
+      actions.push(await db.recordModeration({ hash, npub: owner, adminNpub: admin, reason }));
+      // Best-effort owner notification; never fail the deletion on it.
+      void notifyModeration(owner, hash, reason).catch((error) => {
+        console.error("moderation notification failed", error);
+      });
+    }
+    const action = actions[0];
 
     res.json({ deleted: true, action });
   } catch (error) {
@@ -745,17 +857,21 @@ async function sendModerationEmail(npub: string, hash: string, reason: string): 
 app.post("/internal/purge/:npub", requireInternalRole, async (req, res) => {
   const npub = String(req.params["npub"]);
   try {
-    // Delete bytes on every replica, always reading the first page: rows are
-    // removed after byte deletion, so the next first page is the remaining
-    // set. Stops when the roster is empty. `purged` counts rows removed.
+    // Always read the first page: each pass removes what it lists. Per blob,
+    // the owner's row goes first (this account's rows only, so a blob another
+    // account still owns keeps its bytes) and the bytes are deleted from the
+    // nodes when no owner remains.
     let purged = 0;
     for (;;) {
       const batch = await db.listUserBlobs(npub, 1, 100);
       if (batch.items.length === 0) break;
       for (const blob of batch.items) {
-        await deleteBlob(blob.hash, blob.replicas);
+        const removed = await db.deleteBlob(blob.hash, { npub });
+        if (removed.remainingOwners === 0) {
+          await deleteBlob(blob.hash, blob.replicas);
+        }
+        purged += 1;
       }
-      purged += (await db.purgeUserBlobs(npub)).deleted;
     }
     accessCache.invalidate(npub);
     res.json({ purged, status: "CLOSED" });

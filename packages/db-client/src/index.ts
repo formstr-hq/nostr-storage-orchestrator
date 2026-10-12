@@ -3,6 +3,8 @@ export type {
   ActivePgStorageRecord,
   ActiveStorageRecord,
   BlobRecord,
+  BlobWithOwners,
+  CapacityRecord,
   EntitlementRequest,
   MemberRecord,
   MeshRole,

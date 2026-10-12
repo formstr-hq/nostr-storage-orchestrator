@@ -24,6 +24,7 @@ function request(overrides: Partial<Parameters<typeof parseEntitlementRequest>[0
     storageBytes: "500000000",
     source: "payment",
     mode: "extend",
+    paymentHash: "a".repeat(64),
     ...overrides,
   });
 }
@@ -133,4 +134,23 @@ test("request parsing rejects bad input", () => {
     () => request({ source: "payment", force: true }),
     /force_requires_admin/,
   );
+});
+
+test("a payment grant must carry a payment hash", () => {
+  assert.throws(
+    () => parseEntitlementRequest({ durationDays: 30, storageBytes: "1", source: "payment", mode: "extend" }),
+    (error) => error instanceof EntitlementError && error.code === "payment_hash_required",
+  );
+});
+
+test("a malformed payment hash is rejected", () => {
+  assert.throws(
+    () => request({ paymentHash: "not-a-hash" }),
+    (error) => error instanceof EntitlementError && error.code === "invalid_payment_hash",
+  );
+});
+
+test("an admin grant needs no payment hash", () => {
+  const parsed = parseEntitlementRequest({ durationDays: 30, storageBytes: "1", source: "admin" });
+  assert.equal(parsed.paymentHash, undefined);
 });

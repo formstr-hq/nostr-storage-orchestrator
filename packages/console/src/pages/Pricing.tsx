@@ -6,6 +6,7 @@ import {
   BACKEND_URL,
   formatBytes,
   generateStorageInvoice,
+  getSignupsOpen,
   getStorage,
   getStorageSubscription,
   listTiers,
@@ -45,6 +46,9 @@ export function PricingPage() {
   } | null>(null);
   const [qr, setQr] = useState<string | null>(null);
   const [paid, setPaid] = useState(false);
+  // null while loading. When false, only existing customers may buy (renew or
+  // upgrade); new ones are paused until the providers have room again.
+  const [signupsOpen, setSignupsOpen] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const { message, show } = useToast();
   const stopWatch = useRef<(() => void) | null>(null);
@@ -57,6 +61,10 @@ export function PricingPage() {
         if (firstPurchasable) setSelected(firstPurchasable.id);
       })
       .catch((err) => setError((err as Error).message));
+  }, []);
+
+  useEffect(() => {
+    getSignupsOpen().then(setSignupsOpen);
   }, []);
 
   useEffect(() => {
@@ -80,6 +88,10 @@ export function PricingPage() {
   // no longer stores it. Accept per session and let the backend record it.
   const acceptedAt = null;
   const accepted = acceptedAt !== null || terms;
+
+  // Anyone who has bought before has a plan expiry on record (even a lapsed one).
+  const isExistingCustomer = Boolean(account?.planExpiresAt);
+  const signupsPaused = signupsOpen === false && !isExistingCustomer;
 
   const chosen = tiers.find((t) => t.id === selected) ?? null;
   const mode: Mode | null = chosen && account ? modeFor(chosen, account, subscription) : null;
@@ -130,7 +142,15 @@ export function PricingPage() {
         () => undefined,
       );
     } catch (err) {
-      setError((err as Error).message);
+      const message = (err as Error).message;
+      if (message === "signups_closed") {
+        setSignupsOpen(false);
+        setError("New sign-ups are paused while our storage is full.");
+      } else if (message === "too_many_pending_orders") {
+        setError("You have several unpaid invoices open. Pay one or try again later.");
+      } else {
+        setError(message);
+      }
     } finally {
       setBusy(false);
     }
@@ -159,7 +179,29 @@ export function PricingPage() {
         </p>
       </div>
 
-      {!identities && (
+      {signupsOpen === false && (
+        <div className="banner">
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
+            <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+          </svg>
+          <div>
+            <div className="btitle">New sign-ups are paused</div>
+            <div className="btext">
+              Our storage is full right now. Existing customers can still renew
+              or upgrade; please check back soon to start a new plan.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!identities && !signupsPaused && (
         <div className="banner">
           <svg
             width="20"
@@ -331,7 +373,7 @@ export function PricingPage() {
           </div>
           <button
             className="btn primary"
-            disabled={!identities || !chosen || !accepted || busy}
+            disabled={!identities || !chosen || !accepted || busy || signupsPaused}
             onClick={() => void buy()}
           >
             <svg
@@ -344,7 +386,11 @@ export function PricingPage() {
             >
               <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z" />
             </svg>
-            {busy ? "Generating…" : "Generate invoice"}
+            {busy
+              ? "Generating…"
+              : signupsPaused
+                ? "Sign-ups paused"
+                : "Generate invoice"}
           </button>
         </div>
         <ErrorText>{error}</ErrorText>

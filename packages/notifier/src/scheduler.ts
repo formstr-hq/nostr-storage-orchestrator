@@ -56,11 +56,16 @@ export async function runOnce(options: NotifierOptions): Promise<NotifierResult>
       const due = dueNotifications(user, access, options.config, now);
       sent += await deliverAll(options, user, due);
 
+      // purgeAt is the instant READ_BLOCKED ends, which is also when the
+      // derived status becomes CLOSED, so a due purge is always seen as CLOSED.
+      // Accounts with nothing stored are skipped so a closed account is not
+      // re-purged on every pass.
       if (
         options.config.purgeEnabled &&
-        access.status === "READ_BLOCKED" &&
+        (access.status === "READ_BLOCKED" || access.status === "CLOSED") &&
         access.purgeAt !== null &&
         now.getTime() >= access.purgeAt.getTime() &&
+        BigInt(user.usedStorage) > 0n &&
         options.purge
       ) {
         try {

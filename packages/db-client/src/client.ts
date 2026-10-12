@@ -3,6 +3,8 @@ import type {
   ActivePgStorageRecord,
   ActiveStorageRecord,
   BlobRecord,
+  BlobWithOwners,
+  CapacityRecord,
   EntitlementRequest,
   MemberRecord,
   MeshRole,
@@ -102,8 +104,12 @@ export class DbClient {
     return this.get<UserInfo>(`/users/${encodeURIComponent(npub)}`);
   }
 
-  getBlob(hash: string): Promise<BlobRecord | null> {
-    return this.get<BlobRecord>(`/blobs/${encodeURIComponent(hash)}`);
+  getBlob(hash: string): Promise<BlobWithOwners | null> {
+    return this.get<BlobWithOwners>(`/blobs/${encodeURIComponent(hash)}`);
+  }
+
+  getCapacity(): Promise<CapacityRecord> {
+    return this.getOk("/storages/capacity");
   }
 
   totalBlobSize(): Promise<{ totalSize: string }> {
@@ -119,8 +125,16 @@ export class DbClient {
     return this.mutate("POST", "/blobs", data);
   }
 
-  deleteBlob(hash: string): Promise<{ deleted: true; usedStorage: string }> {
-    return this.mutate("DELETE", `/blobs/${encodeURIComponent(hash)}`);
+  /**
+   * Removes one owner's row (`{ npub }`) or every owner's (`{ all: true }`,
+   * moderation). `remainingOwners` > 0 means the bytes must stay on the nodes.
+   */
+  deleteBlob(
+    hash: string,
+    target: { npub: string } | { all: true },
+  ): Promise<{ deleted: true; usedStorage: string; remainingOwners: number }> {
+    const query = "all" in target ? "all=true" : `npub=${encodeURIComponent(target.npub)}`;
+    return this.mutate("DELETE", `/blobs/${encodeURIComponent(hash)}?${query}`);
   }
 
   // ── Entitlements / account / admin ────────────────────────────────────────

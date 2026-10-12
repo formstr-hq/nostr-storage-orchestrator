@@ -80,7 +80,7 @@ test("uploadBlob stores on the pk+time-selected provider and fails over by recom
   try {
     // npub-alice picks npub-carol (10.44.0.3) at this slot; after dropping it,
     // the 3 -> 2 recompute over the sorted pair picks npub-bob (10.44.0.2).
-    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry, now);
+    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry, now, 1);
     assert.deepEqual(result, { hash: "hash", replicas: ["npub-bob"] });
     assert.deepEqual(put.mock.calls.map((call) => call.arguments[0]), [
       "http://10.44.0.3:3000/upload",
@@ -112,6 +112,43 @@ test("uploadBlob throws when no provider accepts and when the roster is empty", 
     );
   } finally {
     put.mock.restore();
+    error.mock.restore();
+  }
+});
+
+test("uploadBlob stores a second copy on a different provider", async () => {
+  const now = 472227 * 3_600_000;
+  const put = mock.method(axios, "put", async () => ({ status: 200 }));
+  const registry = { freshCandidates: async () => [...candidates] };
+
+  try {
+    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry, now, 2);
+    assert.equal(result.replicas.length, 2);
+    assert.notEqual(result.replicas[0], result.replicas[1]);
+    assert.equal(put.mock.callCount(), 2);
+  } finally {
+    put.mock.restore();
+  }
+});
+
+test("uploadBlob still succeeds with one copy when the second provider fails", async () => {
+  const now = 472227 * 3_600_000;
+  let calls = 0;
+  const put = mock.method(axios, "put", async () => {
+    calls += 1;
+    if (calls === 2) throw new Error("provider down");
+    return { status: 200 };
+  });
+  const warn = mock.method(console, "warn", () => undefined);
+  const error = mock.method(console, "error", () => undefined);
+  const registry = { freshCandidates: async () => [candidates[0]!, candidates[1]!] };
+
+  try {
+    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry, now, 2);
+    assert.equal(result.replicas.length, 1);
+  } finally {
+    put.mock.restore();
+    warn.mock.restore();
     error.mock.restore();
   }
 });

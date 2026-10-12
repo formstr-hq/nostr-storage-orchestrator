@@ -21,6 +21,12 @@ export interface EntitlementRequest {
    * payment sources.
    */
   planExpiresAt?: string;
+  /**
+   * Payment source only: the purchase's payment hash. A hash that has already
+   * been applied is acknowledged without granting again, so a retry after a
+   * lost response cannot double the days.
+   */
+  paymentHash?: string;
 }
 
 export interface ParsedEntitlementRequest extends EntitlementRequest {
@@ -92,6 +98,16 @@ export function parseEntitlementRequest(body: unknown): ParsedEntitlementRequest
   };
   if (mode === "extend" || mode === "upgrade") result.mode = mode;
   if (force) result.force = true;
+
+  if (b.paymentHash !== undefined) {
+    if (typeof b.paymentHash !== "string" || !/^[0-9a-f]{64}$/i.test(b.paymentHash)) {
+      throw new EntitlementError(400, "invalid_payment_hash");
+    }
+    result.paymentHash = b.paymentHash.toLowerCase();
+  }
+  if (source === "payment" && result.paymentHash === undefined) {
+    throw new EntitlementError(400, "payment_hash_required");
+  }
 
   if (b.planExpiresAt !== undefined) {
     if (source !== "admin") {

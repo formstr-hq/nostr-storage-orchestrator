@@ -98,6 +98,23 @@ export async function listTiers(): Promise<StorageTier[]> {
   return parse<StorageTier[]>(await fetch(url(BACKEND_URL, "/api/tiers/storage")));
 }
 
+/**
+ * Whether new customers can sign up. Closes when the storage providers have no
+ * room left; existing customers can always renew. Unknown counts as open here
+ * (the backend still refuses a new signup it cannot verify).
+ */
+export async function getSignupsOpen(): Promise<boolean> {
+  try {
+    const result = await parse<{ signupsOpen: boolean }>(
+      await fetch(url(BACKEND_URL, "/api/storage/availability")),
+    );
+    return result.signupsOpen;
+  } catch (err) {
+    const body = (err as { body?: { signupsOpen?: boolean } }).body;
+    return body?.signupsOpen ?? true;
+  }
+}
+
 export async function myInvoices(identities: Identities): Promise<InvoiceRecord[]> {
   const target = url(BACKEND_URL, "/api/invoices");
   const auth = await nip98Auth(identities, absolute(BACKEND_URL, "/api/invoices"), "GET");

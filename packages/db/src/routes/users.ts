@@ -92,6 +92,13 @@ usersRouter.post("/:npub/entitlement", requireServiceAccount, async (req, res) =
         update: {},
         create: { npub },
       });
+      // Claim the payment hash first. A repeat hits the primary key and the
+      // whole transaction rolls back, so the entitlement is applied once.
+      if (request.paymentHash) {
+        await tx.entitlementGrant.create({
+          data: { paymentHash: request.paymentHash, npub },
+        });
+      }
       const effect = computeEntitlement(current, request);
 
       return tx.user.update({
@@ -106,6 +113,20 @@ usersRouter.post("/:npub/entitlement", requireServiceAccount, async (req, res) =
   } catch (error) {
     if (error instanceof EntitlementError) {
       return res.status(error.status).json({ error: error.code });
+    }
+    if (
+      request.paymentHash &&
+      error && typeof error === "object" && "code" in error && error.code === "P2002"
+    ) {
+      // Already applied: report the current state, change nothing.
+      const existing = await prisma.entitlementGrant.findUnique({
+        where: { paymentHash: request.paymentHash },
+      });
+      if (existing && existing.npub !== npub) {
+        return res.status(409).json({ error: "payment_hash_used_by_other_user" });
+      }
+      const user = await prisma.user.findUnique({ where: { npub } });
+      if (user) return res.json(userToJson(user));
     }
     console.error(error);
     res.status(500).json({ error: "internal_error" });

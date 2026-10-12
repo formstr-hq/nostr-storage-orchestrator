@@ -46,8 +46,8 @@ TypeScript/Express service that:
 - resolves `npub` from the signed event
 - derives the account lifecycle (UNPAID → ACTIVE → GRACE → WRITE_BLOCKED → READ_BLOCKED → CLOSED) from entitlement dates at request time; nothing is stored as a status mirror
 - enforces the plan's total storage allowance and duration only (no free tier, no per-file plan limits); a global operator `MAX_UPLOAD_BYTES` caps a single request
-- selects a single provider deterministically by `fnv1a(npub:timeSlot) % n` over the npub-sorted active roster, rotating the slot (default hourly)
-- on upload failure, drops the failed provider and recomputes the selection over the rest, retrying until one accepts
+- stores each blob on `BLOSSOM_REPLICAS` providers (default 2), each chosen deterministically by `fnv1a(npub:timeSlot) % n` over the npub-sorted active roster, rotating the slot (hourly); see [Replication and read path](#replication-and-read-path)
+- on upload failure, drops the failed provider and recomputes the selection over the rest; one copy is enough to succeed
 - stores blob metadata and user storage usage via `db-api`
 - serves the account (`/account/*`), admin/moderation (`/admin/*`), internal purge, and the console SPA
 - supports download and delete operations for authenticated owners; reads are gated per owner access state
@@ -73,6 +73,52 @@ Dockerised backend services used for local testing:
 ### `packages/smoke-test`
 
 Protocol-level checks driven over real HTTP connections — signs Nostr events with `nostr-tools` and exercises the full `proxy/blossom` REST API against a live stack. The same checks are driven by both topology harnesses: `scripts/docker-smoke-test.sh` (meshless) and `scripts/nvpn-mesh-e2e.sh` (NVPN mesh, host + client). See [Smoke testing](#smoke-testing) below.
+
+## Replication and read path
+
+**Placement.** `BLOSSOM_REPLICAS` (default `2`, capped at the number of active
+providers) sets how many providers hold each blob. Active means linked, pinged
+within `STORAGE_ACTIVE_WINDOW_SECS` (~16 min), with a tunnel IP and Blossom
+port; the proxy refreshes the roster every 15 s. For each copy the proxy picks
+`fnv1a(npub:hour) % n` from the sorted candidates, then removes that provider
+before picking the next, so copies always land on different providers. A failed
+provider is dropped and the pick recomputed. Copies are written one after the
+other inside the upload request. Placement ignores free space. With a single
+active provider you get a single copy. If another account uploads identical
+bytes, no new copies are made: that account gets its own billing row pointing
+at the existing replicas, and the bytes are removed from the nodes only when
+the last owner deletes.
+
+**Reads.** `GET /<hash>` is public. The proxy loads the blob and all its owners
+from db-api, reads each owner's entitlement fresh (no cache), and allows the
+read if any owner is outside READ_BLOCKED/CLOSED/UNPAID (an owner with no
+account row counts as readable); otherwise 403. It then tries the replicas in
+stored order, skipping any not in the active roster, and pipes the first one
+that answers (30 s timeout) to the client. If all fail: 500.
+
+**Known gaps** (not fixed; plan around them):
+
+- **No repair.** Nothing re-creates a lost copy. If a provider dies or is
+  removed, blobs that were on it stay on one copy (or none, if it held the
+  only one) permanently, and new replicas are never made for old blobs. Blobs
+  uploaded before `BLOSSOM_REPLICAS` existed also stay single-copy.
+- **No mid-download failover.** The replica is chosen before the first byte. If
+  it fails partway, the connection is reset and the client must retry; the
+  retry tries the same first replica again.
+- **No read balancing.** Reads always start at the first stored replica, so the
+  second copy only helps when the first is unreachable. Read traffic is not
+  metered or limited either.
+- **Offline providers keep deleted data.** Deletes skip providers that are not
+  in the active roster. When such a provider returns, it still holds the bytes
+  of blobs users deleted (or were purged or moderated), and nothing cleans them
+  up. The owner's quota is freed regardless.
+- **Under-replicated uploads are only logged.** If the second provider fails,
+  the upload still succeeds with one copy and a warning in the proxy log; the
+  user is not told and no retry is queued.
+- **Placement ignores free space.** A nearly full provider keeps being picked
+  until its upload fails. Signup gating (`GET /storages/capacity`) uses the sum
+  of reported free space divided by the replica count, which assumes an even
+  spread.
 
 ## Plan rules
 

@@ -37,8 +37,12 @@ model User {
   @@map("user")
 }
 
+// One row per (hash, owner). Identical content uploaded by two accounts shares
+// the same bytes on the storage nodes (and the same `replicas`) but each owner
+// is billed and gated on their own row. The bytes are removed from the nodes
+// only when the last owner row goes away.
 model Blob {
-  hash      String   @id
+  hash      String
   npub      String
   size      BigInt
   replicas  String[]
@@ -46,7 +50,22 @@ model Blob {
 
   user User @relation(fields: [npub], references: [npub])
 
+  @@id([hash, npub])
+  @@index([hash])
+  @@index([npub])
   @@map("blob")
+}
+
+// Idempotency record for paid entitlement pushes. formstr-backend sends the
+// payment hash with every paid grant; a repeat of the same hash (retry after a
+// lost response, reconciler re-run) is acknowledged without granting again.
+model EntitlementGrant {
+  paymentHash String   @id @map("payment_hash")
+  npub        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([npub])
+  @@map("entitlement_grant")
 }
 
 // ── Service accounts ─────────────────────────────────────────────────────────

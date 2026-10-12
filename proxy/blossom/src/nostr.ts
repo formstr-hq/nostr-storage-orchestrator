@@ -84,8 +84,8 @@ export function verifyAuthToken(
     throw new AuthError(`Authorization event must have a "t" tag of "${action}"`, 401);
   }
 
+  const xTags = tags.filter((t) => t[0] === "x").map((t) => t[1]?.toLowerCase());
   if (opts.hash) {
-    const xTags = tags.filter((t) => t[0] === "x").map((t) => t[1]?.toLowerCase());
     if (xTags.length > 0) {
       if (!xTags.includes(opts.hash.toLowerCase())) {
         throw new AuthError("Authorization event's \"x\" tag does not match the target blob hash", 401);
@@ -93,6 +93,10 @@ export function verifyAuthToken(
     } else if (opts.requireHashScope) {
       throw new AuthError('Authorization event must include an "x" tag for the target blob hash', 401);
     }
+  } else if (opts.requireHashScope && xTags.length === 0) {
+    // Pre-body check: the hash is not known yet, but the token must still be
+    // scoped to some blob.
+    throw new AuthError('Authorization event must include an "x" tag for the target blob hash', 401);
   }
 
   return nip19.npubEncode(event.pubkey);
