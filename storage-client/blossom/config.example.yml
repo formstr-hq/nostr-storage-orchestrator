@@ -126,7 +126,7 @@ upload:
 
   # Maximum blob size in bytes, enforced from Content-Length before reading the body.
   # Requests without Content-Length receive 411 Length Required.
-  maxSize: 2147483648 # 2 GB
+  maxSize: 8589934592 # 8 GB
 
   # Number of upload worker threads.
   # 0 = one per CPU core (navigator.hardwareConcurrency).
@@ -212,8 +212,8 @@ media:
   # Require a valid BUD-11 Nostr auth event for media uploads.
   requireAuth: true
 
-  # Maximum input file size in bytes before reading the body. Default: 1 GB.
-  maxSize: 1073741824 # 1 GB
+  # Maximum input file size in bytes before reading the body. Default: 8 GB.
+  maxSize: 8589934592 # 8 GB
 
   image:
     # Output quality 0–100. Higher = better quality, larger file.

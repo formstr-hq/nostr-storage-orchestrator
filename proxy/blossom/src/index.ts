@@ -47,7 +47,7 @@ const requireInternalRole = createInternalRoleGate({ db });
 // allowance only). Its job is resource-exhaustion protection: it bounds how
 // much a single request can buffer in the proxy, so Express never buffers an
 // unbounded body. BUD-06 lets clients preflight it.
-const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
 const UPGRADE_URL = "/pricing";
 
 const app: Express = express();
@@ -344,7 +344,7 @@ app.head("/upload", async (req, res) => {
 const MAX_INFLIGHT_UPLOAD_BYTES =
   Number(process.env["UPLOAD_INFLIGHT_BYTES"]) > 0
     ? Number(process.env["UPLOAD_INFLIGHT_BYTES"])
-    : 2 * 1024 * 1024 * 1024;
+    : 8 * 1024 * 1024 * 1024;
 let inflightUploadBytes = 0;
 
 /**
