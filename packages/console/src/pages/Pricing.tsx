@@ -146,8 +146,6 @@ export function PricingPage() {
       if (message === "signups_closed") {
         setSignupsOpen(false);
         setError("New sign-ups are paused while our storage is full.");
-      } else if (message === "too_many_pending_orders") {
-        setError("You have several unpaid invoices open. Pay one or try again later.");
       } else {
         setError(message);
       }
