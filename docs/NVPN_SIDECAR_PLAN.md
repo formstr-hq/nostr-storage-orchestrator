@@ -381,7 +381,7 @@ different same-value listen ports and distinct Compose project names.
 
 ```bash
 cp .env.example .env
-docker compose up -d --build
+docker compose --profile blossom up -d --build
 ./scripts/nvpn-invite.sh
 ```
 
@@ -409,7 +409,7 @@ operator.
 The helper validates the npub and runs:
 
 ```bash
-docker compose exec nvpn \
+docker compose --profile blossom exec nvpn \
   nvpn add-device --config /data/config/nvpn/config.toml \
   --device "$CLIENT_NPUB" --publish
 ```

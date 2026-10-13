@@ -9,4 +9,4 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 echo "Generating an NVPN invite — send it only to the client operator you intend to approve:" >&2
-docker compose exec nvpn sh -c 'nvpn create-invite --config "$XDG_CONFIG_HOME/nvpn/config.toml"'
+docker compose --profile full exec nvpn sh -c 'nvpn create-invite --config "$XDG_CONFIG_HOME/nvpn/config.toml"'

@@ -66,8 +66,8 @@ Swapfile for the Rust build (1-vCPU box), then build + migrate:
 ```bash
 fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
 
-docker compose build db pg-gateway
-docker compose up -d db
+docker compose --profile pg build db pg-gateway
+docker compose --profile full up -d db
 sleep 10
 docker exec nso_db wget -qO- http://db:4739/storages/active-pg   # expect [] (200)
 docker exec nso_postgres psql -U orchestrator -d orchestrator -c '\dt'
@@ -79,26 +79,26 @@ docker exec nso_postgres psql -U orchestrator -d orchestrator -c '\dt'
 # and blossom/admin/pg-gateway live inside that namespace (network_mode:
 # "service:nvpn"). They must be recreated together with it — `docker restart`
 # of a namespace-sharing container fails with "No such container" against
-# the replaced sidecar.
-docker compose up -d --force-recreate nvpn blossom admin pg-gateway
+# the replaced sidecar. `--profile full` enables every stack for the recreate.
+docker compose --profile full up -d --force-recreate nvpn blossom admin pg-gateway
 swapoff /swapfile && rm /swapfile   # build done; reclaim disk
 ```
 
 Verify the gateway listens (registry empty is fine at this point):
 
 ```bash
-docker compose logs pg-gateway --tail 5
+docker compose --profile pg logs pg-gateway --tail 5
 # expect: pg-gateway listening listen=0.0.0.0:5432
 ```
 
 If the Rust build OOMs even with swap, build locally instead:
 `docker buildx build --platform linux/amd64 -t nso-pg-gateway pg-gateway --load`
 then `docker save nso-pg-gateway | ssh root@<orchestrator-host> 'docker load'`
-and `docker compose up -d pg-gateway` (compose builds only missing images).
+and `docker compose --profile pg up -d pg-gateway` (compose builds only missing images).
 
-Note: `docker compose build db pg-gateway` + `up -d nvpn` also recreates the
-nvpn sidecar (its `ports:` gained the pgwire mapping) — brief proxy outage,
-mesh identity intact.
+Note: `docker compose --profile pg build db pg-gateway` + `up -d nvpn` also
+recreates the nvpn sidecar (its `ports:` gained the pgwire mapping) — brief
+proxy outage, mesh identity intact.
 
 ## Step 2 — Provider: become the first mesh-PG provider
 
@@ -282,7 +282,7 @@ docker exec nso_postgres psql -U orchestrator -d orchestrator \
 
 - **nostream**: `git checkout -- docker-compose.yml` + `docker compose down`
   — the old compose (with `nostream-db`) is intact and its data untouched.
-- **pg-gateway**: `docker compose stop pg-gateway` — buffered writes stay
+- **pg-gateway**: `docker compose --profile pg stop pg-gateway` — buffered writes stay
   durable in central PG and dispatch when it returns.
 - **db-api migration**: additive; `git checkout main` + rebuild is safe (the
   pg_* tables remain, harmlessly).

@@ -17,7 +17,7 @@ if ! [[ "${CLIENT_NPUB}" =~ ^npub1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{20,}$ ]]; t
   exit 1
 fi
 
-docker compose exec nvpn sh -c \
+docker compose --profile full exec nvpn sh -c \
   'nvpn add-device --config "$XDG_CONFIG_HOME/nvpn/config.toml" --device "$1" --publish' \
   _ "${CLIENT_NPUB}"
 
@@ -25,9 +25,9 @@ docker compose exec nvpn sh -c \
 # up the new roster. `reload` works because entrypoint.sh runs the daemon via
 # `nvpn start --daemon` — this avoids recreating the sidecar, which would tear
 # down the network namespace blossom/relay share with it.
-docker compose exec nvpn sh -c \
+docker compose --profile full exec nvpn sh -c \
   'nvpn reload --config "$XDG_CONFIG_HOME/nvpn/config.toml"'
 
 echo "Approved raw mesh peer ${CLIENT_NPUB}. Once the roster syncs, inspect it with:" >&2
-echo '  docker compose exec nvpn sh -c '"'"'nvpn status --config "$XDG_CONFIG_HOME/nvpn/config.toml" --json'"'"'' >&2
+echo '  docker compose --profile full exec nvpn sh -c '"'"'nvpn status --config "$XDG_CONFIG_HOME/nvpn/config.toml" --json'"'"'' >&2
 echo "For storage enrollment, use the app's Link a storage action instead; it creates the DB row and performs this approval itself." >&2

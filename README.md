@@ -225,7 +225,7 @@ storage machines. The normal path is self-service after an admin grants membersh
 ```bash
 cp .env.example .env
 # Set ADMIN_PUBLIC_URL and an initial ADMIN_ALLOWED_PUBKEYS bootstrap npub.
-docker compose up -d --build
+docker compose --profile full up -d --build
 ```
 
 Open `admin-app`, unlock the bootstrap-admin profile, and authorize the client's operator npub.
@@ -387,6 +387,17 @@ over a private mesh confined to that namespace. **The host itself never joins th
 verification gates: [`docs/NVPN_SIDECAR_PLAN.md`](docs/NVPN_SIDECAR_PLAN.md); sidecar contract and
 recovery steps: [`nvpn/README.md`](nvpn/README.md).
 
+`docker-compose.yml` groups every service into Compose profiles, so each command names the
+stack it wants. `full` is all of them:
+
+```bash
+docker compose --profile full up -d --build     # everything
+docker compose --profile blossom up -d --build  # storage: postgres, db, nvpn, blossom, notifier
+docker compose --profile admin up -d --build    # + control plane (admin API, enrollment)
+docker compose --profile pg up -d --build       # + mesh-PG gateway
+docker compose --profile blossom --profile admin up -d --build  # storage + control plane
+```
+
 **Most of the time you want the two guided scripts instead of the steps below** —
 `scripts/nvpn-host-setup.sh` on the host and `storage-client/scripts/nvpn-client-setup.sh` on the
 client, as described in [Quick start](#quick-start-fresh-machines). The rest of this section
@@ -417,7 +428,7 @@ left depending on the FIPS relay fallback and the direct path can never establis
 `NVPN_LISTEN_PORT` (UDP 51820 by default) through any firewall in front of the host.
 
 ```bash
-docker compose up -d --build
+docker compose --profile full up -d --build
 ./scripts/nvpn-invite.sh
 ```
 
@@ -457,7 +468,7 @@ sidecar, and therefore never tears down the network namespace `blossom` shares w
 Once the roster syncs, look up the approved peer's mesh tunnel IP and point the proxy at it:
 
 ```bash
-docker compose exec nvpn sh -c \
+docker compose --profile blossom exec nvpn sh -c \
   'nvpn status --config "$XDG_CONFIG_HOME/nvpn/config.toml" --json' \
   | jq -r '.daemon.state.peers[] | "\(.tunnel_ip)  reachable=\(.reachable)"'
 ```
@@ -474,7 +485,7 @@ Restart or recreate only the proxy application service after changing that value
 recreate the `nvpn` sidecar unnecessarily:
 
 ```bash
-docker compose up -d --force-recreate blossom
+docker compose --profile blossom up -d --force-recreate blossom
 ```
 
 ### Delegated admins
@@ -527,7 +538,9 @@ ADMIN_API_PORT=3002
 ADMIN_ALLOWED_PUBKEYS=npub1...
 ```
 
-`docker compose up -d --build` starts `control-plane-backend` as the `admin` service. It exposes
+`docker compose --profile full up -d --build` starts `control-plane-backend` as the `admin`
+service along with the rest of the stack; on a storage-only host,
+`docker compose --profile blossom --profile admin up -d --build` adds it. It exposes
 `127.0.0.1:${ADMIN_API_PORT}` for the reverse proxy and provides these endpoints:
 
 | Method | Path | Purpose |
@@ -553,7 +566,7 @@ If a Compose-controlled sidecar update leaves `blossom` stuck waiting on the sid
 namespace, force-recreate the sidecar and its dependents together:
 
 ```bash
-docker compose up -d --force-recreate nvpn blossom admin pg-gateway
+docker compose --profile full up -d --force-recreate nvpn blossom admin pg-gateway
 ```
 
 See [`nvpn/README.md`](nvpn/README.md#recovery) for what to do if the sidecar refuses to start
@@ -688,7 +701,7 @@ blossom hostname at `BLOSSOM_PORT` — e.g. `blossom.stg.formstr.app` →
 `http://127.0.0.1:6284`. The SPA's backend origin is baked in at image build
 time from `FORMSTR_BACKEND_URL` (the same value the proxy uses for
 admin-check/storage-notify, so it must be browser-reachable); rebuild with
-`docker compose up -d --build blossom` after changing it. Console→Blossom
+`docker compose --profile blossom up -d --build blossom` after changing it. Console→Blossom
 calls are same-origin and need no configuration (`VITE_BLOSSOM_URL` stays
 empty).
 

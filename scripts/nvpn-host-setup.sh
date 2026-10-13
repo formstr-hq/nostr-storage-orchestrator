@@ -27,7 +27,7 @@ fail() { echo "[host] ERROR: $*" >&2; exit 1; }
 
 nvpn_cli() {
   local sub="$1"; shift
-  docker compose exec -T nvpn nvpn "${sub}" --config /data/config/nvpn/config.toml "$@"
+  docker compose --profile blossom exec -T nvpn nvpn "${sub}" --config /data/config/nvpn/config.toml "$@"
 }
 
 # ---- step 1: config -------------------------------------------------------
@@ -60,13 +60,13 @@ fi
 # ---- step 2: bring the stack up -------------------------------------------
 
 log "step 2/6: building and starting the proxy stack"
-docker compose up -d --build </dev/null
+docker compose --profile blossom up -d --build </dev/null
 
 log "waiting for the nvpn sidecar to become healthy"
 waited=0
-until [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q nvpn)" 2>/dev/null || echo missing)" = healthy ]; do
+until [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose --profile blossom ps -q nvpn)" 2>/dev/null || echo missing)" = healthy ]; do
   waited=$((waited + 2))
-  [ "${waited}" -ge 120 ] && { docker compose logs nvpn; fail "nvpn sidecar did not become healthy"; }
+  [ "${waited}" -ge 120 ] && { docker compose --profile blossom logs nvpn; fail "nvpn sidecar did not become healthy"; }
   sleep 2
 done
 log "proxy stack up"
@@ -140,7 +140,7 @@ if [ -n "${port}" ]; then
   waited=0
   until (exec 3<>"/dev/tcp/localhost/${port}") 2>/dev/null; do
     waited=$((waited + 1))
-    [ "${waited}" -ge 60 ] && { docker compose logs blossom; fail "port ${port} never came up"; }
+    [ "${waited}" -ge 60 ] && { docker compose --profile blossom logs blossom; fail "port ${port} never came up"; }
     sleep 1
   done
 fi
@@ -152,13 +152,13 @@ fi
 # this script does not hand back a stack that is still settling.
 log "waiting for the proxy to serve requests"
 waited=0
-until docker compose exec -T blossom node -e '
+until docker compose --profile blossom exec -T blossom node -e '
   fetch("http://localhost:" + process.env.BLOSSOM_PORT + "/storage")
     .then(r => process.exit(r.status >= 500 ? 1 : 0))
     .catch(() => process.exit(1));
 ' >/dev/null 2>&1; do
   waited=$((waited + 2))
-  [ "${waited}" -ge 90 ] && { docker compose logs blossom db; fail "blossom never started serving requests"; }
+  [ "${waited}" -ge 90 ] && { docker compose --profile blossom logs blossom db; fail "blossom never started serving requests"; }
   sleep 2
 done
 log "proxies are serving"

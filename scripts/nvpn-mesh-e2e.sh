@@ -24,7 +24,9 @@ MESH_TIMEOUT="${MESH_TIMEOUT:-180}"
 
 log() { echo "[mesh-e2e] $*"; }
 
-root_compose() { docker compose -f docker-compose.yml "$@"; }
+# The control plane (`admin`) marks the client's storage active and the proxy
+# (`blossom`) serves it, so this harness enables both stacks explicitly.
+root_compose() { docker compose -f docker-compose.yml --profile blossom --profile admin "$@"; }
 client_compose() { (cd storage-client && docker compose "$@"); }
 
 cleanup() {
