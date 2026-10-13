@@ -48,7 +48,7 @@ read -rp "Proceed? [y/N] " reply
 
 nvpn_cli() {
   local sub="$1"; shift
-  docker compose exec -T nvpn nvpn "${sub}" --config /data/config/nvpn/config.toml "$@"
+  docker compose --profile full exec -T nvpn nvpn "${sub}" --config /data/config/nvpn/config.toml "$@"
 }
 
 # An admin must also be a device on the roster — `add-admin` alone grants the
@@ -67,5 +67,5 @@ echo "their own machine; this proxy will pick up their signed roster over Nostr.
 echo >&2
 echo "Current admins:" >&2
 nvpn_cli status --json | jq -r '.network_id as $n | "  network \($n)"' >&2 || true
-docker compose exec -T nvpn sh -c \
+docker compose --profile full exec -T nvpn sh -c \
   'sed -n "/^admins/,/]/p" "$XDG_CONFIG_HOME/nvpn/config.toml"' >&2 || true

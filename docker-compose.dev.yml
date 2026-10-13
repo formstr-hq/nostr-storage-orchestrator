@@ -74,18 +74,46 @@ services:
     build:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
+      args:
+        # formstr-backend origin baked into the console SPA at build time:
+        # the same browser-reachable FORMSTR_BACKEND_URL the proxy uses for
+        # admin-check/storage-notify. Changing it needs a blossom rebuild.
+        VITE_BACKEND_URL: "${FORMSTR_BACKEND_URL:-http://localhost:5000}"
     container_name: nso_blossom
-    # Host networking (Linux-only) instead of the bridge network: BLOSSOM_SERVERS
-    # can point at a mesh-VPN hostname (e.g. nostr-vpn's MagicDNS, resolved via
-    # systemd-resolved on loopback) that only the host's own network namespace
-    # can see — a bridge-networked container has no path to that resolver.
+    # Host networking (Linux-only) instead of the bridge network: provider
+    # backends live as standalone storage-client stacks and are reached over
+    # the host network.
     # No `ports:` here; host networking binds BLOSSOM_PORT directly on the
-    # host. DB_API_URL/BLOSSOM_SERVERS come straight from .env with no
-    # override needed — host networking means the local-dev and Docker
-    # values are identical.
+    # host. DB_API_URL comes straight from .env with no override needed — host
+    # networking means the local-dev and Docker values are identical.
     network_mode: host
     env_file:
       - ./.env
+    environment:
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Lifecycle scheduler (see docker-compose.yml). Host networking matches
+  # blossom so it can reach the proxy's internal purge endpoint and db-api via
+  # localhost.
+  notifier:
+    build:
+      context: .
+      dockerfile: ./packages/notifier/Dockerfile
+    container_name: nso_notifier
+    network_mode: host
+    env_file:
+      - ./.env
+    environment:
+      DB_API_URL: http://localhost:${DB_API_PORT:-4000}
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+      BLOSSOM_INTERNAL_URL: http://localhost:${BLOSSOM_PORT:-3001}
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
     depends_on:
       db:
         condition: service_healthy

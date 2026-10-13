@@ -12,7 +12,7 @@ const activeStorage = {
 test("ServerRegistry maps DB npubs and resolves legacy URLs", async () => {
   const registry = new ServerRegistry({
     listActiveStorages: async () => [activeStorage] as never,
-  }, ["http://fallback:3000"]);
+  });
 
   await registry.refresh();
   assert.deepEqual(registry.candidates(), [
@@ -23,14 +23,14 @@ test("ServerRegistry maps DB npubs and resolves legacy URLs", async () => {
   }
 });
 
-test("ServerRegistry uses fallback only for an empty list and retains good state on failure", async () => {
+test("ServerRegistry retains good state on failure and stays empty with no DB rows", async () => {
   let fail = false;
   const registry = new ServerRegistry({
     listActiveStorages: async () => {
       if (fail) throw new Error("unavailable");
       return [activeStorage] as never;
     },
-  }, ["http://fallback:3000"]);
+  });
 
   await registry.refresh();
   fail = true;
@@ -39,13 +39,13 @@ test("ServerRegistry uses fallback only for an empty list and retains good state
   errorLog.mock.restore();
   assert.equal(registry.resolve("npub-storage"), "http://10.44.0.8:3000");
 
+  // The DB is the only provider source: an empty roster is empty, never a
+  // static URL list.
   const emptyRegistry = new ServerRegistry({
     listActiveStorages: async () => [] as never,
-  }, ["http://fallback:3000"]);
+  });
   await emptyRegistry.refresh();
-  assert.deepEqual(emptyRegistry.candidates(), [
-    { id: "http://fallback:3000", url: "http://fallback:3000" },
-  ]);
+  assert.deepEqual(emptyRegistry.candidates(), []);
 });
 
 const candidates = [
@@ -75,12 +75,12 @@ test("uploadBlob stores on the pk+time-selected provider and fails over by recom
   });
   const warn = mock.method(console, "warn", () => undefined);
   const error = mock.method(console, "error", () => undefined);
-  const registry = { candidates: () => [...candidates] };
+  const registry = { freshCandidates: async () => [...candidates] };
 
   try {
     // npub-alice picks npub-carol (10.44.0.3) at this slot; after dropping it,
     // the 3 -> 2 recompute over the sorted pair picks npub-bob (10.44.0.2).
-    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry, now);
+    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry, now, 1);
     assert.deepEqual(result, { hash: "hash", replicas: ["npub-bob"] });
     assert.deepEqual(put.mock.calls.map((call) => call.arguments[0]), [
       "http://10.44.0.3:3000/upload",
@@ -102,16 +102,53 @@ test("uploadBlob throws when no provider accepts and when the roster is empty", 
 
   try {
     await assert.rejects(
-      uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-bob", { candidates: () => [...candidates] }, 0),
+      uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-bob", { freshCandidates: async () => [...candidates] }, 0),
       /Failed to upload blob to any storage provider/,
     );
     assert.equal(put.mock.callCount(), 3);
     await assert.rejects(
-      uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-bob", { candidates: () => [] }, 0),
+      uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-bob", { freshCandidates: async () => [] }, 0),
       /No storage providers available/,
     );
   } finally {
     put.mock.restore();
+    error.mock.restore();
+  }
+});
+
+test("uploadBlob stores a second copy on a different provider", async () => {
+  const now = 472227 * 3_600_000;
+  const put = mock.method(axios, "put", async () => ({ status: 200 }));
+  const registry = { freshCandidates: async () => [...candidates] };
+
+  try {
+    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry, now, 2);
+    assert.equal(result.replicas.length, 2);
+    assert.notEqual(result.replicas[0], result.replicas[1]);
+    assert.equal(put.mock.callCount(), 2);
+  } finally {
+    put.mock.restore();
+  }
+});
+
+test("uploadBlob still succeeds with one copy when the second provider fails", async () => {
+  const now = 472227 * 3_600_000;
+  let calls = 0;
+  const put = mock.method(axios, "put", async () => {
+    calls += 1;
+    if (calls === 2) throw new Error("provider down");
+    return { status: 200 };
+  });
+  const warn = mock.method(console, "warn", () => undefined);
+  const error = mock.method(console, "error", () => undefined);
+  const registry = { freshCandidates: async () => [candidates[0]!, candidates[1]!] };
+
+  try {
+    const result = await uploadBlob(Buffer.from("blob"), "hash", "Nostr token", "npub-alice", registry, now, 2);
+    assert.equal(result.replicas.length, 1);
+  } finally {
+    put.mock.restore();
+    warn.mock.restore();
     error.mock.restore();
   }
 });

@@ -80,7 +80,8 @@ const StorageSchema = z.object({
     ])
     .describe(
       "Ordered list of retention rules. Rules are evaluated in order; the first matching rule governs a blob's expiry. " +
-        "Rules also act as an upload allowlist: blobs whose MIME type matches no rule are rejected with 415.",
+        "Rules also act as an upload allowlist: blobs whose MIME type matches no rule are rejected with 415. " +
+        "An empty list accepts any MIME type with no expiry (but still denies when upload.requirePubkeyInRule is set).",
     ),
   removeWhenNoOwners: z
     .boolean()
@@ -107,9 +108,9 @@ const UploadSchema = z.object({
     .number()
     .int()
     .positive()
-    .default(2 * 1024 * 1024 * 1024)
+    .default(8 * 1024 * 1024 * 1024)
     .describe(
-      "Maximum blob size in bytes. Enforced from the Content-Length header before any body bytes are read. Requests without Content-Length receive 411. Default: 2 GB.",
+      "Maximum blob size in bytes. Enforced from the Content-Length header before any body bytes are read. Requests without Content-Length receive 411. Default: 8 GB.",
     ),
   workers: z
     .number()
@@ -348,9 +349,9 @@ const MediaSchema = z.object({
     .number()
     .int()
     .positive()
-    .default(1024 * 1024 * 1024)
+    .default(8 * 1024 * 1024 * 1024)
     .describe(
-      "Maximum input file size in bytes before reading the body. Default: 1 GB.",
+      "Maximum input file size in bytes before reading the body. Default: 8 GB.",
     ),
   image: ImageOptimizeSchema.optional()
     .transform((v) => v ?? ImageOptimizeSchema.parse({}))

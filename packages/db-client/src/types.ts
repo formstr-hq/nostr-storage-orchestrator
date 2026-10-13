@@ -1,17 +1,9 @@
-export type Plan = "FREE" | "BASIC" | "PRO";
-
-export interface PlanLimits {
-  storageLimit: number;
-  uploadLimit: number;
-  replicaCount: number;
-}
-
-export type PlanConfig = Record<Plan, PlanLimits>;
-
 export interface UserInfo {
   npub: string;
-  plan: Plan;
+  planExpiresAt: string | null;
+  storageBytes: string | null;
   usedStorage: string;
+  createdAt: string;
 }
 
 export interface BlobRecord {
@@ -22,14 +14,78 @@ export interface BlobRecord {
   createdAt: string;
 }
 
-export type MemberRole = "CLIENT" | "ADMIN";
-export type MemberStatus = "ACTIVE" | "REVOKED";
+/** A blob as returned by GET /blobs/:hash: one row plus everyone billed for it. */
+export interface BlobWithOwners extends BlobRecord {
+  owners: string[];
+}
+
+export interface CapacityRecord {
+  providers: number;
+  replicas: number;
+  totalBytes: string;
+  freeBytes: string;
+  committedBytes: string;
+  availableBytes: string;
+  minFreeBytes: string;
+  signupsOpen: boolean;
+}
+
+export interface Paginated<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface EntitlementRequest {
+  durationDays: number;
+  storageBytes: string | number;
+  source: "payment" | "admin";
+  mode?: "extend" | "upgrade";
+  force?: boolean;
+  /** Required for source "payment"; makes the grant idempotent. */
+  paymentHash?: string;
+}
+
+export interface NotificationRecord {
+  id: string;
+  npub: string;
+  kind: string;
+  ref: string | null;
+  channel: string;
+  sentAt: string;
+}
+
+export interface ModerationRecord {
+  id: string;
+  hash: string;
+  npub: string;
+  adminNpub: string;
+  reason: string;
+  createdAt: string;
+}
+
+export interface StorageStats {
+  users: number;
+  blobs: number;
+  bytes: string;
+}
+
+export interface ServiceAccountRecord {
+  npub: string;
+  label: string | null;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export type MeshRole = "CLIENT" | "ADMIN";
+export type MeshStatus = "ACTIVE" | "REVOKED";
 export type StorageLifecycle = "LINKED" | "REMOVED";
 
 export interface MemberRecord {
   npub: string;
-  role: MemberRole;
-  status: MemberStatus;
+  role: MeshRole;
+  status: MeshStatus;
   addedByNpub: string | null;
   createdAt: string;
   updatedAt: string;

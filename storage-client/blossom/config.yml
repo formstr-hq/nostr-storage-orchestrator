@@ -8,9 +8,11 @@ storage:
   backend: local
   local:
     dir: ./data/blobs
-  rules:
-    - type: "*"
-      expiration: 30 days
+  # No expiry rules. A rule here prunes any blob that has gone unaccessed for
+  # the given time, which would silently delete a paying customer's backup.
+  # Retention is owned by the orchestrator's plan lifecycle (grace -> blocked ->
+  # purge), never by the storage node.
+  rules: []
   removeWhenNoOwners: true
 
 # This server is an internal storage node behind the orchestrator proxy.

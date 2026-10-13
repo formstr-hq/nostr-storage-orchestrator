@@ -12,7 +12,7 @@ API_PORT="${ADMIN_API_PORT:-3002}"
 API_URL="http://127.0.0.1:${API_PORT}"
 
 log() { echo "[control-plane-e2e] $*"; }
-root_compose() { docker compose -f docker-compose.yml "$@"; }
+root_compose() { docker compose -f docker-compose.yml --profile admin "$@"; }
 client_compose() { (cd storage-client && docker compose "$@"); }
 api() {
   local nsec="$1" method="$2" path="$3" body="${4:-}"

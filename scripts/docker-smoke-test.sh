@@ -77,6 +77,8 @@ if [ ! -f .env ]; then
   log "creating .env from .env.example"
   cp .env.example .env
 fi
+# Internal calls are NIP-98 role-gated; the harness generates and registers a
+# throwaway service key in step 3, so no .env token is required.
 if [ ! -f storage-client/.env ]; then
   log "creating storage-client/.env from storage-client/.env.example"
   cp storage-client/.env.example storage-client/.env
@@ -97,14 +99,67 @@ else
   log "stop it manually with: (cd storage-client && docker compose -f docker-compose.dev.yml down)"
 fi
 
-log "step 3/5: building and starting the root docker-compose stack"
+log "step 3/6: creating a smoke service identity"
+# Internal db-api calls are NIP-98 signed; this identity is registered as a
+# service account after db-api is up. The proxy's own db-api calls are
+# service-gated too, so the same throwaway key becomes the proxy's
+# SERVICE_NSEC: persist it into .env (read via env_file) before bringing the
+# stack up. An existing uncommented SERVICE_NSEC is replaced.
+SERVICE_IDENTITY="$(pnpm --silent --filter @orchestrator/smoke-test run control-plane identity 2>/dev/null)"
+SERVICE_NSEC="$(printf '%s' "${SERVICE_IDENTITY}" | grep -o 'nsec1[a-z0-9]*' | head -n1 || true)"
+SERVICE_NPUB="$(printf '%s' "${SERVICE_IDENTITY}" | grep -o 'npub1[a-z0-9]*' | head -n1 || true)"
+unset SERVICE_IDENTITY
+[ -n "${SERVICE_NSEC}" ] && [ -n "${SERVICE_NPUB}" ] || { log "could not generate a service identity"; exit 1; }
+export SERVICE_NSEC
+if grep -qE '^SERVICE_NSEC=' .env; then
+  sed -i.bak -E "s|^SERVICE_NSEC=.*$|SERVICE_NSEC=${SERVICE_NSEC}|" .env && rm -f .env.bak
+else
+  printf '\nSERVICE_NSEC=%s\n' "${SERVICE_NSEC}" >> .env
+fi
+log "wrote the throwaway SERVICE_NSEC into .env for the proxy/notifier"
+
+log "step 4/6: building and starting the root docker-compose stack"
 root_compose up --build -d
 
-log "step 4/5: waiting for services to become healthy"
+log "step 5/6: waiting for services and registering the service identity"
 wait_for_healthy root_db_id "db-api" 120 || { root_compose logs db; exit 1; }
 wait_for_tcp localhost 3001 60 || { log "blossom proxy (:3001) did not come up"; root_compose logs blossom; exit 1; }
-log "all services are up"
+# Register the service npub in the service_account table out of band (the
+# endpoint that would do this over HTTP is itself gated, so registration is
+# host-side).
+root_compose exec -T db node packages/db/dist/src/scripts/registerService.js \
+  "${SERVICE_NPUB}" >/dev/null
+log "registered ${SERVICE_NPUB} as a service account"
 
-log "step 5/5: running protocol-level checks (packages/smoke-test)"
+log "step 5b/6: registering the local blossom backend as an active storage"
+# The proxy discovers providers only from db-api (no BLOSSOM_SERVERS
+# fallback), so seed a member + storage row pointing at the host-published
+# backend and mark it fresh. Idempotent: re-running patches the same row.
+DB_LOCAL="http://localhost:${DB_API_PORT:-4000}"
+curl -fsS -X PUT "${DB_LOCAL}/members/npub1smoketestowner" \
+  -H 'content-type: application/json' \
+  -d '{"role":"CLIENT"}' >/dev/null
+curl -fsS -X POST "${DB_LOCAL}/storages" \
+  -H 'content-type: application/json' \
+  -d '{"npub":"npub1smoketeststorage","ownerNpub":"npub1smoketestowner"}' >/dev/null
+# blossom runs with network_mode: host in docker-compose.dev.yml, so the
+# provider is reachable by the proxy at 127.0.0.1:${BLOSSOM_STORAGE_PORT}.
+# The dev stack polls the registry every second (STORAGE_REGISTRY_POLL_MS=1000
+# in docker-compose.dev.yml), so wait a couple of polls rather than guessing.
+curl -fsS -X PATCH "${DB_LOCAL}/storages/npub1smoketeststorage" \
+  -H 'content-type: application/json' \
+  -d "{\"tunnelIp\":\"127.0.0.1\",\"blossomPort\":${BLOSSOM_STORAGE_PORT},\"lastPingAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >/dev/null
+# Confirm the provider is actually being served before the suite runs. The
+# proxy's /health reports the active roster size it has polled.
+for _ in $(seq 1 30); do
+  providers="$(curl -fsS http://localhost:3001/health 2>/dev/null | sed -n 's/.*"providers":\([0-9]*\).*/\1/p' || echo 0)"
+  [ -n "${providers}" ] && [ "${providers}" -gt 0 ] && break
+  sleep 1
+done
+[ "${providers:-0}" -gt 0 ] || { log "proxy never picked up the smoke storage provider"; exit 1; }
+
+log "step 6/6: running protocol-level checks (packages/smoke-test)"
 pnpm install >/dev/null
+# The smoke suite provisions entitlements through the proxy's internal API
+# with its NIP-98 service identity (SERVICE_NSEC, generated above).
 pnpm --filter @orchestrator/smoke-test run smoke

@@ -1,0 +1,41 @@
+{
+  "name": "@orchestrator/notifier",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./dm": {
+      "types": "./dist/dm.d.ts",
+      "import": "./dist/dm.js"
+    },
+    "./notifications": {
+      "types": "./dist/notifications.d.ts",
+      "import": "./dist/notifications.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "pnpm run build && NODE_ENV=test node --test dist/*.test.js"
+  },
+  "dependencies": {
+    "@orchestrator/db-client": "workspace:*",
+    "@orchestrator/lifecycle": "workspace:*",
+    "axios": "^1.16.1",
+    "dotenv": "^17.4.2",
+    "nostr-tools": "^2.23.5",
+    "@orchestrator/nip98": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}

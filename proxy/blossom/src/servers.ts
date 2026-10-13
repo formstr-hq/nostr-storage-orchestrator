@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import axios from "axios";
 import { DbClient } from "@orchestrator/db-client";
@@ -9,20 +10,12 @@ config({ path: path.resolve(__dirname, "../../../.env") });
 
 export type ServerCandidate = { id: string; url: string };
 
-const FALLBACK_SERVERS = (process.env.BLOSSOM_SERVERS ?? "")
-  .split(",")
-  .map((url) => url.trim().replace(/\/+$/, ""))
-  .filter(Boolean);
-const POLL_MS = positiveNumber(process.env.STORAGE_REGISTRY_POLL_MS, 15_000);
-// How long a pk-seeded placement stays fixed before it rotates. Defaults to
-// one hour; the same bucket is used by every upload within the window.
-const TIME_SLOT_MS = positiveNumber(process.env.BLOSSOM_PLACEMENT_SLOT_MS, 3_600_000);
+// How often the active-storage roster is re-read from db-api (and how long a
+// pk-seeded placement stays fixed before it rotates). Constants, not config:
+// liveness latency is not a per-deployment concern.
+const POLL_MS = 15_000;
+const TIME_SLOT_MS = 3_600_000;
 const RAW_URL = /^(?:https?|wss?):\/\//i;
-
-function positiveNumber(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 function hostForUrl(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -30,20 +23,12 @@ function hostForUrl(host: string): string {
 
 export class ServerRegistry {
   private byId = new Map<string, string>();
-  private warnedFallback = false;
 
-  constructor(
-    private readonly db: Pick<DbClient, "listActiveStorages">,
-    private readonly fallbackUrls = FALLBACK_SERVERS,
-  ) {}
+  constructor(private readonly db: Pick<DbClient, "listActiveStorages">) {}
 
   async refresh(): Promise<void> {
     try {
       const active = await this.db.listActiveStorages();
-      if (active.length === 0) {
-        this.useFallback();
-        return;
-      }
       this.byId = new Map(active.map((storage) => [
         storage.npub,
         `http://${hostForUrl(storage.tunnelIp)}:${storage.blossomPort}`,
@@ -57,21 +42,30 @@ export class ServerRegistry {
     return [...this.byId].map(([id, url]) => ({ id, url }));
   }
 
-  resolve(id: string): string | undefined {
-    return RAW_URL.test(id) ? id : this.byId.get(id);
+  /**
+   * Candidates, re-reading db-api first if the roster is empty. A provider
+   * that just came active is served on the next upload rather than after the
+   * poll interval; a genuinely empty roster still costs only one read.
+   */
+  async freshCandidates(): Promise<ServerCandidate[]> {
+    if (this.byId.size === 0) {
+      await this.refresh();
+    }
+    return this.candidates();
   }
 
-  private useFallback(): void {
-    this.byId = new Map(this.fallbackUrls.map((url) => [url, url]));
-    if (this.fallbackUrls.length > 0 && process.env.NODE_ENV === "production" && !this.warnedFallback) {
-      this.warnedFallback = true;
-      console.warn("Using BLOSSOM_SERVERS fallback because the DB active storage list is empty");
-    }
+  resolve(id: string): string | undefined {
+    return RAW_URL.test(id) ? id : this.byId.get(id);
   }
 }
 
 const registryDb = new DbClient({
   baseUrl: process.env.DB_API_URL ?? `http://localhost:${process.env.DB_API_PORT}`,
+  // Signed for consistency with the rest of the proxy's db-api calls.
+  // /storages/active is currently ungated (internal network only), so db-api
+  // ignores this header — keeping it signed means gating the route later
+  // cannot silently break the roster poll.
+  ...(process.env.SERVICE_NSEC ? { serviceNsec: process.env.SERVICE_NSEC } : {}),
 });
 export const serverRegistry = new ServerRegistry(registryDb);
 if (process.env.NODE_ENV !== "test") {
@@ -111,25 +105,37 @@ export function selectOwner(
   return sorted[Number(fnv1a(`${npub}:${timeSlot}`) % BigInt(sorted.length))];
 }
 
-// Uploads to the provider selected by hash(npub:timeSlot). On failure the
-// failed provider is dropped and the selection is recomputed over the
-// remaining roster, repeating until one provider accepts the blob.
+// How many providers hold each blob. A single copy means one offline or
+// departed provider loses paying customers' data, so the default is two.
+export function replicaTarget(): number {
+  const parsed = Math.floor(Number(process.env["BLOSSOM_REPLICAS"]));
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 2;
+}
+
+// Uploads to the provider selected by hash(npub:timeSlot), then to the next
+// pick from the remaining roster, until `replicaCount` providers hold the blob.
+// A provider that fails is dropped and the selection recomputed over the rest.
+// One copy is enough to succeed (it is logged loudly if fewer than asked for);
+// zero copies throws.
 export async function uploadBlob(
   blob: Buffer,
   hash: string,
   authHeader: string,
   npub: string,
-  registry: Pick<ServerRegistry, "candidates"> = serverRegistry,
+  registry: Pick<ServerRegistry, "freshCandidates"> = serverRegistry,
   now = Date.now(),
+  replicaCount = replicaTarget(),
 ) {
-  const remaining = registry.candidates();
+  const remaining = await registry.freshCandidates();
   if (remaining.length === 0) {
     throw new Error("No storage providers available");
   }
 
   const tried: string[] = [];
-  while (remaining.length > 0) {
+  const stored: string[] = [];
+  while (remaining.length > 0 && stored.length < replicaCount) {
     const server = selectOwner(npub, remaining, now)!;
+    remaining.splice(remaining.indexOf(server), 1);
     try {
       await axios.put(`${server.url}/upload`, blob, {
         headers: {
@@ -137,19 +143,29 @@ export async function uploadBlob(
           "Content-Type": "application/octet-stream",
           "X-SHA-256": hash,
         },
+        timeout: 120_000,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
       });
-      if (tried.length > 0) {
-        console.warn(`Upload for ${npub} failed over to ${server.id}; tried ${tried.join(", ")}`);
-      }
-      return { hash, replicas: [server.id] };
+      stored.push(server.id);
     } catch (err) {
       console.error(`Failed upload ${server.url}`, err);
       tried.push(server.id);
-      remaining.splice(remaining.indexOf(server), 1);
     }
   }
 
-  throw new Error(`Failed to upload blob to any storage provider (tried: ${tried.join(", ")})`);
+  if (stored.length === 0) {
+    throw new Error(`Failed to upload blob to any storage provider (tried: ${tried.join(", ")})`);
+  }
+  if (tried.length > 0) {
+    console.warn(`Upload for ${npub} skipped failing providers: ${tried.join(", ")}`);
+  }
+  if (stored.length < replicaCount) {
+    console.warn(
+      `Blob ${hash} stored on ${stored.length} of ${replicaCount} wanted replicas`,
+    );
+  }
+  return { hash, replicas: stored };
 }
 
 export async function downloadBlob(hash: string, replicas: string[]) {
@@ -162,6 +178,30 @@ export async function downloadBlob(hash: string, replicas: string[]) {
     try {
       const response = await axios.get(`${server}/${hash}`, { responseType: "arraybuffer" });
       return Buffer.from(response.data);
+    } catch (err) {
+      console.error(`Failed download ${server}`, err);
+    }
+  }
+  throw new Error("Failed to download blob from all replicas");
+}
+
+/**
+ * Opens the blob as a stream from the first replica that has it, so a large
+ * download is piped to the client instead of being held in proxy memory.
+ */
+export async function openBlobStream(hash: string, replicas: string[]) {
+  for (const replica of replicas) {
+    const server = serverRegistry.resolve(replica);
+    if (!server) {
+      console.warn(`Blossom replica ${replica} is not in the active storage registry`);
+      continue;
+    }
+    try {
+      const response = await axios.get<Readable>(`${server}/${hash}`, {
+        responseType: "stream",
+        timeout: 30_000,
+      });
+      return response.data;
     } catch (err) {
       console.error(`Failed download ${server}`, err);
     }

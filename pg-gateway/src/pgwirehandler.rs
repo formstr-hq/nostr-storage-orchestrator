@@ -1271,6 +1271,9 @@ fn is_catalog_statement(sql: &str) -> bool {
         || lower.contains("pg_index")
         || lower.contains("pg_constraint")
         || lower.contains("pg_type")
+        || lower.contains("pg_database")
+        || lower.contains("session_user")
+        || lower.contains("version()")
 }
 
 impl GatewayHandlers {
@@ -1289,9 +1292,6 @@ impl GatewayHandlers {
         };
         let started = std::time::Instant::now();
         let providers = self.registry.providers();
-        if providers.is_empty() {
-            return Err(GatewayError::NoProviders);
-        }
         let provider_count = providers.len();
         let mut handles = Vec::with_capacity(provider_count);
         for provider in providers {
@@ -1343,8 +1343,9 @@ impl GatewayHandlers {
         }
         if answered == 0 {
             // Registry-only table (lives in the central DB, never replicated
-            // to providers): run the plan's partial against the central DB as
-            // a single "provider" so pgweb counts/inspects these tables too.
+            // to providers), or an empty/degraded roster: run the plan's
+            // partial against the central DB as a single "provider" so pgweb
+            // counts/inspects these tables too.
             if self.catalog.has_table(&plan.table).await.unwrap_or(false) {
                 let central_rows = self.catalog.read_qualified(&plan.partial_sql()).await?;
                 let merged = crate::aggregate::merge_partials(&plan, &[central_rows]);

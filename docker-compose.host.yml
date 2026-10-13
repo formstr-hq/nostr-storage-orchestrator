@@ -44,10 +44,37 @@ services:
     build:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
+      args:
+        # formstr-backend origin baked into the console SPA at build time:
+        # the same browser-reachable FORMSTR_BACKEND_URL the proxy uses for
+        # admin-check/storage-notify. Changing it needs a blossom rebuild.
+        VITE_BACKEND_URL: "${FORMSTR_BACKEND_URL:-http://localhost:5000}"
     container_name: nso_blossom
     network_mode: host
     env_file:
       - ./.env
+    environment:
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  notifier:
+    build:
+      context: .
+      dockerfile: ./packages/notifier/Dockerfile
+    container_name: nso_notifier
+    network_mode: host
+    env_file:
+      - ./.env
+    environment:
+      DB_API_URL: http://localhost:${DB_API_PORT:-4000}
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+      BLOSSOM_INTERNAL_URL: http://localhost:${BLOSSOM_PORT:-3001}
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
     depends_on:
       db:
         condition: service_healthy

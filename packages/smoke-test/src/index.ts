@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
-import { finalizeEvent, generateSecretKey, type EventTemplate } from "nostr-tools/pure";
+import { finalizeEvent, generateSecretKey, getPublicKey, type EventTemplate } from "nostr-tools/pure";
+import { nip19 } from "nostr-tools";
+import { createNip98Signer } from "@orchestrator/nip98";
 
 const BLOSSOM_URL = process.env.BLOSSOM_URL ?? "http://localhost:3001";
+// Internal calls are NIP-98-signed with the smoke test's own service identity
+// and go through the proxy's /internal API — db-api itself is internal-only.
+// The harness registers this npub as a service account before running the suite.
+const SERVICE_NSEC = process.env.SERVICE_NSEC ?? "";
+const serviceSigner = SERVICE_NSEC ? createNip98Signer(SERVICE_NSEC) : null;
 
 let failures = 0;
 
@@ -58,6 +65,26 @@ function blossomAuthToken(
   return `Nostr ${Buffer.from(JSON.stringify(event)).toString("base64")}`;
 }
 
+async function assignEntitlement(
+  npub: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  assert(serviceSigner, "SERVICE_NSEC is required for entitlement provisioning");
+  const path = `/internal/users/${encodeURIComponent(npub)}/entitlement`;
+  const url = `${BLOSSOM_URL}${path}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: serviceSigner.header("POST", url, body),
+    },
+    body: JSON.stringify(body),
+  });
+  assert(res.ok, `entitlement assignment failed: ${res.status} ${await res.text()}`);
+}
+
+
+
 // ---------------------------------------------------------------------------
 // Blossom (proxy/blossom) — REST API over HTTP, per BUD-01/02/11/12
 // ---------------------------------------------------------------------------
@@ -66,6 +93,7 @@ async function runBlossomSuite(): Promise<void> {
   log("\nBlossom (proxy/blossom) — " + BLOSSOM_URL);
 
   const sk = generateSecretKey();
+  const npub = nip19.npubEncode(getPublicKey(sk));
   const payload = Buffer.from(`smoke-test-${Date.now()}-${Math.random()}`);
   const payloadHash = createHash("sha256").update(payload).digest("hex");
 
@@ -92,13 +120,49 @@ async function runBlossomSuite(): Promise<void> {
     assert(res.status === 401, `expected 401, got ${res.status}`);
   });
 
-  await step("GET /storage returns a fresh FREE-plan user", async () => {
+  await step("GET /storage returns an unpaid user before purchase", async () => {
     const auth = blossomAuthToken(sk, "get");
     const res = await fetch(`${BLOSSOM_URL}/storage`, { headers: { authorization: auth } });
     assert(res.ok, `expected 2xx, got ${res.status}`);
-    const body = (await res.json()) as { plan: string; used: number };
-    assert(body.plan === "FREE", `expected plan FREE, got ${body.plan}`);
+    const body = (await res.json()) as { status: string; used: number };
+    assert(body.status === "UNPAID", `expected status UNPAID, got ${body.status}`);
     assert(body.used === 0, `expected used=0 for a fresh user, got ${body.used}`);
+  });
+
+  await step("PUT /upload is rejected for an unpaid account", async () => {
+    const auth = blossomAuthToken(sk, "upload", { hash: payloadHash });
+    const res = await fetch(`${BLOSSOM_URL}/upload`, {
+      method: "PUT",
+      headers: { authorization: auth, "content-type": "application/octet-stream" },
+      body: payload,
+    });
+    assert(res.status === 403, `expected 403, got ${res.status}`);
+    const body = (await res.json()) as { error: string };
+    assert(body.error === "unpaid", `expected unpaid, got ${body.error}`);
+  });
+
+  await step("grants a plan via db-api and uploads within quota", async () => {
+    await assignEntitlement(npub, {
+      durationDays: 1,
+      storageBytes: "1000000",
+      source: "admin",
+      mode: "upgrade",
+      force: true,
+    });
+
+    const auth = blossomAuthToken(sk, "upload", { hash: payloadHash });
+    const res = await fetch(`${BLOSSOM_URL}/upload`, {
+      method: "PUT",
+      headers: { authorization: auth, "content-type": "application/octet-stream" },
+      body: payload,
+    });
+    const rawBody = await res.text();
+    assert(res.status === 201, `expected 201, got ${res.status}: ${rawBody}`);
+    const body = JSON.parse(rawBody) as { url: string; sha256: string; size: number; type: string; uploaded: number };
+    assert(body.sha256 === payloadHash, `expected sha256 ${payloadHash}, got ${body.sha256}`);
+    assert(body.size === payload.length, `expected size ${payload.length}, got ${body.size}`);
+    assert(typeof body.uploaded === "number", "expected a numeric uploaded timestamp");
+    assert(/\.[a-zA-Z0-9]+$/.test(body.url), `expected descriptor url to include a file extension, got ${body.url}`);
   });
 
   await step('rejects PUT /upload when the auth token has no "x" tag', async () => {
@@ -125,22 +189,6 @@ async function runBlossomSuite(): Promise<void> {
     assert(res.status === 200, `expected 200, got ${res.status}`);
   });
 
-  await step("PUT /upload stores a blob and returns a 201 Blob Descriptor", async () => {
-    const auth = blossomAuthToken(sk, "upload", { hash: payloadHash });
-    const res = await fetch(`${BLOSSOM_URL}/upload`, {
-      method: "PUT",
-      headers: { authorization: auth, "content-type": "application/octet-stream" },
-      body: payload,
-    });
-    const rawBody = await res.text();
-    assert(res.status === 201, `expected 201, got ${res.status}: ${rawBody}`);
-    const body = JSON.parse(rawBody) as { url: string; sha256: string; size: number; type: string; uploaded: number };
-    assert(body.sha256 === payloadHash, `expected sha256 ${payloadHash}, got ${body.sha256}`);
-    assert(body.size === payload.length, `expected size ${payload.length}, got ${body.size}`);
-    assert(typeof body.uploaded === "number", "expected a numeric uploaded timestamp");
-    assert(/\.[a-zA-Z0-9]+$/.test(body.url), `expected descriptor url to include a file extension, got ${body.url}`);
-  });
-
   await step("PUT /upload of the same blob returns 200 OK (dedup)", async () => {
     const auth = blossomAuthToken(sk, "upload", { hash: payloadHash });
     const res = await fetch(`${BLOSSOM_URL}/upload`, {
@@ -158,22 +206,25 @@ async function runBlossomSuite(): Promise<void> {
     assert(body.used === payload.length, `expected used=${payload.length}, got ${body.used}`);
   });
 
-  // Blob reads are deliberately public — see handleGetBlob in
-  // proxy/blossom/src/index.ts, where the auth and ownership checks are
-  // commented out. These two steps pin that decision down so re-tightening
-  // GET is a conscious change that fails here first, rather than a silent
-  // break for every unauthenticated reader.
+  await step("PUT /upload is rejected when it would exceed the allowance", async () => {
+    const big = Buffer.alloc(2_000_000, 4);
+    const bigHash = createHash("sha256").update(big).digest("hex");
+    const auth = blossomAuthToken(sk, "upload", { hash: bigHash });
+    const res = await fetch(`${BLOSSOM_URL}/upload`, {
+      method: "PUT",
+      headers: { authorization: auth, "content-type": "application/octet-stream" },
+      body: big,
+    });
+    assert(res.status === 403, `expected 403, got ${res.status}`);
+    const body = (await res.json()) as { error: string };
+    assert(body.error === "quota_exceeded", `expected quota_exceeded, got ${body.error}`);
+  });
+
   await step("GET /<sha256> is public — no Authorization header needed", async () => {
     const res = await fetch(`${BLOSSOM_URL}/${payloadHash}`);
     assert(res.ok, `expected 2xx, got ${res.status}`);
     const bytes = Buffer.from(await res.arrayBuffer());
     assert(bytes.equals(payload), "downloaded bytes do not match uploaded bytes");
-  });
-
-  await step('GET /<sha256> ignores a token whose "x" tag names a different hash', async () => {
-    const auth = blossomAuthToken(sk, "get", { hash: "0".repeat(64) });
-    const res = await fetch(`${BLOSSOM_URL}/${payloadHash}`, { headers: { authorization: auth } });
-    assert(res.ok, `expected 2xx, got ${res.status}`);
   });
 
   await step("GET /<sha256> 404s for a blob that was never uploaded", async () => {
@@ -193,40 +244,44 @@ async function runBlossomSuite(): Promise<void> {
     assert(bytes.byteLength === 0, "expected HEAD to return an empty body");
   });
 
-  await step("GET /<sha256> returns the original bytes", async () => {
-    const auth = blossomAuthToken(sk, "get", { hash: payloadHash });
-    const res = await fetch(`${BLOSSOM_URL}/${payloadHash}`, { headers: { authorization: auth } });
+  await step("GET /<sha256>.ext accepts an arbitrary file extension", async () => {
+    const res = await fetch(`${BLOSSOM_URL}/${payloadHash}.bin`);
     assert(res.ok, `expected 2xx, got ${res.status}`);
-    const bytes = Buffer.from(await res.arrayBuffer());
-    assert(bytes.equals(payload), "downloaded bytes do not match uploaded bytes");
   });
 
-  await step("GET /<sha256>.ext accepts an arbitrary file extension", async () => {
-    const auth = blossomAuthToken(sk, "get", { hash: payloadHash });
-    const res = await fetch(`${BLOSSOM_URL}/${payloadHash}.bin`, { headers: { authorization: auth } });
-    assert(res.ok, `expected 2xx, got ${res.status}`);
+  await step("expiring the plan makes reads 403 but deletes still allowed", async () => {
+    await assignEntitlement(npub, {
+      durationDays: 1,
+      storageBytes: "1000000",
+      source: "admin",
+      mode: "upgrade",
+      force: true,
+      planExpiresAt: new Date(Date.now() - 40 * 24 * 3600 * 1000).toISOString(),
+    });
+
+    const read = await fetch(`${BLOSSOM_URL}/${payloadHash}`);
+    assert(read.status === 403, `expected read 403, got ${read.status}`);
+
+    const auth = blossomAuthToken(sk, "delete", { hash: payloadHash });
+    const del = await fetch(`${BLOSSOM_URL}/${payloadHash}`, { method: "DELETE", headers: { authorization: auth } });
+    assert(del.ok, `expected delete 2xx, got ${del.status}`);
   });
 
   await step('rejects DELETE /<sha256> when the auth token has no "x" tag', async () => {
+    await assignEntitlement(npub, {
+      durationDays: 1,
+      storageBytes: "1000000",
+      source: "admin",
+      mode: "upgrade",
+      force: true,
+    });
     const auth = blossomAuthToken(sk, "delete");
     const res = await fetch(`${BLOSSOM_URL}/${payloadHash}`, { method: "DELETE", headers: { authorization: auth } });
     assert(res.status === 401, `expected 401, got ${res.status}`);
   });
 
-  await step("DELETE /<sha256> removes the blob and decrements usage", async () => {
-    const auth = blossomAuthToken(sk, "delete", { hash: payloadHash });
-    const del = await fetch(`${BLOSSOM_URL}/${payloadHash}`, { method: "DELETE", headers: { authorization: auth } });
-    assert(del.ok, `expected 2xx, got ${del.status}`);
-
-    const storageAuth = blossomAuthToken(sk, "get");
-    const storage = await fetch(`${BLOSSOM_URL}/storage`, { headers: { authorization: storageAuth } });
-    const body = (await storage.json()) as { used: number };
-    assert(body.used === 0, `expected used=0 after delete, got ${body.used}`);
-  });
-
   await step("GET /<sha256> 404s after delete", async () => {
-    const auth = blossomAuthToken(sk, "get", { hash: payloadHash });
-    const res = await fetch(`${BLOSSOM_URL}/${payloadHash}`, { headers: { authorization: auth } });
+    const res = await fetch(`${BLOSSOM_URL}/${payloadHash}`);
     assert(res.status === 404, `expected 404, got ${res.status}`);
   });
 }

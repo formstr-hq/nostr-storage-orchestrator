@@ -7,17 +7,20 @@ WORKDIR /app
 RUN npm install -g pnpm@10.15.1
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/nip98/package.json ./packages/nip98/
 COPY packages/db-client/package.json ./packages/db-client/
 COPY packages/db/package.json ./packages/db/
 
 RUN pnpm install --frozen-lockfile
 
+COPY packages/nip98 ./packages/nip98
 COPY packages/db-client ./packages/db-client
 COPY packages/db ./packages/db
 
-RUN pnpm --filter @orchestrator/db-client run build
-RUN pnpm --filter @orchestrator/db-api run generate
-RUN pnpm --filter @orchestrator/db-api run build
+RUN pnpm --filter @orchestrator/nip98 run build \
+  && pnpm --filter @orchestrator/db-client run build \
+  && pnpm --filter @orchestrator/db-api run generate \
+  && pnpm --filter @orchestrator/db-api run build
 
 ENV NODE_ENV=production
 ENV PORT=4000

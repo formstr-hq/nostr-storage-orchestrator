@@ -12,78 +12,175 @@ datasource db {
   provider = "postgresql"
 }
 
-enum Plan {
-  FREE
-  BASIC
-  PRO
+// All Prisma-owned tables/columns are lowercase snake_case in Postgres via
+// @@map/@map. Prisma field names stay camelCase; db-api JSON serialization is
+// unchanged. The pg_* models below are the exception: they are owned by
+// pg-gateway's raw tokio-postgres SQL and keep their existing names.
+
+// ── Paid users ──────────────────────────────────────────────────────────────
+// Only users with an entitlement live here. There is no service/admin role:
+// machine callers live in service_account, and admin-ness is owned by
+// formstr-backend (the proxy calls its admin-check endpoint). Plans (labels,
+// prices, invoices) live in formstr-backend too; this repo stores only the
+// entitlement fields it must enforce: expiry and allowance.
+
+model User {
+  npub          String    @id
+  planExpiresAt DateTime? @map("plan_expires_at")
+  storageBytes  BigInt?   @map("storage_bytes")
+  usedStorage   BigInt    @default(0) @map("used_storage")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  blobs Blob[]
+
+  @@index([planExpiresAt])
+  @@map("user")
 }
 
-enum MemberRole {
+// One row per (hash, owner). Identical content uploaded by two accounts shares
+// the same bytes on the storage nodes (and the same `replicas`) but each owner
+// is billed and gated on their own row. The bytes are removed from the nodes
+// only when the last owner row goes away.
+model Blob {
+  hash      String
+  npub      String
+  size      BigInt
+  replicas  String[]
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [npub], references: [npub])
+
+  @@id([hash, npub])
+  @@index([hash])
+  @@index([npub])
+  @@map("blob")
+}
+
+// Idempotency record for paid entitlement pushes. formstr-backend sends the
+// payment hash with every paid grant; a repeat of the same hash (retry after a
+// lost response, reconciler re-run) is acknowledged without granting again.
+model EntitlementGrant {
+  paymentHash String   @id @map("payment_hash")
+  npub        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([npub])
+  @@map("entitlement_grant")
+}
+
+// ── Service accounts ─────────────────────────────────────────────────────────
+// Machine identities allowed to call the internal db-api endpoints. Proven
+// per-request with a NIP-98 header; the signer's npub must have a row here
+// with enabled = true. Registered out of band with `npm run register:service`.
+// No roles: everything in this table is privileged the same way.
+
+model ServiceAccount {
+  npub      String   @id
+  label     String?
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("service_account")
+}
+
+// Dedupe log for expiry/quota/moderation/purchase notifications. Both channels
+// are attempted independently; the unique key stops repeat sends for the same
+// (npub, kind, ref, channel).
+model NotificationLog {
+  id      String   @id @default(cuid())
+  npub    String
+  kind    String
+  ref     String?
+  channel String
+  sentAt  DateTime @default(now()) @map("sent_at")
+
+  @@unique([npub, kind, ref, channel])
+  @@index([npub, sentAt])
+  @@map("notification_log")
+}
+
+// Admin moderation audit. Money-related records never live here.
+model ModerationAction {
+  id        String   @id @default(cuid())
+  hash      String
+  npub      String
+  adminNpub String   @map("admin_npub")
+  reason    String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([hash])
+  @@index([npub])
+  @@map("moderation_action")
+}
+
+// ── Mesh membership ──────────────────────────────────────────────────────────
+// Members of the storage mesh (not formstr users/admins). MESH_ROLE admin is a
+// mesh administrator, a different concept from the formstr-backend admins the
+// console checks. Soft-deleted via status = REVOKED.
+
+model MeshMember {
+  npub        String     @id
+  role        MeshRole   @default(CLIENT) @map("mesh_role")
+  status      MeshStatus @default(ACTIVE)
+  addedByNpub String?    @map("added_by_npub")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  storages StorageProvider[]
+
+  @@map("mesh_member")
+}
+
+enum MeshRole {
   CLIENT
   ADMIN
+
+  @@map("mesh_role")
 }
 
-enum MemberStatus {
+enum MeshStatus {
   ACTIVE
   REVOKED
+
+  @@map("mesh_status")
+}
+
+// ── Storage providers ─────────────────────────────────────────────────────────
+// Machines that serve blobs and/or a mesh-PG (pg-agent) endpoint. Written by
+// control-plane-backend and the storage agents; read by the proxy provider
+// registry and pg-gateway. Soft-deleted via lifecycle = REMOVED.
+
+model StorageProvider {
+  npub                  String           @id
+  ownerNpub             String           @map("owner_npub")
+  owner                 MeshMember       @relation(fields: [ownerNpub], references: [npub])
+  tunnelIp              String?          @map("tunnel_ip")
+  blossomPort           Int?             @map("blossom_port")
+  pgAgentPort           Int?             @map("pg_agent_port")
+  declaredCapacityBytes BigInt?          @map("declared_capacity_bytes")
+  reportedTotalBytes    BigInt?          @map("reported_total_bytes")
+  reportedFreeBytes     BigInt?          @map("reported_free_bytes")
+  lifecycle             StorageLifecycle @default(LINKED)
+  lastPingAt            DateTime?        @map("last_ping_at")
+  createdAt             DateTime         @default(now()) @map("created_at")
+
+  @@index([lifecycle, lastPingAt])
+  @@index([ownerNpub])
+  @@map("storage_provider")
 }
 
 enum StorageLifecycle {
   LINKED
   REMOVED
-}
 
-model Blob {
-  hash      String   @id
-  npub      String
-  size      BigInt
-  replicas  String[]
-  createdAt DateTime @default(now())
-
-  user User @relation(fields: [npub], references: [npub])
-}
-
-model User {
-  npub        String   @id
-  plan        Plan     @default(FREE)
-  usedStorage BigInt   @default(0)
-  createdAt   DateTime @default(now())
-
-  blobs Blob[]
-}
-
-model Member {
-  npub        String       @id
-  role        MemberRole   @default(CLIENT)
-  status      MemberStatus @default(ACTIVE)
-  addedByNpub String?
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-
-  storages Storage[]
-}
-
-model Storage {
-  npub                  String           @id
-  ownerNpub             String
-  owner                 Member           @relation(fields: [ownerNpub], references: [npub])
-  tunnelIp              String?
-  blossomPort           Int?
-  pgAgentPort           Int?
-  declaredCapacityBytes BigInt?
-  reportedTotalBytes    BigInt?
-  reportedFreeBytes     BigInt?
-  lifecycle             StorageLifecycle @default(LINKED)
-  lastPingAt            DateTime?
-  createdAt             DateTime         @default(now())
-
-  @@index([lifecycle, lastPingAt])
-  @@index([ownerNpub])
+  @@map("storage_lifecycle")
 }
 
 // ── Decentralized Postgres layer (docs/DECENTRALIZED_PG_PLAN.md) ────────────
 // Owned by the pg-gateway, which talks to these tables directly over
 // tokio-postgres; they are declared here so Prisma owns the schema/migrations.
+// Names are intentionally left as-is (quoted camelCase columns) to match
+// CENTRAL_SCHEMA_SQL in pg-gateway/src/central.rs and its raw SQL.
 
 model PgTable {
   name      String   @id

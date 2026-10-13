@@ -18,11 +18,21 @@
 # as well as Linux. Host-published backends (storage-client) are reached via
 # host.docker.internal. For Linux mesh-VPN / MagicDNS host networking, use:
 #   docker compose -f docker-compose.host.yml up --build
+#
+# Every service below belongs to Compose profiles, so commands select the
+# stack they want with --profile. `full` is everything:
+#   docker compose --profile full up -d --build     # everything
+#   docker compose --profile blossom up -d --build  # storage only: postgres,
+#                                                   # db, nvpn, blossom, notifier
+#   docker compose --profile admin up -d --build    # + control plane
+#   docker compose --profile pg up -d --build       # + mesh-PG gateway
+# Combine stacks with repeated flags, e.g. --profile blossom --profile admin.
 
 services:
   postgres:
     image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     container_name: nso_postgres
+    profiles: ["blossom", "admin", "pg", "full"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orchestrator}
@@ -51,6 +61,7 @@ services:
       context: .
       dockerfile: ./packages/db/Dockerfile
     container_name: nso_db
+    profiles: ["blossom", "admin", "pg", "full"]
     env_file:
       - ./.env
     environment:
@@ -65,11 +76,10 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       STORAGE_ACTIVE_WINDOW_SECS: "${ACTIVE_FRESHNESS_SECS:-960}"
-    # Bound to the host's loopback only (not 0.0.0.0) — reachable from
-    # sibling containers on the bridge network via `db:$DB_API_PORT`, and
-    # from the host via localhost. Never reachable off this machine.
-    ports:
-      - "127.0.0.1:${DB_API_PORT:-4000}:${DB_API_PORT:-4000}"
+    # Internal-only: no host port is published here. Sibling services (proxy,
+    # notifier, pg-gateway, control plane) reach it at db:$DB_API_PORT over the
+    # compose network; external callers (formstr-backend, UIs) go through
+    # proxy/blossom, which proxies to db-api.
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,6 +99,7 @@ services:
       file: ./nvpn/compose.yml
       service: nvpn
     container_name: nso_nvpn
+    profiles: ["blossom", "admin", "pg", "full"]
     environment:
       NVPN_ROLE: proxy
       NVPN_PUBLIC_INPUT_PORTS: "${BLOSSOM_PORT:-3001},${ADMIN_API_PORT:-3002},${PG_GATEWAY_PORT:-55432}"
@@ -114,6 +125,7 @@ services:
       context: .
       dockerfile: ./control-plane-backend/Dockerfile
     container_name: nso_admin
+    profiles: ["admin", "full"]
     network_mode: "service:nvpn"
     # `nvpn status --json` reports live daemon state (connected peers,
     # handshake/traffic counters) only when it can see the daemon's PID as
@@ -160,7 +172,13 @@ services:
     build:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
+      args:
+        # formstr-backend origin baked into the console SPA at build time:
+        # the same browser-reachable FORMSTR_BACKEND_URL the proxy uses for
+        # admin-check/storage-notify. Changing it needs a blossom rebuild.
+        VITE_BACKEND_URL: "${FORMSTR_BACKEND_URL:-http://localhost:5000}"
     container_name: nso_blossom
+    profiles: ["blossom", "full"]
     # Shares the nvpn sidecar's network namespace instead of the bridge
     # network: BLOSSOM_SERVERS can point at a storage-client's mesh tunnel IP
     # (10.44.x.y), reachable only from inside that namespace — the host
@@ -177,12 +195,43 @@ services:
       # instead (the code's default is localhost:$DB_API_PORT, which is only
       # right for local dev and docker-compose.dev.yml).
       DB_API_URL: http://db:${DB_API_PORT:-4000}
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
     depends_on:
       db:
         condition: service_healthy
       nvpn:
         condition: service_healthy
         restart: true
+    restart: unless-stopped
+
+  # Lifecycle scheduler: mirrors User.status from derived dates, sends
+  # expiry/quota/moderation notifications over NIP-17 DM + email, and (when
+  # purgeEnabled) calls the proxy's internal purge endpoint.
+  notifier:
+    build:
+      context: .
+      dockerfile: ./packages/notifier/Dockerfile
+    container_name: nso_notifier
+    profiles: ["blossom", "full"]
+    # Shares the nvpn sidecar namespace so it can call the proxy's internal
+    # purge endpoint on localhost:$BLOSSOM_PORT. db-api is still reached at
+    # db:$DB_API_PORT via the sidecar's bridge attachment.
+    network_mode: "service:nvpn"
+    env_file:
+      - ./.env
+    environment:
+      DB_API_URL: http://db:${DB_API_PORT:-4000}
+      LIFECYCLE_CONFIG_PATH: /app/config/lifecycle.yml
+      BLOSSOM_INTERNAL_URL: http://localhost:${BLOSSOM_PORT:-3001}
+    volumes:
+      - ./config/lifecycle.yml:/app/config/lifecycle.yml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      blossom:
+        condition: service_started
     restart: unless-stopped
 
   # Mesh-PG data plane: pgwire server for structured storage. Writes land in
@@ -195,6 +244,7 @@ services:
     build:
       context: ./pg-gateway
     container_name: nso_pg_gateway
+    profiles: ["pg", "full"]
     # Must share the nvpn sidecar's netns: only that namespace can route
     # 10.44.x.y tunnel addresses to providers' pg-agents.
     network_mode: "service:nvpn"
@@ -212,9 +262,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orchestrator}
       POSTGRES_DB: ${POSTGRES_DB:-orchestrator}
-      # Required: the gateway refuses to start without a password (fail
-      # closed against open cleartext auth).
-      PG_GATEWAY_PASSWORD: ${PG_GATEWAY_PASSWORD:?PG_GATEWAY_PASSWORD is required}
+      # Required with --profile pg, but no interpolation guard here: a host
+      # running only the storage stack does not need this var, and the gateway
+      # itself refuses to start when it is empty (fail closed against open
+      # cleartext auth).
+      PG_GATEWAY_PASSWORD: ${PG_GATEWAY_PASSWORD:-}
       # Bearer token for providers' /pg/* endpoints (must match providers'
       # PG_AGENT_TOKEN). Optional but strongly recommended.
       PG_PROVIDER_TOKEN: ${PG_PROVIDER_TOKEN:-}

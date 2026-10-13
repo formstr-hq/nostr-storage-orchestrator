@@ -104,7 +104,7 @@ directory). Environment variables can be substituted anywhere in the file using
 | `storage.removeWhenNoOwners` | `false`          | Delete blobs with no owners on each prune cycle, regardless of expiry rules                                            |
 | `upload.enabled`             | `true`           | Enable `PUT /upload`                                                                                                   |
 | `upload.requireAuth`         | `true`           | Require Nostr auth for uploads                                                                                         |
-| `upload.maxSize`             | `2147483648`     | Maximum upload size in bytes (2 GB)                                                                                    |
+| `upload.maxSize`             | `8589934592`     | Maximum upload size in bytes (8 GB)                                                                                    |
 | `upload.workers`             | `0`              | Upload worker threads (0 = one per CPU core)                                                                           |
 | `upload.requirePubkeyInRule` | `false`          | Reject uploads unless the uploader's pubkey appears in a storage rule                                                  |
 | `mirror.enabled`             | `true`           | Enable `PUT /mirror` (BUD-04)                                                                                          |

@@ -127,9 +127,9 @@ Deno.test({
 Deno.test({
   name: "X-Reason: PUT /upload oversized returns X-Reason header",
   async fn() {
-    // Default upload maxSize is 2 GB (2,147,483,648 bytes).
-    // Use a value larger than 2 GB to trigger 413.
-    const oversizedBytes = String(3 * 1024 * 1024 * 1024); // 3 GB
+    // Default upload maxSize is 8 GB (8,589,934,592 bytes).
+    // Use a value larger than 8 GB to trigger 413.
+    const oversizedBytes = String(9 * 1024 * 1024 * 1024); // 9 GB
     const body = new Uint8Array(10);
     const res = await app.fetch(
       new Request("http://localhost/upload", {

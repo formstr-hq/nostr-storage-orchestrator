@@ -93,8 +93,17 @@ export function mimeToSqlLike(ruleType: string): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Upload-gate result for a node with no rules configured: accept any MIME type
+ * with no expiry (see config.example.yml). Only truthiness is consumed at the
+ * gate call sites, and pruneStorage iterates the rule list directly, so this
+ * sentinel never drives retention.
+ */
+export const ALLOW_ALL = Symbol("allow-all");
+
+/**
  * Find the first storage rule that matches the given MIME type and pubkey.
- * Returns null if no rule matches — callers should reject the upload.
+ * Returns null if no rule matches — callers should reject the upload. Returns
+ * ALLOW_ALL when no rules are configured (accept-anything mode).
  *
  * Rule evaluation order matches config array order (first-match wins).
  *
@@ -108,8 +117,15 @@ export function getFileRule(
   opts: { mimeType: string | null; pubkey?: string },
   rules: StorageRule[],
   requirePubkeyInRule = false,
-): StorageRule | null {
+): StorageRule | typeof ALLOW_ALL | null {
   const { mimeType, pubkey } = opts;
+
+  // An empty list is the documented "accept any MIME type, no expiry" mode.
+  // With requirePubkeyInRule the operator asked for an invite-only server, so
+  // an empty allowlist still denies rather than silently opening the door.
+  if (rules.length === 0) {
+    return requirePubkeyInRule ? null : ALLOW_ALL;
+  }
 
   for (const rule of rules) {
     // Pubkey scoping: if the rule restricts to specific pubkeys, the uploader
