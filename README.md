@@ -680,6 +680,18 @@ Migrations: both repos ship additive migrations in their own commits
 `20261002130100_invoices_terms_version.ts`). Run `prisma migrate deploy` /
 `knex migrate:latest` before starting the new images.
 
+### Console deployment
+
+`proxy/blossom` serves the console SPA itself (built into its image and served
+same-origin with the BUD API), so the reverse proxy only has to point the
+blossom hostname at `BLOSSOM_PORT` — e.g. `blossom.stg.formstr.app` →
+`http://127.0.0.1:6284`. The SPA's backend origin is baked in at image build
+time from `FORMSTR_BACKEND_URL` (the same value the proxy uses for
+admin-check/storage-notify, so it must be browser-reachable); rebuild with
+`docker compose up -d --build blossom` after changing it. Console→Blossom
+calls are same-origin and need no configuration (`VITE_BLOSSOM_URL` stays
+empty).
+
 ## Pinned images
 
 Every external image is pinned by digest — base images in each `Dockerfile`, plus `postgres` and

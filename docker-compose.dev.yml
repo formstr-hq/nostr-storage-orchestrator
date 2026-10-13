@@ -74,6 +74,11 @@ services:
     build:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
+      args:
+        # formstr-backend origin baked into the console SPA at build time:
+        # the same browser-reachable FORMSTR_BACKEND_URL the proxy uses for
+        # admin-check/storage-notify. Changing it needs a blossom rebuild.
+        VITE_BACKEND_URL: "${FORMSTR_BACKEND_URL:-http://localhost:5000}"
     container_name: nso_blossom
     # Host networking (Linux-only) instead of the bridge network: provider
     # backends live as standalone storage-client stacks and are reached over

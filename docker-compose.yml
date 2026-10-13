@@ -159,6 +159,11 @@ services:
     build:
       context: .
       dockerfile: ./proxy/blossom/Dockerfile
+      args:
+        # formstr-backend origin baked into the console SPA at build time:
+        # the same browser-reachable FORMSTR_BACKEND_URL the proxy uses for
+        # admin-check/storage-notify. Changing it needs a blossom rebuild.
+        VITE_BACKEND_URL: "${FORMSTR_BACKEND_URL:-http://localhost:5000}"
     container_name: nso_blossom
     # Shares the nvpn sidecar's network namespace instead of the bridge
     # network: BLOSSOM_SERVERS can point at a storage-client's mesh tunnel IP

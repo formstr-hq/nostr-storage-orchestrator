@@ -6,6 +6,12 @@
 FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS console
 WORKDIR /console
 RUN npm install -g pnpm@10.15.1
+# formstr-backend origin baked into the SPA (api.ts BACKEND_URL) — must be a
+# browser-reachable URL. Build-time only: changing it requires a rebuild.
+# Same-origin Blossom calls need no var (VITE_BLOSSOM_URL stays empty).
+# Compose passes the root .env's FORMSTR_BACKEND_URL here; the default keeps
+# local dev pointed at a host-run backend.
+ARG VITE_BACKEND_URL=http://localhost:5000
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/console/package.json ./packages/console/
 RUN pnpm install --frozen-lockfile --filter @orchestrator/console
