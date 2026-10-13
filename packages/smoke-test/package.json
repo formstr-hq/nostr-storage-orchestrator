@@ -6,7 +6,8 @@
   "packageManager": "pnpm@10.15.1",
   "scripts": {
     "smoke": "tsx src/index.ts",
-    "control-plane": "tsx src/control-plane.ts"
+    "control-plane": "tsx src/control-plane.ts",
+    "publish-event": "tsx src/publish-event.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
