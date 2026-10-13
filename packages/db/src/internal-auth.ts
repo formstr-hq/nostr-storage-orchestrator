@@ -16,35 +16,41 @@ function headerValue(value: string | string[] | undefined): string | undefined {
  *
  * Replay protection defaults to a process-local cache; scaling db-api
  * horizontally requires a shared store (see packages/nip98).
+ *
+ * The returned middleware must keep exactly three parameters: Express treats
+ * any handler with four as an error handler and silently skips it on normal
+ * requests, which would leave the route unauthenticated. The replay cache is
+ * therefore injected through this factory, not a fourth argument.
  */
-export function requireServiceAccount(
-  req: Request,
-  res: Response,
-  next: NextFunction,
+export function createServiceAccountGate(
   replay?: ReplayCache,
-): void {
-  void (async () => {
-    let signer: { pubkey: string; npub: string };
-    try {
-      signer = verifyNip98(req, replay ? { replay } : {});
-    } catch (error) {
-      if (error instanceof Nip98Error) {
-        res.setHeader("X-Reason", error.message);
-        res.status(error.status).json({ error: "unauthorized" });
+): (req: Request, res: Response, next: NextFunction) => void {
+  return (req, res, next) => {
+    void (async () => {
+      let signer: { pubkey: string; npub: string };
+      try {
+        signer = verifyNip98(req, replay ? { replay } : {});
+      } catch (error) {
+        if (error instanceof Nip98Error) {
+          res.setHeader("X-Reason", error.message);
+          res.status(error.status).json({ error: "unauthorized" });
+          return;
+        }
+        throw error;
+      }
+
+      const account = await prisma.serviceAccount.findUnique({ where: { npub: signer.npub } });
+      if (!account?.enabled) {
+        res.status(403).json({ error: "forbidden_service_account" });
         return;
       }
-      throw error;
-    }
 
-    const account = await prisma.serviceAccount.findUnique({ where: { npub: signer.npub } });
-    if (!account?.enabled) {
-      res.status(403).json({ error: "forbidden_service_account" });
-      return;
-    }
-
-    (req as Request & { serviceNpub?: string }).serviceNpub = signer.npub;
-    next();
-  })().catch(next);
+      (req as Request & { serviceNpub?: string }).serviceNpub = signer.npub;
+      next();
+    })().catch(next);
+  };
 }
+
+export const requireServiceAccount = createServiceAccountGate();
 
 export { headerValue };

@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import type { NextFunction } from "express";
 import express, { type Express, type Request, type Response } from "express";
-import { DbClient, DbApiError, type UserInfo } from "@orchestrator/db-client";
+import {
+  DbClient,
+  DbApiError,
+  type EntitlementRequest,
+  type UserInfo,
+} from "@orchestrator/db-client";
 import { loadLifecycleConfig, type LifecycleConfig } from "@orchestrator/lifecycle";
 import { AuthError, verifyAuthToken } from "./nostr.js";
 import { Nip98Error, verifyNip98 } from "@orchestrator/nip98";
@@ -39,8 +44,11 @@ const adminIdentity = createAdminIdentity({
   serviceNsec: process.env.STORAGE_SERVICE_NSEC,
 });
 
-// Internal purge is gated by NIP-98 + an enabled service_account row in
-// db-api, not a shared token (same model as the backend's internal APIs).
+// Internal service endpoints are gated by NIP-98 + an enabled service_account
+// row in db-api, not a shared token (same model as the backend's internal
+// APIs). They exist so service callers (formstr-backend, the notifier) never
+// talk to db-api directly: db-api is only reachable on the orchestrator's
+// internal network.
 const requireInternalRole = createInternalRoleGate({ db });
 
 // Operator per-file hard cap, not a plan feature (the plan sells total
@@ -232,8 +240,8 @@ async function loadAccessForDenialCheck(
 }
 
 // Internal: how much room the storage providers have left. NIP-98 + an enabled
-// service_account row, like /internal/purge. The public signal for the UI is
-// formstr-backend's GET /api/storage/availability, not this.
+// service_account row, like the rest of /internal. The UI signal is
+// formstr-backend's GET /api/storage/availability, which proxies this call.
 app.get("/capacity", requireInternalRole, async (_req, res) => {
   try {
     res.json(await db.getCapacity());
@@ -242,6 +250,41 @@ app.get("/capacity", requireInternalRole, async (_req, res) => {
     res.status(502).json({ error: "capacity_unavailable" });
   }
 });
+
+// Current entitlement for a user, for service callers (purchase flow,
+// subscription reads). 404 when the user has never purchased.
+app.get("/internal/users/:npub", requireInternalRole, async (req, res) => {
+  try {
+    const npub = String(req.params["npub"]);
+    const user = await db.getUser(npub);
+    if (!user) return res.status(404).json({ error: "not_found" });
+    res.json(user);
+  } catch (error) {
+    console.error("entitlement lookup failed", error);
+    res.status(502).json({ error: "db_api_unreachable" });
+  }
+});
+
+// Entitlement write from formstr-backend (paid purchase) or an operator
+// service. The body is forwarded unchanged: db-api validates it, and its
+// entitlement transaction is the idempotency guard for a payment hash.
+app.post(
+  "/internal/users/:npub/entitlement",
+  express.json(),
+  requireInternalRole,
+  async (req, res) => {
+    const npub = String(req.params["npub"]);
+    try {
+      const user = await db.assignEntitlement(npub, req.body as EntitlementRequest);
+      accessCache.invalidate(npub);
+      res.json(user);
+    } catch (error) {
+      if (error instanceof DbApiError) return res.status(error.status).json(error.body);
+      console.error(error);
+      res.status(502).json({ error: "db api failed" });
+    }
+  },
+);
 
 // Non-Blossom endpoint: exposes this account's entitlement/usage. Gated by
 // BUD-11 so it shares one auth code path with the rest of the protocol.

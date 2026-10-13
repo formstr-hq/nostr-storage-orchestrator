@@ -80,7 +80,8 @@ const StorageSchema = z.object({
     ])
     .describe(
       "Ordered list of retention rules. Rules are evaluated in order; the first matching rule governs a blob's expiry. " +
-        "Rules also act as an upload allowlist: blobs whose MIME type matches no rule are rejected with 415.",
+        "Rules also act as an upload allowlist: blobs whose MIME type matches no rule are rejected with 415. " +
+        "An empty list accepts any MIME type with no expiry (but still denies when upload.requirePubkeyInRule is set).",
     ),
   removeWhenNoOwners: z
     .boolean()

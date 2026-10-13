@@ -61,6 +61,11 @@ export class ServerRegistry {
 
 const registryDb = new DbClient({
   baseUrl: process.env.DB_API_URL ?? `http://localhost:${process.env.DB_API_PORT}`,
+  // Signed for consistency with the rest of the proxy's db-api calls.
+  // /storages/active is currently ungated (internal network only), so db-api
+  // ignores this header — keeping it signed means gating the route later
+  // cannot silently break the roster poll.
+  ...(process.env.SERVICE_NSEC ? { serviceNsec: process.env.SERVICE_NSEC } : {}),
 });
 export const serverRegistry = new ServerRegistry(registryDb);
 if (process.env.NODE_ENV !== "test") {

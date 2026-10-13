@@ -1,5 +1,6 @@
 import express from "express";
 import { prisma } from "./prisma.js";
+import { requireServiceAccount } from "./internal-auth.js";
 import { blobToJson } from "./serialize.js";
 import { membersRouter } from "./routes/members.js";
 import { storagesRouter } from "./routes/storages.js";
@@ -35,7 +36,7 @@ app.use("/service-accounts", serviceAccountsRouter);
 app.use("/", adminRouter);
 
 // Must be registered before /blobs/:hash or "total" is captured as a hash.
-app.get("/blobs/total", async (_req, res) => {
+app.get("/blobs/total", requireServiceAccount, async (_req, res) => {
   const total = await prisma.blob.aggregate({ _sum: { size: true } });
   res.json({ totalSize: (total._sum.size ?? 0n).toString() });
 });
@@ -43,9 +44,9 @@ app.get("/blobs/total", async (_req, res) => {
 // All owner rows for a hash. The first row stands for the blob itself (size,
 // replicas and createdAt are identical across owners); `owners` lists who is
 // billed for it. 404 when nobody owns it.
-app.get("/blobs/:hash", async (req, res) => {
+app.get("/blobs/:hash", requireServiceAccount, async (req, res) => {
   const rows = await prisma.blob.findMany({
-    where: { hash: req.params.hash! },
+    where: { hash: String(req.params.hash) },
     orderBy: { createdAt: "asc" },
   });
   const first = rows[0];
@@ -62,7 +63,7 @@ class AlreadyExistsError extends Error {}
 // locked for the whole transaction, so two uploads racing for the same user are
 // checked one after the other against the real running total instead of both
 // passing against the same stale number.
-app.post("/blobs", async (req, res) => {
+app.post("/blobs", requireServiceAccount, async (req, res) => {
   const { hash, npub, size, replicas } = req.body as {
     hash: string;
     npub: string;
@@ -122,8 +123,8 @@ app.post("/blobs", async (req, res) => {
 // `?npub=` removes one owner's row; `?all=true` (moderation) removes every
 // owner. `remainingOwners` tells the caller whether the bytes on the storage
 // nodes are still needed.
-app.delete("/blobs/:hash", async (req, res) => {
-  const hash = req.params.hash!;
+app.delete("/blobs/:hash", requireServiceAccount, async (req, res) => {
+  const hash = String(req.params.hash);
   const npub = typeof req.query["npub"] === "string" ? req.query["npub"] : undefined;
   const all = req.query["all"] === "true";
   if (!npub && !all) {

@@ -101,13 +101,22 @@ fi
 
 log "step 3/6: creating a smoke service identity"
 # Internal db-api calls are NIP-98 signed; this identity is registered as a
-# service account after db-api is up.
+# service account after db-api is up. The proxy's own db-api calls are
+# service-gated too, so the same throwaway key becomes the proxy's
+# SERVICE_NSEC: persist it into .env (read via env_file) before bringing the
+# stack up. An existing uncommented SERVICE_NSEC is replaced.
 SERVICE_IDENTITY="$(pnpm --silent --filter @orchestrator/smoke-test run control-plane identity 2>/dev/null)"
 SERVICE_NSEC="$(printf '%s' "${SERVICE_IDENTITY}" | grep -o 'nsec1[a-z0-9]*' | head -n1 || true)"
 SERVICE_NPUB="$(printf '%s' "${SERVICE_IDENTITY}" | grep -o 'npub1[a-z0-9]*' | head -n1 || true)"
 unset SERVICE_IDENTITY
 [ -n "${SERVICE_NSEC}" ] && [ -n "${SERVICE_NPUB}" ] || { log "could not generate a service identity"; exit 1; }
 export SERVICE_NSEC
+if grep -qE '^SERVICE_NSEC=' .env; then
+  sed -i.bak -E "s|^SERVICE_NSEC=.*$|SERVICE_NSEC=${SERVICE_NSEC}|" .env && rm -f .env.bak
+else
+  printf '\nSERVICE_NSEC=%s\n' "${SERVICE_NSEC}" >> .env
+fi
+log "wrote the throwaway SERVICE_NSEC into .env for the proxy/notifier"
 
 log "step 4/6: building and starting the root docker-compose stack"
 root_compose up --build -d
@@ -151,8 +160,6 @@ done
 
 log "step 6/6: running protocol-level checks (packages/smoke-test)"
 pnpm install >/dev/null
-# The smoke suite provisions entitlements through db-api with its NIP-98
-# service identity (SERVICE_NSEC, generated above).
-DB_API_PORT_VALUE="$(grep -m1 '^DB_API_PORT=' .env | cut -d= -f2 || true)"
-export DB_API_URL="${DB_API_URL:-http://localhost:${DB_API_PORT_VALUE:-4000}}"
+# The smoke suite provisions entitlements through the proxy's internal API
+# with its NIP-98 service identity (SERVICE_NSEC, generated above).
 pnpm --filter @orchestrator/smoke-test run smoke

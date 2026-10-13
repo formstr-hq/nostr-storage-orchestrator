@@ -45,7 +45,7 @@ Turn `proxy/blossom` into a self-serve, paid storage service:
 | 3 | Orchestrator state | Only the entitlement: `plan`, `planExpiresAt`, `storageBytes`, `status` |
 | 3a | Duration semantics | Days are **additive**; upgrades apply immediately (plan + allowance swap, days added); downgrades apply only after the current plan expires, then over-quota users enter grace |
 | 4 | Payment records | Stay entirely in `formstr-backend` (invoices, amounts, hashes); console fetches them from there |
-| 5 | Plan assignment | `formstr-backend` → `db-api` over a **shared docker network**, service token |
+| 5 | Plan assignment | `formstr-backend` → `proxy/blossom` `/internal/users/:npub/entitlement` (NIP-98 service account) → `db-api`; no shared network with db-api |
 | 6 | Expiry behaviour | `ACTIVE` → `GRACE` → `WRITE_BLOCKED` → `READ_BLOCKED` → `CLOSED`/purged; timings from a config file |
 | 7 | Console | New React + Vite SPA in this repo, served at the blossom hostname |
 | 8 | Notifications | NIP-17 DM + email, both best-effort, no per-user channel preferences |
@@ -63,11 +63,12 @@ Turn `proxy/blossom` into a self-serve, paid storage service:
                  proxy/blossom  ◄── account + admin ─┘          formstr-backend
                  ├ BUD-01/02/06/12 + /account/*                  ├ plan catalog (config file)
                  ├ /admin/* (NIP-98 + unified admin)             ├ /api/generate-invoice/storage
-                 └ /internal/purge/:npub (service token)         ├ /api/invoices (billing)
-                         │            ▲                           ├ /api/auth/me (role)
-                         ▼            │ db-api                    └ /api/storage/notify (service)
-                 storage nodes        │
-                          ┌───────────┴──────────┐
+                 └ /capacity + /internal/* (NIP-98 service)      ├ /api/invoices (billing)
+                         │            ▲  entitlement r/w         ├ /api/auth/me (role)
+                         │            └─── NIP-98 service ───────┤ /api/storage/notify (service)
+                         ▼                (no direct db-api)     │
+                 storage nodes        │                          ▼
+                          ┌───────────┴──────────┐          money/plans stay here
                           │ packages/db (db-api) │  Postgres: User(entitlement), Blob,
                           └───────────┬──────────┘  NotificationLog, ModerationAction
                                       ▲
@@ -328,18 +329,19 @@ Notes:
 
 ## `db-api` changes (`packages/db`, `packages/db-client`)
 
-`db-api` stays logic-free CRUD. Service-token auth (`DB_API_SERVICE_TOKEN`)
-applies to the new admin/mutation endpoints; the existing internal endpoints
-keep their current behaviour. Reachability from `formstr-backend` is via the
-**shared docker network** (point 5).
+`db-api` stays logic-free CRUD. Every route `proxy/blossom` calls is gated by
+NIP-98 + an enabled service account (the roster/membership routes remain
+reachable only on the internal network for the control plane and pg-gateway).
+External callers (`formstr-backend`) reach it only through `proxy/blossom`'s
+internal API (point 5); db-api is never attached to the backend's network.
 
 | Method | Path | Auth | Purpose |
 | ------ | ---- | ---- | ------- |
 | POST | `/users/:npub/entitlement` | service | atomic assign/extend/upgrade (plan, durationDays, storageBytes, source, mode?) |
 | GET | `/users` | service | paginated list with filters (`status`, `plan`, `query`) |
-| GET | `/users/:npub` | none | extended serialization (plan, expiry, storageBytes, status, usedStorage) |
+| GET | `/users/:npub` | service | extended serialization (plan, expiry, storageBytes, status, usedStorage) |
 | PATCH | `/users/:npub/status` | service | notifier/admin status mirror |
-| GET | `/users/:npub/blobs` | none | paginated own blobs (hash, size, createdAt, replicas) |
+| GET | `/users/:npub/blobs` | service | paginated own blobs (hash, size, createdAt, replicas) |
 | GET | `/users/attention` | service | users due for lifecycle/notification evaluation |
 | GET | `/blobs` | service | admin global blob search/filter/pagination |
 | DELETE | `/users/:npub/blobs` | service | transactional bulk delete (purge) |
@@ -404,12 +406,14 @@ gains typed methods; `serialize.ts` covers the new fields.
    pending row; `paymentManager.listenForPayment(hash)`; respond with
    invoice/hash/amount. Route `POST /api/generate-invoice/storage`.
 3. `handlers/zapReceiptHandler.ts`: allow `product === "storage"`; on paid,
-   `POST {DB_API_URL}/users/:npub/entitlement` with the service token, the
+   `POST {BLOSSOM_URL}/internal/users/:npub/entitlement` with the NIP-98
+   service identity, the
    catalog's `durationDays`/`storageBytes`, and the derived `mode`; write the
    invoice via the existing ledger; send purchase email; trigger the DM (via
    notifier); publish the existing `paid` WS message. Idempotent by pending
    row + invoice ledger; the effective `mode` is re-derived at grant time from
-   db-api state, since time may have passed between invoice and payment.
+   db-api state (via the proxy), since time may have passed between invoice and
+   payment.
 4. `services/paymentCheck.ts` + `scripts/reconcilePendingStoragePlans.ts`
    follow the mail reconciler so a missed live receipt still grants.
 5. T&C acceptance is carried through the purchase (`termsAccepted` +
@@ -423,8 +427,8 @@ gains typed methods; `serialize.ts` covers the new fields.
 7. Internal admin check for the orchestrator: `GET
    /api/internal/admin-check/:pubkey` (service token) → `{admin: boolean}`
    from `users.role`. The console uses `GET /api/auth/me` (existing).
-8. Compose: join the orchestrator **shared network** so `db-api` is reachable
-   as `db:<DB_API_PORT>` with no host gateway.
+8. Compose: point `BLOSSOM_URL` at the proxy's published endpoint; db-api
+   publishes no host port and is not attached to the backend's network.
 
 ### Backend migrations (Knex)
 

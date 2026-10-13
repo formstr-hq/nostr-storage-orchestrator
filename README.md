@@ -5,9 +5,9 @@ A pnpm workspace for a Nostr-aware storage orchestrator. It combines a blob prox
 ## Architecture
 
 ```
-Client
-  │  Authorization: Nostr <base64-signed-event>
-  ▼
+Clients / UIs          formstr-backend
+  │  BUD-11 (Nostr)      │  NIP-98 service identity
+  ▼                      ▼
 proxy/blossom  ──► db-api (HTTP, internal-only) ──► PostgreSQL
   │
   └──► active blossom backends (DB roster, refreshed every 15s)
@@ -23,7 +23,7 @@ Storage Control (Android/Linux)
 control-plane-backend ──► db-api + NVPN CLI/shared sidecar state
 ```
 
-`db-api` is a thin data layer: it performs CRUD reads/writes and keeps two-table writes atomic (e.g. creating a blob and bumping a user's `usedStorage` in one transaction), but it holds **no business logic**. Quota enforcement, duplicate-handling, and ownership checks all live in the proxies, exactly as before — only the Prisma calls moved behind HTTP. `db-api` is never exposed publicly (compose-internal network only) and has no auth layer.
+`db-api` is a thin data layer: it performs CRUD reads/writes and keeps two-table writes atomic (e.g. creating a blob and bumping a user's `usedStorage` in one transaction), but it holds **no business logic**. Quota enforcement, duplicate-handling, and ownership checks all live in the proxies, exactly as before — only the Prisma calls moved behind HTTP. `db-api` is never exposed publicly (compose-internal network only). The account/admin/blob routes `proxy/blossom` uses are gated by **NIP-98 + an enabled service account**; the roster polls (`/storages/active*`) stay unsigned but are reachable only on the internal network. External callers (`formstr-backend`, UIs) never talk to it directly; they call `proxy/blossom`, which proxies the call.
 
 ## Components
 
@@ -31,7 +31,7 @@ control-plane-backend ──► db-api + NVPN CLI/shared sidecar state
 
 - Prisma schema, migrations, and generated client — the only service that touches Postgres directly
 - Express HTTP server exposing CRUD for `User`, `Blob`, `Member`, and `Storage`, plus `GET /plans`
-- No quota checks, no auth — see [`proxy/blossom` API](#proxyblossom-api) for where those decisions actually happen
+- No quota checks or business logic. The account/admin/blob routes the proxy calls require NIP-98 + an enabled service account; the roster routes stay internal-network only — see [`proxy/blossom` API](#proxyblossom-api) for where those decisions actually happen
 
 ### `packages/db-client` (`@orchestrator/db-client`)
 
@@ -42,14 +42,14 @@ control-plane-backend ──► db-api + NVPN CLI/shared sidecar state
 
 TypeScript/Express service that:
 
-- validates Nostr auth events from `Authorization: Nostr ...` (BUD-11) and NIP-98 for admin routes
+- validates Nostr auth events from `Authorization: Nostr ...` (BUD-11), NIP-98 for admin routes (`/admin/*`), and NIP-98 + service account for internal service routes (`/capacity`, `/internal/*`)
 - resolves `npub` from the signed event
 - derives the account lifecycle (UNPAID → ACTIVE → GRACE → WRITE_BLOCKED → READ_BLOCKED → CLOSED) from entitlement dates at request time; nothing is stored as a status mirror
 - enforces the plan's total storage allowance and duration only (no free tier, no per-file plan limits); a global operator `MAX_UPLOAD_BYTES` caps a single request
 - stores each blob on `BLOSSOM_REPLICAS` providers (default 2), each chosen deterministically by `fnv1a(npub:timeSlot) % n` over the npub-sorted active roster, rotating the slot (hourly); see [Replication and read path](#replication-and-read-path)
 - on upload failure, drops the failed provider and recomputes the selection over the rest; one copy is enough to succeed
-- stores blob metadata and user storage usage via `db-api`
-- serves the account (`/account/*`), admin/moderation (`/admin/*`), internal purge, and the console SPA
+- stores blob metadata and user storage usage via `db-api`, and proxies service calls (`formstr-backend` entitlement push/read, capacity, purge) to it
+- serves the account (`/account/*`), admin/moderation (`/admin/*`), the internal service API, and the console SPA
 - supports download and delete operations for authenticated owners; reads are gated per owner access state
 
 ### `pg-gateway` (mesh-PG data plane)
@@ -155,13 +155,14 @@ All Prisma-owned tables/columns are lowercase snake_case in Postgres (`@@map`/`@
 
 ## `db-api` endpoints
 
-Internal-only. The entitlement/admin/mutation endpoints are gated by **NIP-98
-plus service account**, not a shared token: the caller signs the request with a
-service nsec, and the signer's npub must have an enabled row in the
-`service_account` table. There is no admin role here — admin-ness is owned by
-formstr-backend and checked by the proxy. Service accounts are registered out
-of band (the GET lookup used by the gate is unauthenticated and exposes only
-npub + enabled):
+Internal-only: no host port in the production stack, and no other compose
+project is attached to its network. Every route `proxy/blossom` calls (and the
+entitlement/admin/mutation routes before it) is gated by **NIP-98 plus service
+account**, not a shared token: the caller signs the request with a service
+nsec, and the signer's npub must have an enabled row in the `service_account`
+table. There is no admin role here — admin-ness is owned by formstr-backend
+and checked by the proxy. Service accounts are registered out of band (the GET
+lookup used by the gate is unauthenticated and exposes only npub + enabled):
 
 ```bash
 npm run register:service -- <npub>   # create/enable
@@ -169,20 +170,23 @@ npm run register:service -- <npub> --label backend
 npm run register:service -- <npub> --disable   # revoke without deleting
 ```
 
-Pre-existing internal endpoints keep their original unauthenticated behaviour
-for the control plane. `size`/`usedStorage` are decimal strings. `db-api` only
-ever returns data-integrity errors (`404` missing row, `409` duplicate id /
-quota from the blob transaction) — lifecycle decisions belong to the proxy;
-the entitlement write is the one atomic quota guard on the write path.
+The roster/membership routes (`/members`, `/storages`, `/storages/active*`)
+are not service-gated: they are consumed by internal services
+(`control-plane-backend`, `pg-gateway`, `proxy/blossom`'s registry poll) and
+are reachable only on the internal compose network. `size`/`usedStorage` are
+decimal strings. `db-api` only ever returns data-integrity errors (`404`
+missing row, `409` duplicate id / quota from the blob transaction) — lifecycle
+decisions belong to the proxy; the entitlement write is the one atomic quota
+guard on the write path.
 
 | Method    | Path                              | Notes                                                             |
 | --------- | --------------------------------- | ----------------------------------------------------------------- |
 | GET       | `/health`                         | compose healthcheck                                               |
-| GET       | `/users/:npub`                    | read (extended entitlement serialization)                         |
+| GET       | `/users/:npub`                    | service: entitlement read (proxy internal API)                    |
 | GET       | `/users`                          | service: paginated list, filter `query`                           |
 | GET       | `/users/attention`                | service: users due for lifecycle/notification evaluation          |
 | POST      | `/users/:npub/entitlement`        | service: atomic assign/extend/upgrade (+ admin expiry override); creates the row |
-| GET       | `/users/:npub/blobs`              | paginated own blobs                                               |
+| GET       | `/users/:npub/blobs`              | service: paginated own blobs (proxy internal API)                 |
 | DELETE    | `/users/:npub/blobs`              | service: transactional bulk delete (purge)                        |
 | GET / POST | `/notifications`                 | service: list / log (409 on duplicate dedupe key)                 |
 | GET / POST | `/moderation`                    | service: moderation audit list / record                           |
@@ -190,14 +194,14 @@ the entitlement write is the one atomic quota guard on the write path.
 | GET       | `/service-accounts`               | service: paginated service-account list                           |
 | GET       | `/blobs`                          | service: global blob search/filter/pagination                     |
 | GET       | `/storage-stats`                  | service: users/blobs/bytes (no money)                             |
-| GET       | `/blobs/total`                    | summed blob size across all users                                 |
-| GET       | `/blobs/:hash`                    | read                                                              |
-| POST      | `/blobs`                          | atomically creates the blob row and increments `usedStorage`      |
-| DELETE    | `/blobs/:hash`                    | atomically deletes and decrements `usedStorage`                   |
-| GET / PUT / DELETE | `/members`, `/members/:npub` | mesh roster CRUD and soft revocation                         |
-| GET / POST / PATCH / DELETE | `/storages`, `/storages/:npub` | storage provider roster CRUD and liveness inputs     |
-| GET       | `/storages/active`                | fresh linked blossom backends polled by `proxy/blossom`          |
-| GET       | `/storages/active-pg`             | fresh linked mesh-PG providers polled by `pg-gateway`            |
+| GET       | `/blobs/total`                    | service: summed blob size across all users                        |
+| GET       | `/blobs/:hash`                    | service: owner rows for a hash (proxy internal API)               |
+| POST      | `/blobs`                          | service: atomically creates the blob row and increments `usedStorage` |
+| DELETE    | `/blobs/:hash`                    | service: atomically deletes and decrements `usedStorage`          |
+| GET / PUT / DELETE | `/members`, `/members/:npub` | internal network only: mesh roster CRUD and soft revocation  |
+| GET / POST / PATCH / DELETE | `/storages`, `/storages/:npub` | internal network only: storage provider roster CRUD and liveness inputs |
+| GET       | `/storages/active`                | internal network only: fresh linked blossom backends polled by `proxy/blossom` |
+| GET       | `/storages/active-pg`             | internal network only: fresh linked mesh-PG providers polled by `pg-gateway` |
 
 ## Prerequisites
 
@@ -297,6 +301,8 @@ DB_API_PORT=4000
 BLOSSOM_PORT=3001
 # Service identities for internal calls. Each is a nostr secret key; the
 # matching npub is registered as a service account (see the db-api section).
+# SERVICE_NSEC is required: proxy/blossom and the notifier sign every db-api
+# call with it, and db-api gates those routes on the service_account row.
 SERVICE_NSEC=nsec1...
 STORAGE_SERVICE_NSEC=nsec1...
 ```
@@ -610,7 +616,7 @@ protocols end to end via `packages/smoke-test`:
 ./scripts/docker-smoke-test.sh
 ```
 
-It creates a missing `.env` from `.env.example`, waits for `postgres`/`db`/`blossom` to become reachable, generates a throwaway service key and registers it as a service account, then checks blossom auth rejection, unpaid-upload rejection, NIP-98 entitlement provisioning through `db-api`, quota enforcement, read gating, and upload/download/delete round-trips. By default it tears the root dev stack down afterward (`storage-client`'s blossom backend is left running for reuse); set `KEEP_UP=1` to leave the root stack up too for manual poking.
+It creates a missing `.env` from `.env.example`, writes the throwaway service key into it as `SERVICE_NSEC` (the proxy's own db-api calls are service-gated too), waits for `postgres`/`db`/`blossom` to become reachable, registers the key as a service account, then checks blossom auth rejection, unpaid-upload rejection, NIP-98 entitlement provisioning through the proxy's internal API, quota enforcement, read gating, and upload/download/delete round-trips. By default it tears the root dev stack down afterward (`storage-client`'s blossom backend is left running for reuse); set `KEEP_UP=1` to leave the root stack up too for manual poking.
 
 ### Mesh end-to-end test
 
@@ -645,26 +651,24 @@ Flow: the console (or any client) calls `POST /api/generate-invoice/storage`
 (NIP-98) with `{plan, termsAccepted, termsVersion}`; the backend derives
 `extend`/`upgrade` from the buyer's current entitlement and rejects a
 downgrade while a plan is live. On the zap receipt it pushes the entitlement to
-`db-api POST /users/:npub/entitlement`, signed with its NIP-98 service
-identity. T&C acceptance and versioning are owned by the backend; this repo no
-longer stores them.
+the proxy's `POST /internal/users/:npub/entitlement`, signed with its NIP-98
+service identity; the proxy forwards it to db-api. T&C acceptance and
+versioning are owned by the backend; this repo no longer stores them.
 
 Wiring (all internal APIs are NIP-98-gated; no shared tokens):
 
-- `formstr-backend` signs db-api calls with `SERVICE_NSEC`; register
-  that npub in this repo: `npm run register:service -- <npub>`.
+- `formstr-backend` calls proxy/blossom at `BLOSSOM_URL` (never db-api
+  directly) and signs with `SERVICE_IDENTITY`; register that npub as a service
+  account in this repo: `npm run register:service -- <npub>`.
 - The orchestrator signs backend calls (admin-check, storage notify) with
   `STORAGE_SERVICE_NSEC`; register that npub in the backend:
   `npm run register:service -- <npub>`.
 - A service key may be reused on both sides, but distinct keys limit blast
   radius on revocation.
-- The backend reaches `db-api` at `DB_API_URL`; when co-located with Docker,
-  use `compose.storage-backend.yml` to join the backend's `formstr` network:
-
-  ```bash
-  docker network create formstr        # once, if formstr-backend's network is absent
-  docker compose -f docker-compose.yml -f compose.storage-backend.yml up -d
-  ```
+- Point `BLOSSOM_URL` at the proxy's published endpoint — the public HTTPS
+  domain in production, or a host-reachable URL locally
+  (`http://host.docker.internal:${BLOSSOM_PORT}`). db-api publishes no host
+  port in the production stack and is not attached to the backend's network.
 
 - `FORMSTR_BACKEND_URL` points the proxy at the backend for admin checks and
   moderation emails; the notifier uses it for expiry/quota mail. Without it,

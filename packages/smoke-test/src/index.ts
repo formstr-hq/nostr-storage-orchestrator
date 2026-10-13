@@ -4,8 +4,8 @@ import { nip19 } from "nostr-tools";
 import { createNip98Signer } from "@orchestrator/nip98";
 
 const BLOSSOM_URL = process.env.BLOSSOM_URL ?? "http://localhost:3001";
-const DB_API_URL = process.env.DB_API_URL ?? `http://localhost:${process.env.DB_API_PORT ?? 4000}`;
-// Internal calls are NIP-98-signed with the smoke test's own service identity.
+// Internal calls are NIP-98-signed with the smoke test's own service identity
+// and go through the proxy's /internal API — db-api itself is internal-only.
 // The harness registers this npub as a service account before running the suite.
 const SERVICE_NSEC = process.env.SERVICE_NSEC ?? "";
 const serviceSigner = SERVICE_NSEC ? createNip98Signer(SERVICE_NSEC) : null;
@@ -70,8 +70,8 @@ async function assignEntitlement(
   body: Record<string, unknown>,
 ): Promise<void> {
   assert(serviceSigner, "SERVICE_NSEC is required for entitlement provisioning");
-  const path = `/users/${encodeURIComponent(npub)}/entitlement`;
-  const url = `${DB_API_URL}${path}`;
+  const path = `/internal/users/${encodeURIComponent(npub)}/entitlement`;
+  const url = `${BLOSSOM_URL}${path}`;
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -290,7 +290,6 @@ async function runBlossomSuite(): Promise<void> {
 async function main(): Promise<void> {
   log(`Running docker smoke tests against:`);
   log(`  BLOSSOM_URL = ${BLOSSOM_URL}`);
-  log(`  DB_API_URL  = ${DB_API_URL}`);
 
   await runBlossomSuite();
 

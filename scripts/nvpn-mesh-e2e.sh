@@ -54,6 +54,23 @@ log "step 1/7: resetting mesh state and bringing up the host (proxy) stack"
 [ -f .env ] || cp .env.example .env
 [ -f storage-client/.env ] || cp storage-client/.env.example storage-client/.env
 
+# Internal db-api calls are NIP-98 service-gated, so the proxy itself needs a
+# registered service identity: generate a throwaway one, persist it into .env
+# (read via env_file), and register it once db-api is up. The same key signs
+# the smoke suite's entitlement provisioning. An existing uncommented
+# SERVICE_NSEC is replaced.
+SERVICE_IDENTITY="$(pnpm --silent --filter @orchestrator/smoke-test run control-plane identity 2>/dev/null)"
+SERVICE_NSEC="$(printf '%s' "${SERVICE_IDENTITY}" | grep -o 'nsec1[a-z0-9]*' | head -n1 || true)"
+SERVICE_NPUB="$(printf '%s' "${SERVICE_IDENTITY}" | grep -o 'npub1[a-z0-9]*' | head -n1 || true)"
+unset SERVICE_IDENTITY
+[ -n "${SERVICE_NSEC}" ] && [ -n "${SERVICE_NPUB}" ] || { log "FAIL: could not generate a service identity"; exit 1; }
+export SERVICE_NSEC
+if grep -qE '^SERVICE_NSEC=' .env; then
+  sed -i.bak -E "s|^SERVICE_NSEC=.*$|SERVICE_NSEC=${SERVICE_NSEC}|" .env && rm -f .env.bak
+else
+  printf '\nSERVICE_NSEC=%s\n' "${SERVICE_NSEC}" >> .env
+fi
+
 client_compose down --remove-orphans >/dev/null 2>&1 || true
 root_compose down --remove-orphans >/dev/null 2>&1 || true
 # Fresh identities on both sides: a reused proxy identity still holds the
@@ -63,6 +80,16 @@ docker volume rm -f storage-client_nvpn_data >/dev/null 2>&1 || true
 
 root_compose up -d --build
 log "host stack up"
+
+log "registering the service identity with db-api"
+for _ in $(seq 1 60); do
+  root_compose exec -T db node packages/db/dist/src/scripts/registerService.js \
+    "${SERVICE_NPUB}" >/dev/null 2>&1 && break
+  sleep 2
+done
+root_compose exec -T db node packages/db/dist/src/scripts/registerService.js \
+  "${SERVICE_NPUB}" >/dev/null
+log "registered ${SERVICE_NPUB} as a service account"
 
 log "step 2/7: generating a mesh invite on the host"
 invite="$(proxy_nvpn create-invite | tr -d '\r' | grep -o 'nvpn://invite/[A-Za-z0-9_=-]*' | head -n1)"
@@ -106,18 +133,10 @@ fi
 log "mesh established; client tunnel IP is ${client_ip}"
 
 log "step 6/7: waiting for the control plane to mark the storage active"
-# The DB is the only provider source: the control plane probes the storage
-# through the mesh and only then is it served from /storages/active, which
-# the proxy polls. Wait for the row rather than injecting a URL.
-for _ in $(seq 1 "${MESH_TIMEOUT}"); do
-  if curl -fsS "http://127.0.0.1:${DB_API_PORT:-4000}/storages/active" 2>/dev/null \
-      | jq -e 'length > 0' >/dev/null 2>&1; then
-    break
-  fi
-  sleep 2
-done
-
-# The proxy binds inside the sidecar's namespace; the sidecar publishes it.
+# db-api is internal-only (no host port in docker-compose.yml), so wait on the
+# proxy instead: /health reports the active roster size it polled from
+# /storages/active. The control plane probes the storage through the mesh and
+# only then does the row become active.
 waited=0
 until (exec 3<>"/dev/tcp/localhost/${BLOSSOM_PORT:-3001}") 2>/dev/null; do
   waited=$((waited + 1))
@@ -125,6 +144,16 @@ until (exec 3<>"/dev/tcp/localhost/${BLOSSOM_PORT:-3001}") 2>/dev/null; do
   sleep 1
 done
 log "proxy listening on :${BLOSSOM_PORT:-3001}"
+
+providers=0
+for _ in $(seq 1 "${MESH_TIMEOUT}"); do
+  providers="$(curl -fsS "http://localhost:${BLOSSOM_PORT:-3001}/health" 2>/dev/null \
+    | jq -r '.providers // 0' 2>/dev/null || echo 0)"
+  [ "${providers:-0}" -gt 0 ] && break
+  sleep 2
+done
+[ "${providers:-0}" -gt 0 ] || { log "FAIL: proxy never picked up the active storage"; root_compose logs blossom; exit 1; }
+log "proxy reports ${providers} active provider(s)"
 
 log "step 7/7: running protocol-level checks across the mesh (packages/smoke-test)"
 pnpm --filter @orchestrator/smoke-test run smoke

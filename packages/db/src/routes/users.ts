@@ -32,10 +32,11 @@ usersRouter.get("/attention", requireServiceAccount, async (req, res) => {
   res.json(paginated(items.map(userToJson), total, pagination));
 });
 
-// Extended user serialization (no auth — same exposure as before; the proxy
-// authenticates the account owner before exposing it to the console).
-usersRouter.get("/:npub", async (req, res) => {
-  const user = await prisma.user.findUnique({ where: { npub: req.params.npub! } });
+// Extended user serialization. Service-gated: only the blossom proxy reads
+// entitlement rows now; it authenticates the account owner (BUD-11) or a
+// service caller before exposing them.
+usersRouter.get("/:npub", requireServiceAccount, async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { npub: String(req.params.npub) } });
   if (!user) {
     return res.status(404).json({ error: "not_found" });
   }
@@ -133,8 +134,8 @@ usersRouter.post("/:npub/entitlement", requireServiceAccount, async (req, res) =
   }
 });
 
-usersRouter.get("/:npub/blobs", async (req, res) => {
-  const npub = req.params.npub!;
+usersRouter.get("/:npub/blobs", requireServiceAccount, async (req, res) => {
+  const npub = String(req.params.npub);
   const pagination = parsePagination(req.query as Record<string, unknown>);
   const [items, total] = await Promise.all([
     prisma.blob.findMany({
@@ -171,8 +172,8 @@ usersRouter.delete("/:npub/blobs", requireServiceAccount, async (req, res) => {
   }
 });
 
-usersRouter.get("/:npub/notifications", async (req, res) => {
-  const npub = req.params.npub!;
+usersRouter.get("/:npub/notifications", requireServiceAccount, async (req, res) => {
+  const npub = String(req.params.npub);
   const pagination = parsePagination(req.query as Record<string, unknown>);
   const [items, total] = await Promise.all([
     prisma.notificationLog.findMany({

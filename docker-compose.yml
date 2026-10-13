@@ -65,11 +65,10 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       STORAGE_ACTIVE_WINDOW_SECS: "${ACTIVE_FRESHNESS_SECS:-960}"
-    # Bound to the host's loopback only (not 0.0.0.0) — reachable from
-    # sibling containers on the bridge network via `db:$DB_API_PORT`, and
-    # from the host via localhost. Never reachable off this machine.
-    ports:
-      - "127.0.0.1:${DB_API_PORT:-4000}:${DB_API_PORT:-4000}"
+    # Internal-only: no host port is published here. Sibling services (proxy,
+    # notifier, pg-gateway, control plane) reach it at db:$DB_API_PORT over the
+    # compose network; external callers (formstr-backend, UIs) go through
+    # proxy/blossom, which proxies to db-api.
     depends_on:
       postgres:
         condition: service_healthy

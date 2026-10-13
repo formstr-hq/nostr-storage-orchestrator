@@ -66,6 +66,10 @@ function fetchStub(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     );
 
   if (url.endsWith(`/users/${encodeURIComponent(npub)}`) && (!init || init.method === undefined || init.method === "GET")) {
+    if (!userRow) return Promise.resolve(new Response("{}", { status: 404 }));
+    return json(userRow);
+  }
+  if (url.endsWith(`/users/${encodeURIComponent(npub)}/entitlement`) && init?.method === "POST") {
     return json(userRow);
   }
   if (url.endsWith(`/users/${encodeURIComponent(npub)}`) && init?.method === "PUT") {
@@ -340,13 +344,21 @@ test("PUT /upload of shared content over quota is refused and touches no node", 
   }
 });
 
-function nip98(path: string, method = "GET") {
+function nip98(path: string, method = "GET", body?: unknown) {
+  const tags: string[][] = [
+    ["u", `${base}${path}`],
+    ["method", method],
+    ["nonce", Math.random().toString(36)],
+  ];
+  if (body !== undefined) {
+    tags.push(["payload", createHash("sha256").update(JSON.stringify(body)).digest("hex")]);
+  }
   const event = finalizeEvent(
     {
       kind: 27235,
       created_at: Math.floor(Date.now() / 1000),
       content: "",
-      tags: [["u", `${base}${path}`], ["method", method], ["nonce", Math.random().toString(36)]],
+      tags,
     },
     sk,
   );
@@ -375,5 +387,93 @@ test("GET /capacity serves an enabled service account", async () => {
   const res = await fetch(`${base}/capacity`, { headers: { authorization: nip98("/capacity") } });
   assert.equal(res.status, 200);
   assert.equal((await res.json()).signupsOpen, true);
+  serviceAccountEnabled = null;
+});
+
+const USER_PATH = `/internal/users/${encodeURIComponent(npub)}`;
+
+test("internal user lookup rejects an anonymous caller", async () => {
+  const res = await fetch(`${base}${USER_PATH}`);
+  assert.equal(res.status, 401);
+});
+
+test("internal user lookup rejects a signer that is not a service account", async () => {
+  serviceAccountEnabled = null;
+  const res = await fetch(`${base}${USER_PATH}`, {
+    headers: { authorization: nip98(USER_PATH) },
+  });
+  assert.equal(res.status, 403);
+});
+
+test("internal user lookup serves an enabled service account", async () => {
+  activeUser();
+  serviceAccountEnabled = true;
+  const res = await fetch(`${base}${USER_PATH}`, {
+    headers: { authorization: nip98(USER_PATH) },
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).npub, npub);
+  serviceAccountEnabled = null;
+});
+
+test("internal user lookup 404s for an unknown user", async () => {
+  serviceAccountEnabled = true;
+  userRow = null as unknown as Record<string, unknown>;
+  const res = await fetch(`${base}${USER_PATH}`, {
+    headers: { authorization: nip98(USER_PATH) },
+  });
+  assert.equal(res.status, 404);
+  activeUser();
+  serviceAccountEnabled = null;
+});
+
+test("internal entitlement write proxies the payload to db-api", async () => {
+  activeUser();
+  serviceAccountEnabled = true;
+  calls = [];
+  const path = `${USER_PATH}/entitlement`;
+  const body = {
+    durationDays: 30,
+    storageBytes: 1_000_000,
+    source: "payment",
+    mode: "extend",
+    paymentHash: "b".repeat(64),
+  };
+  const res = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: nip98(path, "POST", body),
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  assert.equal(res.status, 200);
+  const forwarded = calls.find(
+    (c) => c.url.endsWith(`/users/${encodeURIComponent(npub)}/entitlement`) && c.init?.method === "POST",
+  );
+  assert.ok(forwarded, "entitlement write must reach db-api");
+  assert.deepEqual(JSON.parse(String(forwarded.init?.body)), body);
+  serviceAccountEnabled = null;
+});
+
+test("internal entitlement write rejects a tampered payload", async () => {
+  serviceAccountEnabled = true;
+  const path = `${USER_PATH}/entitlement`;
+  const signed = {
+    durationDays: 30,
+    storageBytes: 1_000_000,
+    source: "payment",
+    mode: "extend",
+    paymentHash: "b".repeat(64),
+  };
+  const res = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: nip98(path, "POST", signed),
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ ...signed, storageBytes: 9_999_999_999 }),
+  });
+  assert.equal(res.status, 401);
   serviceAccountEnabled = null;
 });
