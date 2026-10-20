@@ -44,6 +44,11 @@ services:
     #   - "${POSTGRES_PORT:-5435}:5432"
     volumes:
       - nso_postgres_data:/var/lib/postgresql/data
+    # Without this the container is created with `restart: no`: a host reboot
+    # (or any explicit stop) leaves Postgres down permanently while every
+    # `unless-stopped` sibling comes back. That happened 2026-10-17 and took
+    # the relay, db-api, admin and pg-gateway down with it.
+    restart: unless-stopped
     healthcheck:
       # -h 127.0.0.1 forces a real TCP check; without it, pg_isready can
       # report healthy during postgres's transient socket-only init phase.

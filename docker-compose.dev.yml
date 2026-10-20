@@ -29,6 +29,9 @@ services:
     #   - "${POSTGRES_PORT:-5435}:5432"
     volumes:
       - nso_postgres_data:/var/lib/postgresql/data
+    # Match docker-compose.yml: without this the service is created with
+    # restart=no and a host reboot leaves Postgres (and the relay) down.
+    restart: unless-stopped
     healthcheck:
       # -h 127.0.0.1 forces a real TCP check; without it, pg_isready can
       # report healthy during postgres's transient socket-only init phase.
