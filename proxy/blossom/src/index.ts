@@ -55,7 +55,8 @@ const requireInternalRole = createInternalRoleGate({ db });
 // allowance only). Its job is resource-exhaustion protection: it bounds how
 // much a single request can buffer in the proxy, so Express never buffers an
 // unbounded body. BUD-06 lets clients preflight it.
-const MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+const MAX_UPLOAD_LABEL = "500 MB";
 const UPGRADE_URL = "/pricing";
 
 const app: Express = express();
@@ -349,7 +350,7 @@ app.head("/upload", async (req, res) => {
       return res.status(400).end();
     }
     if (size > MAX_UPLOAD_BYTES) {
-      res.setHeader("X-Reason", "File exceeds the operator upload cap.");
+      res.setHeader("X-Reason", `File exceeds the ${MAX_UPLOAD_LABEL} per-file upload limit.`);
       return res.status(413).end();
     }
 
@@ -414,8 +415,9 @@ async function uploadGate(req: Request, res: Response, next: NextFunction) {
       return res.status(400).json({ error: "Request body must contain binary data" });
     }
     if (length > MAX_UPLOAD_BYTES) {
-      res.setHeader("X-Reason", "File exceeds the operator upload cap.");
-      return res.status(413).json({ error: "File exceeds the operator upload cap." });
+      const message = `File exceeds the ${MAX_UPLOAD_LABEL} per-file upload limit.`;
+      res.setHeader("X-Reason", message);
+      return res.status(413).json({ error: message });
     }
 
     const cached = await loadAccess(npub);

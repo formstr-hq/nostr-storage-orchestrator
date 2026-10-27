@@ -49,7 +49,7 @@ export function WelcomePage() {
           <div>
             <div className="eyebrow">How does it work?</div>
             <p className="mt muted small">
-              You can buy a plan. You will be granted a storage quota and a time. There are no per-file limits. Please note that this service is under rapid development and is in beta currently. There is a possibility of data loss or outages. Please use this keeping this in mind
+              You can buy a plan. You will be granted a storage quota and a time. Files can be up to 500 MB each. Please note that this service is under rapid development and is in beta currently. There is a possibility of data loss or outages. Please use this keeping this in mind
             </p>
           </div>
           <div>

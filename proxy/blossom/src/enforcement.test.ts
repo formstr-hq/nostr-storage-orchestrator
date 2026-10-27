@@ -188,6 +188,20 @@ test("OPTIONS /upload preflight allows the BUD-06 request headers", async () => 
   }
 });
 
+test("HEAD /upload rejects a file above the 500 MiB operator cap", async () => {
+  activeUser();
+  const res = await fetch(`${base}/upload`, {
+    method: "HEAD",
+    headers: {
+      authorization: bloomAuth("upload", { hash: HASH }),
+      "x-sha-256": HASH,
+      "x-content-length": String(500 * 1024 * 1024 + 1),
+    },
+  });
+  assert.equal(res.status, 413);
+  assert.match(res.headers.get("x-reason") ?? "", /500 MB/);
+});
+
 test("HEAD /upload rejects an expired plan in WRITE_BLOCKED and allows reads", async () => {
   activeUser();
   userRow["planExpiresAt"] = new Date(NOW - 10 * DAY).toISOString();
