@@ -169,6 +169,25 @@ test("HEAD /upload accepts an in-quota upload", async () => {
   assert.equal(res.status, 200);
 });
 
+test("OPTIONS /upload preflight allows the BUD-06 request headers", async () => {
+  const res = await fetch(`${base}/upload`, {
+    method: "OPTIONS",
+    headers: {
+      origin: "https://drive.formstr.app",
+      "access-control-request-method": "PUT",
+      "access-control-request-headers": "authorization,x-sha-256,x-content-length,x-content-type",
+    },
+  });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get("access-control-allow-origin"), "*");
+  const allowed = (res.headers.get("access-control-allow-headers") ?? "")
+    .split(",")
+    .map((header) => header.trim().toLowerCase());
+  for (const header of ["authorization", "x-sha-256", "x-content-length", "x-content-type"]) {
+    assert.ok(allowed.includes(header), `preflight must allow ${header}`);
+  }
+});
+
 test("HEAD /upload rejects an expired plan in WRITE_BLOCKED and allows reads", async () => {
   activeUser();
   userRow["planExpiresAt"] = new Date(NOW - 10 * DAY).toISOString();

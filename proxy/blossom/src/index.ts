@@ -76,6 +76,7 @@ app.use(
       "Content-Type",
       "X-SHA-256",
       "X-Content-Length",
+      "X-Content-Type",
       "X-Internal-Token",
       "Content-Length",
     ],

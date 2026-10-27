@@ -108,7 +108,7 @@ export function DashboardPage() {
         <div className="eyebrow">Your account</div>
         <h1 className="heading">Dashboard</h1>
         <p className="sub">
-          Everything you've stored on Blossom, how much room you have left, and
+          Everything you've stored on Formstr Storage, how much storage you have left, and
           when your plan renews.
         </p>
       </div>
@@ -121,20 +121,20 @@ export function DashboardPage() {
           <div>
             <div className="btitle">
               {account.status === "UNPAID"
-                ? "No active plan — uploads are disabled"
+                ? "No active plan found. Uploads are disabled"
                 : overQuota
                   ? "You're over your storage allowance"
                   : `Account status: ${account.status.replace("_", " ").toLowerCase()}`}
             </div>
             <div className="btext">
               {account.status === "UNPAID"
-                ? "Purchase a plan to start storing."
+                ? "Purchase a plan"
                 : overQuota
                   ? `Using ${formatBytes(account.usedStorage)} of ${formatBytes(account.storageBytes)}. Delete blobs below or upgrade.`
                   : `Reads: ${account.canRead ? "allowed" : "blocked"}. Uploads: ${
                       account.canUpload ? "allowed" : "blocked"
                     }.`}
-              {account.purgeAt && ` Scheduled purge: ${new Date(account.purgeAt).toUTCString()}.`}
+              {account.purgeAt && ` Scheduled deletion: ${new Date(account.purgeAt).toUTCString()}.`}
             </div>
           </div>
         </div>

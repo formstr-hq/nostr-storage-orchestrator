@@ -51,9 +51,10 @@ be bypassed on any endpoint, including the custom `/storage`.
 
 ## CORS / errors (BUD-01)
 
-- `cors()` now explicitly sets `methods: [GET, HEAD, PUT, DELETE]` and
-  `allowedHeaders: [Authorization, *]` to match the BUD-01 preflight
-  requirement literally, plus `maxAge: 86400`.
+- `cors()` now explicitly sets `methods: [GET, HEAD, PUT, PATCH, DELETE, OPTIONS]`
+  and the Blossom/BUD headers `Authorization`, `Content-Type`, `X-SHA-256`,
+  `X-Content-Length` and `X-Content-Type` (the BUD-06 preflight headers), plus
+  `maxAge: 86400`.
 - Error responses set `X-Reason` (previously only a JSON body), and it's
   added to `exposedHeaders` so browser `fetch()` clients can actually read
   it cross-origin — without that, the header would be set but invisible to

@@ -15,7 +15,7 @@ import type {
 
 /** Same origin in production; overridable for local dev split origins. */
 export const BACKEND_URL: string =
-  (import.meta.env.VITE_BACKEND_URL as string | undefined) ?? "http://localhost:5000";
+  (import.meta.env.VITE_BACKEND_URL as string | undefined) ?? "https://api.formstr.app";
 export const BLOSSOM_URL: string =
   (import.meta.env.VITE_BLOSSOM_URL as string | undefined) ?? "";
 

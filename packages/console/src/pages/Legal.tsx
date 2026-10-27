@@ -9,7 +9,7 @@ export function LegalPage() {
 
   return (
     <div className="card legal">
-      <div className="eyebrow">Version {legal.version}</div>
+      <div className="eyebrow">{legal.version}</div>
       <ReactMarkdown skipHtml>{legal.content}</ReactMarkdown>
     </div>
   );

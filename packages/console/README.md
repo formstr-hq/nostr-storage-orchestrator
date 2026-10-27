@@ -44,7 +44,7 @@ npm run dev
 Set the backend/proxy bases when they are not on the Vite dev server:
 
 ```bash
-VITE_BACKEND_URL=http://localhost:5000 npm run dev
+VITE_BACKEND_URL=https://api.formstr.app npm run dev
 ```
 
 ## Production build
@@ -53,6 +53,6 @@ VITE_BACKEND_URL=http://localhost:5000 npm run dev
 VITE_BACKEND_URL=https://<formstr-backend-host> npm run build
 ```
 
-`VITE_BACKEND_URL` defaults to `http://localhost:5000` for local dev. The
+`VITE_BACKEND_URL` defaults to `https://api.formstr.app` for local dev. The
 proxy serves `packages/console/dist` for all extension-less paths; an explicit hash
 route (`/<sha256>`) is registered first so blob reads are never shadowed.

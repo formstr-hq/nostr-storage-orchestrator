@@ -45,8 +45,8 @@ function Masthead() {
           </svg>
         </div>
         <div>
-          <div className="name">Blossom</div>
-          <div className="tag">storage.formstr.app</div>
+          <div className="name">Formstr Storage (Beta)</div>
+          <div className="tag">Blossom protocol</div>
         </div>
       </NavLink>
       <div className="masthead-right">

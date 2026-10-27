@@ -170,11 +170,6 @@ export function PricingPage() {
       <div className="section-head">
         <div className="eyebrow">Pricing</div>
         <h1 className="heading">Choose a plan</h1>
-        <p className="sub">
-          Storage allowance and plan time only — no per-file limits, no free
-          tier. Renewing adds days; upgrading applies immediately and carries
-          remaining days over.
-        </p>
       </div>
 
       {signupsOpen === false && (
