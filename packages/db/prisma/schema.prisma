@@ -31,10 +31,38 @@ model User {
   usedStorage   BigInt    @default(0) @map("used_storage")
   createdAt     DateTime  @default(now()) @map("created_at")
 
-  blobs Blob[]
+  blobs  Blob[]
+  grants StorageGrant[]
 
   @@index([planExpiresAt])
   @@map("user")
+}
+
+// A single entitlement grant. Grants are additive: the effective allowance at
+// time T is the sum of `storageBytes` for grants where startsAt <= T < expiresAt.
+// Each grant expires on its own schedule, so one lapsing shrinks the total
+// without touching the others.
+//
+// `npub` is the current holder. Workspace seat grants are *transferred* between
+// the owner and a member by changing `npub` (never by rewriting the dates), so
+// the expiry is stable across a handover. `sourceRef` is the grant's identity
+// (payment hash / workspace seat / admin id) and makes every write idempotent.
+model StorageGrant {
+  id           String   @id @default(cuid())
+  npub         String
+  planId       String?  @map("plan_id")
+  storageBytes BigInt   @map("storage_bytes")
+  startsAt     DateTime @default(now()) @map("starts_at")
+  expiresAt    DateTime @map("expires_at")
+  source       String
+  sourceRef    String?  @unique @map("source_ref")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [npub], references: [npub], onDelete: Cascade)
+
+  @@index([npub, startsAt, expiresAt])
+  @@index([npub, expiresAt])
+  @@map("storage_grant")
 }
 
 // One row per (hash, owner). Identical content uploaded by two accounts shares

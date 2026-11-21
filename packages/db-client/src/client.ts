@@ -4,6 +4,7 @@ import type {
   ActiveStorageRecord,
   BlobRecord,
   BlobWithOwners,
+  AddGrantRequest,
   CapacityRecord,
   EntitlementRequest,
   MemberRecord,
@@ -16,6 +17,8 @@ import type {
   StorageRecord,
   StorageStats,
   StorageUpdate,
+  TransferGrantsRequest,
+  TransferGrantsResult,
   UserInfo,
 } from "./types.js";
 
@@ -139,8 +142,29 @@ export class DbClient {
 
   // ── Entitlements / account / admin ────────────────────────────────────────
 
+  /** Legacy single-entitlement write. Kept as a compatibility shim; it now
+   * appends a grant rather than overwriting the account. */
   assignEntitlement(npub: string, request: EntitlementRequest): Promise<UserInfo> {
     return this.mutate("POST", `/users/${encodeURIComponent(npub)}/entitlement`, request);
+  }
+
+  addGrant(npub: string, request: AddGrantRequest): Promise<UserInfo> {
+    return this.mutate("POST", `/users/${encodeURIComponent(npub)}/grants`, request);
+  }
+
+  /**
+   * Move existing grants between holders without changing their dates or
+   * allowance. Used for workspace seats: the same grant follows the seat.
+   */
+  transferGrants(request: TransferGrantsRequest): Promise<TransferGrantsResult> {
+    return this.mutate("POST", "/users/grants/transfer", request);
+  }
+
+  deleteGrant(npub: string, grantId: string): Promise<UserInfo> {
+    return this.mutate(
+      "DELETE",
+      `/users/${encodeURIComponent(npub)}/grants/${encodeURIComponent(grantId)}`,
+    );
   }
 
   listUsers(

@@ -1,12 +1,36 @@
-import type { NotificationLog, User } from "./prisma.js";
+import type { NotificationLog, StorageGrant, User } from "./prisma.js";
+import { summarizeGrants } from "./grants.js";
 
-export function userToJson(user: User) {
+export function grantToJson(grant: StorageGrant) {
+  return {
+    id: grant.id,
+    npub: grant.npub,
+    planId: grant.planId,
+    storageBytes: grant.storageBytes.toString(),
+    startsAt: grant.startsAt.toISOString(),
+    expiresAt: grant.expiresAt.toISOString(),
+    source: grant.source,
+    sourceRef: grant.sourceRef,
+    createdAt: grant.createdAt.toISOString(),
+  };
+}
+
+/**
+ * The wire shape keeps `planExpiresAt` / `storageBytes` because the proxy and
+ * lifecycle consume them, but both are now **derived** from the grant ledger:
+ * `storageBytes` is the sum active right now, `planExpiresAt` is the latest
+ * expiry (so the lifecycle starts when the last grant lapses).
+ */
+export function userToJson(user: User, grants: StorageGrant[] = [], now = new Date()) {
+  const summary = summarizeGrants(grants, now);
   return {
     npub: user.npub,
-    planExpiresAt: user.planExpiresAt?.toISOString() ?? null,
-    storageBytes: user.storageBytes?.toString() ?? null,
+    planExpiresAt: summary.lastExpiresAt?.toISOString() ?? null,
+    storageBytes: grants.length === 0 ? null : summary.activeStorageBytes.toString(),
     usedStorage: user.usedStorage.toString(),
     createdAt: user.createdAt.toISOString(),
+    nextExpiresAt: summary.nextExpiresAt?.toISOString() ?? null,
+    grants: grants.map(grantToJson),
   };
 }
 

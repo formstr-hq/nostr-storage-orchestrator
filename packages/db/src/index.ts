@@ -53,7 +53,13 @@ app.get("/blobs/:hash", requireServiceAccount, async (req, res) => {
   if (!first) {
     return res.status(404).json({ error: "not_found" });
   }
-  res.json({ ...blobToJson(first), owners: rows.map((row) => row.npub) });
+  res.json({
+    ...blobToJson(first),
+    owners: rows.map((row) => row.npub),
+    // Each owner row is a pin (BUD "Blob pinning"); its creation time is when
+    // that pubkey pinned the blob, which can differ from the first upload.
+    pins: rows.map((row) => ({ npub: row.npub, createdAt: row.createdAt.toISOString() })),
+  });
 });
 
 class QuotaExceededError extends Error {}

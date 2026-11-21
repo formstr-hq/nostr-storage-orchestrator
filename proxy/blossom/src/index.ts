@@ -4,11 +4,14 @@ import express, { type Express, type Request, type Response } from "express";
 import {
   DbClient,
   DbApiError,
+  type AddGrantRequest,
+  type BlobWithOwners,
   type EntitlementRequest,
+  type TransferGrantsRequest,
   type UserInfo,
 } from "@orchestrator/db-client";
 import { loadLifecycleConfig, type LifecycleConfig } from "@orchestrator/lifecycle";
-import { AuthError, verifyAuthToken } from "./nostr.js";
+import { AuthError, verifyAuthToken, verifyAuthTokenInfo, type AuthInfo } from "./nostr.js";
 import { Nip98Error, verifyNip98 } from "@orchestrator/nip98";
 import { uploadBlob, serverRegistry, openBlobStream, deleteBlob } from "./servers.js";
 import { createAccessCache, withAccess, STATUS_ERROR_CODES } from "./access.js";
@@ -169,32 +172,46 @@ function sendAuthError(res: Response, error: AuthError) {
   return res.status(error.status).json({ error: error.message });
 }
 
-function sendAccessError(res: Response, user: UserInfo, access: ReturnType<typeof withAccess>["access"]) {
-  const code =
-    access.reason === "grace_over_quota"
-      ? "quota_exceeded"
-      : access.canUpload
-        ? "quota_exceeded"
-        : access.status === "UNPAID"
-          ? "unpaid"
-          : access.status === "CLOSED"
-            ? "account_closed"
-            : access.status === "GRACE"
-              ? "grace_expired"
-              : access.status === "WRITE_BLOCKED"
-                ? "write_blocked"
-                : "read_blocked";
+type Access = ReturnType<typeof withAccess>["access"];
 
+function accessErrorCode(access: Access): string {
+  return access.reason === "grace_over_quota"
+    ? "quota_exceeded"
+    : access.canUpload
+      ? "quota_exceeded"
+      : access.status === "UNPAID"
+        ? "unpaid"
+        : access.status === "CLOSED"
+          ? "account_closed"
+          : access.status === "GRACE"
+            ? "grace_expired"
+            : access.status === "WRITE_BLOCKED"
+              ? "write_blocked"
+              : "read_blocked";
+}
+
+function accessErrorBody(user: UserInfo, access: Access, target?: string) {
   const overQuota = access.reason === "grace_over_quota" || access.canUpload;
-  res.setHeader("X-Reason", code);
-  return res.status(403).json({
-    error: code,
+  return {
+    error: accessErrorCode(access),
     status: access.status,
     action: overQuota ? "delete_or_upgrade" : "upgrade",
     usedStorage: user.usedStorage,
     storageBytes: user.storageBytes,
     upgradeUrl: UPGRADE_URL,
-  });
+    ...(target === undefined ? {} : { target }),
+  };
+}
+
+function sendAccessError(
+  res: Response,
+  user: UserInfo,
+  access: Access,
+  target?: string,
+) {
+  const code = accessErrorCode(access);
+  res.setHeader("X-Reason", code);
+  return res.status(403).json(accessErrorBody(user, access, target));
 }
 
 type LoadedAccess = { user: UserInfo; access: ReturnType<typeof withAccess>["access"] };
@@ -211,6 +228,8 @@ function unpaidUser(npub: string): UserInfo {
     storageBytes: null,
     usedStorage: "0",
     createdAt: new Date(0).toISOString(),
+    nextExpiresAt: null,
+    grants: [],
   };
 }
 
@@ -239,6 +258,81 @@ async function loadAccessForDenialCheck(
 ): Promise<LoadedAccess | null> {
   if (!cached || cached.access.canUpload) return cached;
   return loadAccess(npub, true);
+}
+
+/**
+ * The accounts an upload is billed to. Under BUD "Blob pinning" a token with
+ * `p` tags pins for those pubkeys *instead of* the signer, so the signer may
+ * be a disposable key with no storage account at all.
+ */
+function targetNpubs(auth: AuthInfo): string[] {
+  return auth.pinNpubs.length > 0 ? auth.pinNpubs : [auth.npub];
+}
+
+interface TargetCheck {
+  npub: string;
+  user: UserInfo;
+  access: Access;
+}
+
+interface TargetRefusal {
+  ok: false;
+  status: number;
+  reason: string;
+  body: Record<string, unknown>;
+}
+
+/**
+ * Checks the entitlement and quota of every target account. This is what
+ * replaces "the signer must be paying" for a `p`-tagged upload: the recipients
+ * named by the token must have an active account with room, and are the ones
+ * charged for the bytes.
+ */
+async function checkUploadTargets(
+  owners: string[],
+  size: number | string | bigint,
+): Promise<{ ok: true; targets: TargetCheck[] } | TargetRefusal> {
+  const targets: TargetCheck[] = [];
+  for (const npub of owners) {
+    const cached = await loadAccess(npub);
+    const loaded = await loadAccessForDenialCheck(npub, cached);
+    if (!loaded) {
+      return {
+        ok: false,
+        status: 500,
+        reason: "account_lookup_failed",
+        body: { error: "Upload failed" },
+      };
+    }
+    const { user, access } = loaded;
+    if (!access.canUpload) {
+      return {
+        ok: false,
+        status: 403,
+        reason: accessErrorCode(access),
+        body: accessErrorBody(user, access, npub),
+      };
+    }
+    if (
+      user.storageBytes !== null &&
+      BigInt(user.usedStorage) + BigInt(size) > BigInt(user.storageBytes)
+    ) {
+      const overQuota: Access = { ...access, canUpload: false, reason: "grace_over_quota" };
+      return {
+        ok: false,
+        status: 403,
+        reason: "quota_exceeded",
+        body: accessErrorBody(user, overQuota, npub),
+      };
+    }
+    targets.push({ npub, user, access });
+  }
+  return { ok: true, targets };
+}
+
+function sendTargetRefusal(res: Response, refusal: TargetRefusal) {
+  res.setHeader("X-Reason", refusal.reason);
+  return res.status(refusal.status).json(refusal.body);
 }
 
 // Internal: how much room the storage providers have left. NIP-98 + an enabled
@@ -288,6 +382,63 @@ app.post(
   },
 );
 
+// Append a grant (paid purchase, workspace seat, admin). Idempotent through
+// the caller-supplied `sourceRef`; db-api validates and stores it.
+app.post(
+  "/internal/users/:npub/grants",
+  express.json(),
+  requireInternalRole,
+  async (req, res) => {
+    const npub = String(req.params["npub"]);
+    try {
+      const user = await db.addGrant(npub, req.body as AddGrantRequest);
+      accessCache.invalidate(npub);
+      res.json(user);
+    } catch (error) {
+      if (error instanceof DbApiError) return res.status(error.status).json(error.body);
+      console.error(error);
+      res.status(502).json({ error: "db api failed" });
+    }
+  },
+);
+
+// Move grants between holders without changing their dates/allowance. This is
+// how a workspace seat follows its member: the same grant changes npub.
+app.post(
+  "/internal/grants/transfer",
+  express.json(),
+  requireInternalRole,
+  async (req, res) => {
+    try {
+      const result = await db.transferGrants(req.body as TransferGrantsRequest);
+      accessCache.invalidate(result.from?.npub ?? String(req.body?.fromNpub ?? ""));
+      accessCache.invalidate(result.to?.npub ?? String(req.body?.toNpub ?? ""));
+      res.json(result);
+    } catch (error) {
+      if (error instanceof DbApiError) return res.status(error.status).json(error.body);
+      console.error(error);
+      res.status(502).json({ error: "db api failed" });
+    }
+  },
+);
+
+app.delete(
+  "/internal/users/:npub/grants/:grantId",
+  requireInternalRole,
+  async (req, res) => {
+    const npub = String(req.params["npub"]);
+    try {
+      const user = await db.deleteGrant(npub, String(req.params["grantId"]));
+      accessCache.invalidate(npub);
+      res.json(user);
+    } catch (error) {
+      if (error instanceof DbApiError) return res.status(error.status).json(error.body);
+      console.error(error);
+      res.status(502).json({ error: "db api failed" });
+    }
+  },
+);
+
 // Non-Blossom endpoint: exposes this account's entitlement/usage. Gated by
 // BUD-11 so it shares one auth code path with the rest of the protocol.
 app.get("/storage", async (req, res) => {
@@ -313,8 +464,10 @@ app.get("/storage", async (req, res) => {
       total,
       available: total === null ? null : total - used,
       planExpiresAt: user.planExpiresAt,
+      nextExpiresAt: user.nextExpiresAt,
       storageBytes: user.storageBytes,
       usedStorage: user.usedStorage,
+      grants: user.grants,
       status: access.status,
       purgeAt: access.purgeAt?.toISOString() ?? null,
       canUpload: access.canUpload,
@@ -331,7 +484,7 @@ app.get("/storage", async (req, res) => {
 app.head("/upload", async (req, res) => {
   try {
     const xHash = firstHeader(req.headers["x-sha-256"] as string | string[] | undefined);
-    const npub = verifyAuthToken(req.headers.authorization, "upload", {
+    const auth = verifyAuthTokenInfo(req.headers.authorization, "upload", {
       hash: xHash,
       requireHashScope: true,
     });
@@ -354,21 +507,10 @@ app.head("/upload", async (req, res) => {
       return res.status(413).end();
     }
 
-    const cached = await loadAccess(npub);
-    const loaded = await loadAccessForDenialCheck(npub, cached);
-    if (!loaded) {
-      res.setHeader("X-Reason", "Account lookup failed");
-      return res.status(500).end();
-    }
-    const { user, access } = loaded;
-
-    if (!access.canUpload) {
-      res.setHeader("X-Reason", STATUS_ERROR_CODES[access.status] ?? access.status);
-      return res.status(403).end();
-    }
-    if (user.storageBytes !== null && BigInt(user.usedStorage) + BigInt(size) > BigInt(user.storageBytes)) {
-      res.setHeader("X-Reason", "quota_exceeded");
-      return res.status(403).end();
+    const checked = await checkUploadTargets(targetNpubs(auth), size);
+    if (!checked.ok) {
+      res.setHeader("X-Reason", checked.reason);
+      return res.status(checked.status).end();
     }
 
     return res.status(200).end();
@@ -404,7 +546,9 @@ async function uploadGate(req: Request, res: Response, next: NextFunction) {
     if (!uploadLimiter.hit(clientIp(req))) {
       return res.status(429).json({ error: "rate_limited" });
     }
-    const npub = verifyAuthToken(req.headers.authorization, "upload", { requireHashScope: true });
+    const auth = verifyAuthTokenInfo(req.headers.authorization, "upload", {
+      requireHashScope: true,
+    });
 
     const length = Number(firstHeader(req.headers["content-length"]));
     if (!firstHeader(req.headers["content-length"])) {
@@ -420,14 +564,8 @@ async function uploadGate(req: Request, res: Response, next: NextFunction) {
       return res.status(413).json({ error: message });
     }
 
-    const cached = await loadAccess(npub);
-    const loaded = await loadAccessForDenialCheck(npub, cached);
-    if (!loaded) return res.status(500).json({ error: "Upload failed" });
-    const { user, access } = loaded;
-    if (!access.canUpload) return sendAccessError(res, user, access);
-    if (user.storageBytes !== null && BigInt(user.usedStorage) + BigInt(length) > BigInt(user.storageBytes)) {
-      return sendAccessError(res, user, { ...access, canUpload: false, reason: "grace_over_quota" });
-    }
+    const checked = await checkUploadTargets(targetNpubs(auth), length);
+    if (!checked.ok) return sendTargetRefusal(res, checked);
 
     if (inflightUploadBytes + length > MAX_INFLIGHT_UPLOAD_BYTES) {
       res.setHeader("Retry-After", "5");
@@ -469,71 +607,81 @@ app.put("/upload", uploadGate, rawUpload, async (req, res) => {
     }
 
     const authHeader = req.headers.authorization;
-    const npub = verifyAuthToken(authHeader, "upload", { hash, requireHashScope: true });
+    const auth = verifyAuthTokenInfo(authHeader, "upload", { hash, requireHashScope: true });
+    const owners = targetNpubs(auth);
 
-    const cached = await loadAccess(npub);
-    const loaded = await loadAccessForDenialCheck(npub, cached);
-    if (!loaded) {
-      return res.status(500).json({ error: "Upload failed" });
-    }
-    const { user, access } = loaded;
+    // Re-check in the handler (the gate already did) so the decision is made
+    // with the real hash and the actual account rows, not just Content-Length.
+    const checked = await checkUploadTargets(owners, size);
+    if (!checked.ok) return sendTargetRefusal(res, checked);
 
-    if (!access.canUpload) {
-      return sendAccessError(res, user, access);
-    }
-    if (user.storageBytes !== null && BigInt(user.usedStorage) + BigInt(size) > BigInt(user.storageBytes)) {
-      return sendAccessError(res, user, {
-        ...access,
-        canUpload: false,
-        reason: "grace_over_quota",
-      });
-    }
-
-    let existing;
+    let existing: BlobWithOwners | null;
     try {
       existing = await db.getBlob(hash);
     } catch (error) {
       console.error("blob lookup failed", error);
       return res.status(502).json({ error: "Blob lookup failed" });
     }
-    const alreadyMine = existing?.owners.includes(npub) ?? false;
-    let createdAt = existing?.createdAt;
 
-    if (!alreadyMine) {
-      // Same bytes already on the nodes (another account uploaded them): reuse
-      // those copies and bill this account on its own row. Otherwise store them.
-      const storedNow = !existing;
-      const replicas = existing ? existing.replicas : (await uploadBlob(data, hash, authHeader!, npub)).replicas;
+    const pinnedBy = new Set(existing?.owners ?? []);
+    const missing = owners.filter((owner) => !pinnedBy.has(owner));
+    const alreadyOwned = missing.length === 0;
+    const storedNow = !existing;
+
+    // Same bytes already on the nodes (another account pinned them): reuse those
+    // copies and bill each new owner on its own row. Otherwise store once.
+    const replicas = existing
+      ? existing.replicas
+      : (await uploadBlob(data, hash, authHeader!, owners[0]!)).replicas;
+
+    let createdAt = existing?.createdAt;
+    const createdOwners: string[] = [];
+    for (const owner of missing) {
       try {
-        const created = await db.createBlob({ hash, npub, size, replicas });
-        createdAt = created.createdAt;
+        const created = await db.createBlob({ hash, npub: owner, size, replicas });
+        createdOwners.push(owner);
+        createdAt = createdAt ?? created.createdAt;
         // usedStorage changed; drop the cached row so /storage and the next
         // quota check see it immediately.
-        accessCache.invalidate(npub);
+        accessCache.invalidate(owner);
       } catch (error) {
         const reason = error instanceof DbApiError && typeof error.body === "object" && error.body !== null
           ? (error.body as { error?: string }).error
           : undefined;
         if (error instanceof DbApiError && error.status === 409 && reason === "already_exists") {
-          const refetched = await db.getBlob(hash);
-          createdAt = refetched?.createdAt;
-        } else {
+          // Raced with another request pinning for this owner; nothing to add.
+          continue;
+        }
+
+        // Roll back pins this request created before failing the whole upload,
+        // so a multi-recipient upload is all-or-nothing.
+        for (const created of createdOwners) {
+          await db.deleteBlob(hash, { npub: created }).catch(() => undefined);
+        }
+        if (storedNow) {
           // The bytes we just stored have no row behind them. Take them off the
           // nodes again unless someone else claimed the hash in the meantime.
-          if (storedNow) {
-            const claimed = await db.getBlob(hash).catch(() => null);
-            if (!claimed) await deleteBlob(hash, replicas);
-          }
-          if (error instanceof DbApiError && error.status === 409 && reason === "quota_exceeded") {
-            accessCache.invalidate(npub);
-            return sendAccessError(res, user, {
-              ...access,
-              canUpload: false,
-              reason: "grace_over_quota",
-            });
-          }
-          throw error;
+          const claimed = await db.getBlob(hash).catch(() => null);
+          if (!claimed) await deleteBlob(hash, replicas);
         }
+
+        if (error instanceof DbApiError && error.status === 409 && reason === "quota_exceeded") {
+          accessCache.invalidate(owner);
+          const target = checked.targets.find((entry) => entry.npub === owner);
+          if (target) {
+            return sendAccessError(
+              res,
+              target.user,
+              { ...target.access, canUpload: false, reason: "grace_over_quota" },
+              owner,
+            );
+          }
+          return res.status(403).json({ error: "quota_exceeded", target: owner });
+        }
+        if (error instanceof DbApiError && error.status === 404 && reason === "user_not_found") {
+          return res.status(403).json({ error: "pin_refused", target: owner });
+        }
+        throw error;
       }
     }
 
@@ -545,7 +693,7 @@ app.put("/upload", uploadGate, rawUpload, async (req, res) => {
       ? Math.floor(new Date(createdAt).getTime() / 1000)
       : Math.floor(Date.now() / 1000);
 
-    return res.status(alreadyMine ? 200 : 201).json({
+    return res.status(alreadyOwned ? 200 : 201).json({
       url: `${baseUrl}/${hash}${extensionForType(contentType)}`,
       sha256: hash,
       size,
@@ -557,6 +705,129 @@ app.put("/upload", uploadGate, rawUpload, async (req, res) => {
     console.error(error);
     res.setHeader("X-Reason", "Upload failed");
     return res.status(500).json({ error: "Upload failed" });
+  }
+});
+
+// BUD "Blob pinning": pin an already-stored blob without uploading it again.
+// The token's `p` tags (or, without any, the signer) become owners, exactly as
+// on PUT /upload — so this is also how a sender attributes existing bytes to
+// a recipient's account.
+app.put("/pin/:hash", async (req, res) => {
+  try {
+    if (!uploadLimiter.hit(clientIp(req))) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
+    const match = HASH_PATTERN.exec(String(req.params["hash"]));
+    if (!match) {
+      return res.status(400).json({ error: "Invalid sha256 hash" });
+    }
+    const hash = match[1]!;
+
+    const auth = verifyAuthTokenInfo(req.headers.authorization, "pin", {
+      hash,
+      requireHashScope: true,
+    });
+    const owners = targetNpubs(auth);
+
+    let blob: BlobWithOwners | null;
+    try {
+      blob = await db.getBlob(hash);
+    } catch (error) {
+      console.error("blob lookup failed", error);
+      return res.status(502).json({ error: "Blob lookup failed" });
+    }
+    if (!blob) return res.status(404).json({ error: "not_found" });
+
+    const pinnedBy = new Set(blob.owners);
+    const missing = owners.filter((owner) => !pinnedBy.has(owner));
+
+    // An existing pin is idempotent and adds no bytes, so only owners who are
+    // actually gaining a row are checked against entitlement and quota.
+    const checked = await checkUploadTargets(missing, blob.size);
+    if (!checked.ok) return sendTargetRefusal(res, checked);
+
+    const createdOwners: string[] = [];
+    for (const owner of missing) {
+      try {
+        await db.createBlob({ hash, npub: owner, size: blob.size, replicas: blob.replicas });
+        createdOwners.push(owner);
+        accessCache.invalidate(owner);
+      } catch (error) {
+        const reason = error instanceof DbApiError && typeof error.body === "object" && error.body !== null
+          ? (error.body as { error?: string }).error
+          : undefined;
+        if (error instanceof DbApiError && error.status === 409 && reason === "already_exists") {
+          continue;
+        }
+        for (const created of createdOwners) {
+          await db.deleteBlob(hash, { npub: created }).catch(() => undefined);
+        }
+        if (error instanceof DbApiError && error.status === 409 && reason === "quota_exceeded") {
+          accessCache.invalidate(owner);
+          const target = checked.targets.find((entry) => entry.npub === owner);
+          if (target) {
+            return sendAccessError(
+              res,
+              target.user,
+              { ...target.access, canUpload: false, reason: "grace_over_quota" },
+              owner,
+            );
+          }
+          return res.status(403).json({ error: "quota_exceeded", target: owner });
+        }
+        if (error instanceof DbApiError && error.status === 404 && reason === "user_not_found") {
+          return res.status(403).json({ error: "pin_refused", target: owner });
+        }
+        throw error;
+      }
+    }
+
+    const baseUrl = process.env.PUBLIC_BASE_URL ?? `${req.protocol}://${req.get("host")}`;
+    return res.status(200).json({
+      url: `${baseUrl}/${hash}`,
+      sha256: hash,
+      size: Number(blob.size),
+      type: "application/octet-stream",
+      uploaded: Math.floor(new Date(blob.createdAt).getTime() / 1000),
+    });
+  } catch (error) {
+    if (error instanceof AuthError) return sendAuthError(res, error);
+    console.error(error);
+    return res.status(500).json({ error: "Pin failed" });
+  }
+});
+
+// BUD "Blob pinning": read the signer's own pin. Never reveals other pinners.
+app.get("/pin/:hash", async (req, res) => {
+  try {
+    if (!accountLimiter.hit(clientIp(req))) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
+    const match = HASH_PATTERN.exec(String(req.params["hash"]));
+    if (!match) {
+      return res.status(400).json({ error: "Invalid sha256 hash" });
+    }
+    const hash = match[1]!;
+
+    const auth = verifyAuthTokenInfo(req.headers.authorization, "pin", {
+      hash,
+      requireHashScope: true,
+    });
+
+    const blob = await db.getBlob(hash);
+    if (!blob) return res.status(404).json({ error: "not_found" });
+
+    const pin = (blob.pins ?? []).find((entry) => entry.npub === auth.npub);
+    if (!pin) return res.status(404).json({ error: "not_pinned" });
+
+    return res.json({
+      sha256: hash,
+      pinned: Math.floor(new Date(pin.createdAt).getTime() / 1000),
+    });
+  } catch (error) {
+    if (error instanceof AuthError) return sendAuthError(res, error);
+    console.error(error);
+    return res.status(500).json({ error: "Pin lookup failed" });
   }
 });
 

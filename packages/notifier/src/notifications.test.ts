@@ -20,6 +20,8 @@ function user(overrides: Partial<UserInfo> = {}): UserInfo {
     storageBytes: "1000",
     usedStorage: "100",
     createdAt: new Date(NOW.getTime() - DAY).toISOString(),
+    nextExpiresAt: null,
+    grants: [],
     ...overrides,
   };
 }
