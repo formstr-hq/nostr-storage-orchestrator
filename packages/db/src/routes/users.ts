@@ -138,8 +138,13 @@ usersRouter.post("/grants/transfer", requireServiceAccount, async (req, res) => 
         update: {},
         create: { npub: request.toNpub },
       });
+      const now = new Date();
       const where = {
         npub: request.fromNpub,
+        // Only live grants move. Transferring an expired grant would hand the
+        // recipient nothing while silently closing out the seat.
+        startsAt: { lte: now },
+        expiresAt: { gt: now },
         ...(request.source ? { source: request.source } : {}),
         ...(request.sourceRefPrefix
           ? { sourceRef: { startsWith: request.sourceRefPrefix } }
@@ -152,11 +157,17 @@ usersRouter.post("/grants/transfer", requireServiceAccount, async (req, res) => 
         select: { id: true },
       });
       if (candidates.length === 0) return 0;
-      await tx.storageGrant.updateMany({
-        where: { id: { in: candidates.map((grant) => grant.id) } },
+      // Re-check the holder in the write itself: a concurrent transfer may have
+      // already moved one of these grants after the select. Only rows still
+      // held by fromNpub move, and the caller gets the real count.
+      const updated = await tx.storageGrant.updateMany({
+        where: {
+          id: { in: candidates.map((grant) => grant.id) },
+          npub: request.fromNpub,
+        },
         data: { npub: request.toNpub },
       });
-      return candidates.length;
+      return updated.count;
     });
 
     const [from, to] = await Promise.all([
