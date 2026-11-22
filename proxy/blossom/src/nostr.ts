@@ -1,6 +1,22 @@
 import { verifyEvent, nip19 } from "nostr-tools";
 
-export type BlossomAction = "get" | "upload" | "list" | "delete" | "media";
+export type BlossomAction = "get" | "upload" | "list" | "delete" | "media" | "pin";
+
+/**
+ * A verified authorization token. `npub` is the signer; `pinNpubs` are the
+ * pubkeys named by `p` tags (BUD "Blob pinning"). When `pinNpubs` is empty the
+ * request pins for the signer, when it is non-empty it pins for those pubkeys
+ * *instead* of the signer, and the signer need not own an account.
+ */
+export interface AuthInfo {
+  npub: string;
+  /** The signer's hex pubkey, as it appears in the authorization event. */
+  pubkey: string;
+  /** Target sha256 from the `x` tag (lowercase), when the token carries one. */
+  hash?: string;
+  /** npubs named by `p` tags, in order, de-duplicated. */
+  pinNpubs: string[];
+}
 
 export class AuthError extends Error {
   status: number;
@@ -47,11 +63,11 @@ function parseAuthHeader(authHeader: string): NostrAuthEvent {
  * MUST carry a matching `x` tag) and OPTIONAL for get (a matching `x` tag is
  * only enforced if the token happens to carry one).
  */
-export function verifyAuthToken(
+export function verifyAuthTokenInfo(
   authHeader: string | undefined,
   action: BlossomAction,
   opts: { hash?: string | undefined; requireHashScope?: boolean } = {},
-): string {
+): AuthInfo {
   if (!authHeader) {
     throw new AuthError("Missing Authorization header", 401);
   }
@@ -99,5 +115,40 @@ export function verifyAuthToken(
     throw new AuthError('Authorization event must include an "x" tag for the target blob hash', 401);
   }
 
-  return nip19.npubEncode(event.pubkey);
+  // BUD "Blob pinning": each `p` tag names a pubkey to pin the blob for.
+  // Without `p` tags the signer pins for itself; with them the signer does not
+  // pin it at all (which is what lets a one-time key send a blob to a user
+  // who owns the account the bytes are billed to).
+  const pinNpubs: string[] = [];
+  for (const tag of tags) {
+    if (tag[0] !== "p") continue;
+    const value = tag[1];
+    if (typeof value !== "string" || !/^[0-9a-f]{64}$/i.test(value)) {
+      throw new AuthError('Authorization event has an invalid "p" tag pubkey', 400);
+    }
+    const npub = nip19.npubEncode(value.toLowerCase());
+    if (!pinNpubs.includes(npub)) pinNpubs.push(npub);
+  }
+
+  const info: AuthInfo = {
+    npub: nip19.npubEncode(event.pubkey),
+    pubkey: event.pubkey,
+    pinNpubs,
+  };
+  if (opts.hash) info.hash = opts.hash.toLowerCase();
+  else if (xTags[0]) info.hash = xTags[0];
+  return info;
+}
+
+/**
+ * Verifies a BUD-11 token and returns the signer's npub. Kept for callers that
+ * only care about the signer; use {@link verifyAuthTokenInfo} when `p` tags
+ * (pin targets) or the `x` hash matter.
+ */
+export function verifyAuthToken(
+  authHeader: string | undefined,
+  action: BlossomAction,
+  opts: { hash?: string | undefined; requireHashScope?: boolean } = {},
+): string {
+  return verifyAuthTokenInfo(authHeader, action, opts).npub;
 }

@@ -1,15 +1,59 @@
-import { Router, type Router as ExpressRouter } from "express";
-import { prisma } from "../prisma.js";
+import { Router, type Response, type Router as ExpressRouter } from "express";
+import { prisma, type User } from "../prisma.js";
 import { requireServiceAccount } from "../internal-auth.js";
 import {
-  EntitlementError,
-  computeEntitlement,
-  parseEntitlementRequest,
-} from "../entitlement.js";
+  GrantError,
+  parseAddGrantRequest,
+  parseLegacyEntitlement,
+  parseTransferRequest,
+  workspaceSeatOwner,
+} from "../grants.js";
 import { blobToJson, notificationToJson, userToJson } from "../serialize.js";
 import { paginated, parsePagination, queryString } from "../pagination.js";
 
 export const usersRouter: ExpressRouter = Router();
+
+function prismaErrorCode(error: unknown): string | undefined {
+  if (error && typeof error === "object" && "code" in error) {
+    return (error as { code?: string }).code;
+  }
+  return undefined;
+}
+
+function sendGrantError(res: Response, error: unknown): Response | never {
+  if (error instanceof GrantError) {
+    return res.status(error.status).json({ error: error.code });
+  }
+  throw error;
+}
+
+async function grantsFor(npub: string) {
+  return prisma.storageGrant.findMany({
+    where: { npub },
+    orderBy: { createdAt: "asc" },
+  });
+}
+
+/** Serialize one user with their grants (no Prisma relation to lean on). */
+async function userJson(user: User) {
+  return userToJson(user, await grantsFor(user.npub));
+}
+
+/** Serialize a page of users with one grants query for the whole page. */
+async function usersJson(users: User[]) {
+  if (users.length === 0) return [];
+  const grants = await prisma.storageGrant.findMany({
+    where: { npub: { in: users.map((user) => user.npub) } },
+    orderBy: { createdAt: "asc" },
+  });
+  const byNpub = new Map<string, typeof grants>();
+  for (const grant of grants) {
+    const list = byNpub.get(grant.npub);
+    if (list) list.push(grant);
+    else byNpub.set(grant.npub, [grant]);
+  }
+  return users.map((user) => userToJson(user, byNpub.get(user.npub) ?? []));
+}
 
 // Users due for lifecycle/notification evaluation. Registered before
 // /:npub so "attention" is not captured as an npub. Anyone with an expiry is
@@ -17,30 +61,38 @@ export const usersRouter: ExpressRouter = Router();
 // sent.
 usersRouter.get("/attention", requireServiceAccount, async (req, res) => {
   const pagination = parsePagination(req.query as Record<string, unknown>);
-  const where = {
-    planExpiresAt: { not: null },
-  };
-  const [items, total] = await Promise.all([
-    prisma.user.findMany({
-      where,
-      orderBy: { planExpiresAt: "asc" },
-      skip: pagination.skip,
-      take: pagination.take,
-    }),
-    prisma.user.count({ where }),
-  ]);
-  res.json(paginated(items.map(userToJson), total, pagination));
+  // No Prisma relation to query through: page the distinct grant holders and
+  // load only that page's users.
+  const holders = await prisma.storageGrant.findMany({
+    distinct: ["npub"],
+    select: { npub: true },
+    orderBy: { npub: "asc" },
+  });
+  const pageNpubs = holders
+    .slice(pagination.skip, pagination.skip + pagination.take)
+    .map((row) => row.npub);
+  const users =
+    pageNpubs.length === 0
+      ? []
+      : await prisma.user.findMany({ where: { npub: { in: pageNpubs } } });
+  const byNpub = new Map(users.map((user) => [user.npub, user]));
+  const ordered = pageNpubs
+    .map((npub) => byNpub.get(npub))
+    .filter((user): user is User => user !== undefined);
+  res.json(paginated(await usersJson(ordered), holders.length, pagination));
 });
 
 // Extended user serialization. Service-gated: only the blossom proxy reads
 // entitlement rows now; it authenticates the account owner (BUD-11) or a
 // service caller before exposing them.
 usersRouter.get("/:npub", requireServiceAccount, async (req, res) => {
-  const user = await prisma.user.findUnique({ where: { npub: String(req.params.npub) } });
+  const user = await prisma.user.findUnique({
+    where: { npub: String(req.params.npub) },
+  });
   if (!user) {
     return res.status(404).json({ error: "not_found" });
   }
-  res.json(userToJson(user));
+  res.json(await userJson(user));
 });
 
 // Paginated list with an optional npub substring filter.
@@ -64,70 +116,204 @@ usersRouter.get("/", requireServiceAccount, async (req, res) => {
     prisma.user.count({ where }),
   ]);
 
-  res.json(paginated(items.map(userToJson), total, pagination));
+  res.json(paginated(await usersJson(items), total, pagination));
 });
 
 /**
- * Atomic entitlement assign/extend/upgrade. See
- * docs/BLOSSOM_PRODUCTIONISATION_PLAN.md — the transaction is the single
- * write path for plan state; formstr-backend pushes paid purchases here.
- * The upsert creates the row: this is the only place a user is created, so
- * the user table contains paid users only.
+ * Move existing grants between holders without touching their dates or
+ * allowance. Workspace seats use this: the grant is created once, then follows
+ * the seat (owner → member on assign, member → owner on revoke).
+ */
+usersRouter.post("/grants/transfer", requireServiceAccount, async (req, res) => {
+  let request;
+  try {
+    request = parseTransferRequest(req.body);
+  } catch (error) {
+    return sendGrantError(res, error);
+  }
+
+  try {
+    const moved = await prisma.$transaction(async (tx) => {
+      await tx.user.upsert({
+        where: { npub: request.toNpub },
+        update: {},
+        create: { npub: request.toNpub },
+      });
+      const now = new Date();
+      const where = {
+        npub: request.fromNpub,
+        // Only live grants move. Transferring an expired grant would hand the
+        // recipient nothing while silently closing out the seat.
+        startsAt: { lte: now },
+        expiresAt: { gt: now },
+        ...(request.source ? { source: request.source } : {}),
+        ...(request.sourceRefPrefix
+          ? { sourceRef: { startsWith: request.sourceRefPrefix } }
+          : {}),
+      };
+      const candidates = await tx.storageGrant.findMany({
+        where,
+        orderBy: { expiresAt: "asc" },
+        take: request.count,
+        select: { id: true },
+      });
+      if (candidates.length === 0) return 0;
+      // Re-check the holder in the write itself: a concurrent transfer may have
+      // already moved one of these grants after the select. Only rows still
+      // held by fromNpub move, and the caller gets the real count.
+      const updated = await tx.storageGrant.updateMany({
+        where: {
+          id: { in: candidates.map((grant) => grant.id) },
+          npub: request.fromNpub,
+        },
+        data: { npub: request.toNpub },
+      });
+      return updated.count;
+    });
+
+    const [from, to] = await Promise.all([
+      prisma.user.findUnique({ where: { npub: request.fromNpub } }),
+      prisma.user.findUnique({ where: { npub: request.toNpub } }),
+    ]);
+    res.json({
+      moved,
+      from: from ? await userJson(from) : null,
+      to: to ? await userJson(to) : null,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+/**
+ * Append a grant. Grants are additive; the body carries its own duration (or
+ * explicit window) and `sourceRef` (unique) makes retries idempotent.
+ */
+usersRouter.post("/:npub/grants", requireServiceAccount, async (req, res) => {
+  const npub = String(req.params.npub);
+  let request;
+  try {
+    request = parseAddGrantRequest(req.body);
+  } catch (error) {
+    return sendGrantError(res, error);
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.user.upsert({ where: { npub }, update: {}, create: { npub } });
+      if (request.sourceRef) {
+        const existing = await tx.storageGrant.findUnique({
+          where: { sourceRef: request.sourceRef },
+        });
+        if (existing) {
+          if (existing.npub !== npub) {
+            throw new GrantError(409, "source_ref_used_by_other_user");
+          }
+          return;
+        }
+      }
+      await tx.storageGrant.create({
+        data: {
+          npub,
+          planId: request.planId,
+          storageBytes: request.storageBytes,
+          startsAt: request.startsAt,
+          expiresAt: request.expiresAt,
+          source: request.source,
+          sourceRef: request.sourceRef,
+        },
+      });
+    });
+    const user = await prisma.user.findUnique({ where: { npub } });
+    if (!user) return res.status(500).json({ error: "user_missing" });
+    res.json(await userJson(user));
+  } catch (error) {
+    if (error instanceof GrantError) return sendGrantError(res, error);
+    if (prismaErrorCode(error) === "P2002" && request.sourceRef) {
+      const existing = await prisma.storageGrant.findUnique({
+        where: { sourceRef: request.sourceRef },
+      });
+      if (existing && existing.npub !== npub) {
+        return res.status(409).json({ error: "source_ref_used_by_other_user" });
+      }
+      const user = await prisma.user.findUnique({ where: { npub } });
+      if (user) return res.json(await userJson(user));
+    }
+    console.error(error);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+usersRouter.delete("/:npub/grants/:id", requireServiceAccount, async (req, res) => {
+  const npub = String(req.params.npub);
+  try {
+    await prisma.storageGrant.deleteMany({
+      where: { id: String(req.params.id), npub },
+    });
+    const user = await prisma.user.findUnique({ where: { npub } });
+    if (!user) return res.status(404).json({ error: "not_found" });
+    res.json(await userJson(user));
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+/**
+ * Legacy single-entitlement write. Kept as a compatibility shim for callers
+ * that have not moved to /grants: it appends a grant and ignores `mode` /
+ * `force`, because grants never overwrite one another.
  */
 usersRouter.post("/:npub/entitlement", requireServiceAccount, async (req, res) => {
   const npub = String(req.params.npub);
   let request;
   try {
-    request = parseEntitlementRequest(req.body);
+    request = parseLegacyEntitlement(req.body);
   } catch (error) {
-    if (error instanceof EntitlementError) {
-      return res.status(error.status).json({ error: error.code });
-    }
-    throw error;
+    return sendGrantError(res, error);
   }
 
   try {
-    const user = await prisma.$transaction(async (tx) => {
-      const current = await tx.user.upsert({
-        where: { npub },
-        update: {},
-        create: { npub },
-      });
-      // Claim the payment hash first. A repeat hits the primary key and the
-      // whole transaction rolls back, so the entitlement is applied once.
-      if (request.paymentHash) {
-        await tx.entitlementGrant.create({
-          data: { paymentHash: request.paymentHash, npub },
+    await prisma.$transaction(async (tx) => {
+      await tx.user.upsert({ where: { npub }, update: {}, create: { npub } });
+      if (request.sourceRef) {
+        const existing = await tx.storageGrant.findUnique({
+          where: { sourceRef: request.sourceRef },
         });
+        if (existing) {
+          if (existing.npub !== npub) {
+            throw new GrantError(409, "payment_hash_used_by_other_user");
+          }
+          return;
+        }
       }
-      const effect = computeEntitlement(current, request);
-
-      return tx.user.update({
-        where: { npub },
+      await tx.storageGrant.create({
         data: {
-          planExpiresAt: effect.planExpiresAt,
-          storageBytes: effect.storageBytes,
+          npub,
+          planId: request.planId,
+          storageBytes: request.storageBytes,
+          startsAt: request.startsAt,
+          expiresAt: request.expiresAt,
+          source: request.source,
+          sourceRef: request.sourceRef,
         },
       });
     });
-    res.json(userToJson(user));
+    const user = await prisma.user.findUnique({ where: { npub } });
+    if (!user) return res.status(500).json({ error: "user_missing" });
+    res.json(await userJson(user));
   } catch (error) {
-    if (error instanceof EntitlementError) {
-      return res.status(error.status).json({ error: error.code });
-    }
-    if (
-      request.paymentHash &&
-      error && typeof error === "object" && "code" in error && error.code === "P2002"
-    ) {
-      // Already applied: report the current state, change nothing.
-      const existing = await prisma.entitlementGrant.findUnique({
-        where: { paymentHash: request.paymentHash },
+    if (error instanceof GrantError) return sendGrantError(res, error);
+    if (prismaErrorCode(error) === "P2002" && request.sourceRef) {
+      const existing = await prisma.storageGrant.findUnique({
+        where: { sourceRef: request.sourceRef },
       });
       if (existing && existing.npub !== npub) {
         return res.status(409).json({ error: "payment_hash_used_by_other_user" });
       }
       const user = await prisma.user.findUnique({ where: { npub } });
-      if (user) return res.json(userToJson(user));
+      if (user) return res.json(await userJson(user));
     }
     console.error(error);
     res.status(500).json({ error: "internal_error" });
@@ -163,6 +349,22 @@ usersRouter.delete("/:npub/blobs", requireServiceAccount, async (req, res) => {
           data: { usedStorage: 0n },
         });
       }
+      // Workspace seat grants belong to the owner's pool, not to this member.
+      // Return them to the owner before the account's own grants are removed;
+      // deleting them would silently destroy seats the owner paid for. Legacy
+      // domain-scoped refs have no owner encoded, so they fall through to delete.
+      const grants = await tx.storageGrant.findMany({ where: { npub } });
+      for (const grant of grants) {
+        if (grant.source !== "workspace") continue;
+        const owner = workspaceSeatOwner(grant.sourceRef);
+        if (!owner || owner === npub) continue;
+        await tx.storageGrant.update({
+          where: { id: grant.id },
+          data: { npub: owner },
+        });
+      }
+      // A purge is terminal for everything still held by this npub.
+      await tx.storageGrant.deleteMany({ where: { npub } });
       return blobs;
     });
     res.json({ deleted: result.length, blobs: result.map(blobToJson) });

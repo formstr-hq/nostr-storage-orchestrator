@@ -1,9 +1,54 @@
+export interface StorageGrantInfo {
+  id: string;
+  npub: string;
+  planId: string | null;
+  storageBytes: string;
+  startsAt: string;
+  expiresAt: string;
+  source: string;
+  sourceRef: string | null;
+  createdAt: string;
+}
+
 export interface UserInfo {
   npub: string;
+  /** Derived: latest grant expiry (the account lifecycle clock). */
   planExpiresAt: string | null;
+  /** Derived: sum of grants active right now; null when the user has no grants. */
   storageBytes: string | null;
   usedStorage: string;
   createdAt: string;
+  /** Derived: earliest expiry among active grants, for drop warnings. */
+  nextExpiresAt: string | null;
+  grants: StorageGrantInfo[];
+}
+
+export type GrantSource = "payment" | "workspace" | "admin" | "legacy";
+
+export interface AddGrantRequest {
+  planId?: string | null;
+  storageBytes: string | number;
+  /** Ignored when `expiresAt` is supplied. */
+  durationDays?: number;
+  startsAt?: string;
+  expiresAt?: string;
+  source: GrantSource;
+  sourceRef?: string;
+}
+
+export interface TransferGrantsRequest {
+  fromNpub: string;
+  toNpub: string;
+  source?: GrantSource;
+  /** e.g. "workspace:42:" — the seat's identity prefix. */
+  sourceRefPrefix?: string;
+  count?: number;
+}
+
+export interface TransferGrantsResult {
+  moved: number;
+  from: UserInfo;
+  to: UserInfo;
 }
 
 export interface BlobRecord {
@@ -14,9 +59,17 @@ export interface BlobRecord {
   createdAt: string;
 }
 
+/** One owner's pin on a blob (the row's creation time is the pin time). */
+export interface BlobPin {
+  npub: string;
+  createdAt: string;
+}
+
 /** A blob as returned by GET /blobs/:hash: one row plus everyone billed for it. */
 export interface BlobWithOwners extends BlobRecord {
   owners: string[];
+  /** Per-owner pins; `owners` is kept for callers that only need the npubs. */
+  pins: BlobPin[];
 }
 
 export interface CapacityRecord {
@@ -41,6 +94,10 @@ export interface EntitlementRequest {
   durationDays: number;
   storageBytes: string | number;
   source: "payment" | "admin";
+  /**
+   * Accepted for wire compatibility with older callers; grants are additive,
+   * so mode/force no longer change the outcome.
+   */
   mode?: "extend" | "upgrade";
   force?: boolean;
   /** Required for source "payment"; makes the grant idempotent. */

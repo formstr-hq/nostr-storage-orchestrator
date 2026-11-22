@@ -18,6 +18,8 @@ function user(daysSinceExpiry: number, usedStorage = "500"): UserInfo {
     storageBytes: "1000",
     usedStorage,
     createdAt: new Date(NOW.getTime() - 100 * DAY).toISOString(),
+    nextExpiresAt: null,
+    grants: [],
   };
 }
 
