@@ -1,5 +1,5 @@
 import { Router, type Response, type Router as ExpressRouter } from "express";
-import { prisma } from "../prisma.js";
+import { prisma, type User } from "../prisma.js";
 import { requireServiceAccount } from "../internal-auth.js";
 import {
   GrantError,
@@ -26,24 +26,59 @@ function sendGrantError(res: Response, error: unknown): Response | never {
   throw error;
 }
 
+async function grantsFor(npub: string) {
+  return prisma.storageGrant.findMany({
+    where: { npub },
+    orderBy: { createdAt: "asc" },
+  });
+}
+
+/** Serialize one user with their grants (no Prisma relation to lean on). */
+async function userJson(user: User) {
+  return userToJson(user, await grantsFor(user.npub));
+}
+
+/** Serialize a page of users with one grants query for the whole page. */
+async function usersJson(users: User[]) {
+  if (users.length === 0) return [];
+  const grants = await prisma.storageGrant.findMany({
+    where: { npub: { in: users.map((user) => user.npub) } },
+    orderBy: { createdAt: "asc" },
+  });
+  const byNpub = new Map<string, typeof grants>();
+  for (const grant of grants) {
+    const list = byNpub.get(grant.npub);
+    if (list) list.push(grant);
+    else byNpub.set(grant.npub, [grant]);
+  }
+  return users.map((user) => userToJson(user, byNpub.get(user.npub) ?? []));
+}
+
 // Users due for lifecycle/notification evaluation. Registered before
 // /:npub so "attention" is not captured as an npub. Anyone with an expiry is
 // due for evaluation; the derived access state decides what, if anything, is
 // sent.
 usersRouter.get("/attention", requireServiceAccount, async (req, res) => {
   const pagination = parsePagination(req.query as Record<string, unknown>);
-  const where = { grants: { some: {} } };
-  const [items, total] = await Promise.all([
-    prisma.user.findMany({
-      where,
-      include: { grants: true },
-      orderBy: { createdAt: "asc" },
-      skip: pagination.skip,
-      take: pagination.take,
-    }),
-    prisma.user.count({ where }),
-  ]);
-  res.json(paginated(items.map((user) => userToJson(user, user.grants)), total, pagination));
+  // No Prisma relation to query through: page the distinct grant holders and
+  // load only that page's users.
+  const holders = await prisma.storageGrant.findMany({
+    distinct: ["npub"],
+    select: { npub: true },
+    orderBy: { npub: "asc" },
+  });
+  const pageNpubs = holders
+    .slice(pagination.skip, pagination.skip + pagination.take)
+    .map((row) => row.npub);
+  const users =
+    pageNpubs.length === 0
+      ? []
+      : await prisma.user.findMany({ where: { npub: { in: pageNpubs } } });
+  const byNpub = new Map(users.map((user) => [user.npub, user]));
+  const ordered = pageNpubs
+    .map((npub) => byNpub.get(npub))
+    .filter((user): user is User => user !== undefined);
+  res.json(paginated(await usersJson(ordered), holders.length, pagination));
 });
 
 // Extended user serialization. Service-gated: only the blossom proxy reads
@@ -52,12 +87,11 @@ usersRouter.get("/attention", requireServiceAccount, async (req, res) => {
 usersRouter.get("/:npub", requireServiceAccount, async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { npub: String(req.params.npub) },
-    include: { grants: true },
   });
   if (!user) {
     return res.status(404).json({ error: "not_found" });
   }
-  res.json(userToJson(user, user.grants));
+  res.json(await userJson(user));
 });
 
 // Paginated list with an optional npub substring filter.
@@ -74,7 +108,6 @@ usersRouter.get("/", requireServiceAccount, async (req, res) => {
   const [items, total] = await Promise.all([
     prisma.user.findMany({
       where,
-      include: { grants: true },
       orderBy: { createdAt: "desc" },
       skip: pagination.skip,
       take: pagination.take,
@@ -82,7 +115,7 @@ usersRouter.get("/", requireServiceAccount, async (req, res) => {
     prisma.user.count({ where }),
   ]);
 
-  res.json(paginated(items.map((user) => userToJson(user, user.grants)), total, pagination));
+  res.json(paginated(await usersJson(items), total, pagination));
 });
 
 /**
@@ -127,19 +160,13 @@ usersRouter.post("/grants/transfer", requireServiceAccount, async (req, res) => 
     });
 
     const [from, to] = await Promise.all([
-      prisma.user.findUnique({
-        where: { npub: request.fromNpub },
-        include: { grants: true },
-      }),
-      prisma.user.findUnique({
-        where: { npub: request.toNpub },
-        include: { grants: true },
-      }),
+      prisma.user.findUnique({ where: { npub: request.fromNpub } }),
+      prisma.user.findUnique({ where: { npub: request.toNpub } }),
     ]);
     res.json({
       moved,
-      from: from ? userToJson(from, from.grants) : null,
-      to: to ? userToJson(to, to.grants) : null,
+      from: from ? await userJson(from) : null,
+      to: to ? await userJson(to) : null,
     });
   } catch (error) {
     console.error(error);
@@ -186,9 +213,9 @@ usersRouter.post("/:npub/grants", requireServiceAccount, async (req, res) => {
         },
       });
     });
-    const user = await prisma.user.findUnique({ where: { npub }, include: { grants: true } });
+    const user = await prisma.user.findUnique({ where: { npub } });
     if (!user) return res.status(500).json({ error: "user_missing" });
-    res.json(userToJson(user, user.grants));
+    res.json(await userJson(user));
   } catch (error) {
     if (error instanceof GrantError) return sendGrantError(res, error);
     if (prismaErrorCode(error) === "P2002" && request.sourceRef) {
@@ -198,8 +225,8 @@ usersRouter.post("/:npub/grants", requireServiceAccount, async (req, res) => {
       if (existing && existing.npub !== npub) {
         return res.status(409).json({ error: "source_ref_used_by_other_user" });
       }
-      const user = await prisma.user.findUnique({ where: { npub }, include: { grants: true } });
-      if (user) return res.json(userToJson(user, user.grants));
+      const user = await prisma.user.findUnique({ where: { npub } });
+      if (user) return res.json(await userJson(user));
     }
     console.error(error);
     res.status(500).json({ error: "internal_error" });
@@ -212,9 +239,9 @@ usersRouter.delete("/:npub/grants/:id", requireServiceAccount, async (req, res) 
     await prisma.storageGrant.deleteMany({
       where: { id: String(req.params.id), npub },
     });
-    const user = await prisma.user.findUnique({ where: { npub }, include: { grants: true } });
+    const user = await prisma.user.findUnique({ where: { npub } });
     if (!user) return res.status(404).json({ error: "not_found" });
-    res.json(userToJson(user, user.grants));
+    res.json(await userJson(user));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "internal_error" });
@@ -261,9 +288,9 @@ usersRouter.post("/:npub/entitlement", requireServiceAccount, async (req, res) =
         },
       });
     });
-    const user = await prisma.user.findUnique({ where: { npub }, include: { grants: true } });
+    const user = await prisma.user.findUnique({ where: { npub } });
     if (!user) return res.status(500).json({ error: "user_missing" });
-    res.json(userToJson(user, user.grants));
+    res.json(await userJson(user));
   } catch (error) {
     if (error instanceof GrantError) return sendGrantError(res, error);
     if (prismaErrorCode(error) === "P2002" && request.sourceRef) {
@@ -273,8 +300,8 @@ usersRouter.post("/:npub/entitlement", requireServiceAccount, async (req, res) =
       if (existing && existing.npub !== npub) {
         return res.status(409).json({ error: "payment_hash_used_by_other_user" });
       }
-      const user = await prisma.user.findUnique({ where: { npub }, include: { grants: true } });
-      if (user) return res.json(userToJson(user, user.grants));
+      const user = await prisma.user.findUnique({ where: { npub } });
+      if (user) return res.json(await userJson(user));
     }
     console.error(error);
     res.status(500).json({ error: "internal_error" });

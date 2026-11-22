@@ -31,8 +31,7 @@ model User {
   usedStorage   BigInt    @default(0) @map("used_storage")
   createdAt     DateTime  @default(now()) @map("created_at")
 
-  blobs  Blob[]
-  grants StorageGrant[]
+  blobs Blob[]
 
   @@index([planExpiresAt])
   @@map("user")
@@ -58,8 +57,7 @@ model StorageGrant {
   sourceRef    String?  @unique @map("source_ref")
   createdAt    DateTime @default(now()) @map("created_at")
 
-  user User @relation(fields: [npub], references: [npub], onDelete: Cascade)
-
+  // `npub` is a logical reference only — no FK constraint on purpose.
   @@index([npub, startsAt, expiresAt])
   @@index([npub, expiresAt])
   @@map("storage_grant")

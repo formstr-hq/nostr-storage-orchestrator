@@ -28,7 +28,5 @@ CREATE UNIQUE INDEX "storage_grant_source_ref_key" ON "storage_grant"("source_re
 CREATE INDEX "storage_grant_npub_starts_at_expires_at_idx" ON "storage_grant"("npub", "starts_at", "expires_at");
 CREATE INDEX "storage_grant_npub_expires_at_idx" ON "storage_grant"("npub", "expires_at");
 
-ALTER TABLE "storage_grant"
-    ADD CONSTRAINT "storage_grant_npub_fkey"
-    FOREIGN KEY ("npub") REFERENCES "user"("npub")
-    ON DELETE CASCADE ON UPDATE CASCADE;
+-- Deliberately no FOREIGN KEY constraint on npub: it is a logical reference,
+-- not a database-enforced one. Referential integrity is the application's job.
