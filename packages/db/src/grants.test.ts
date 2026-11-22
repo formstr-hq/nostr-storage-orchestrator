@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { nip19 } from "nostr-tools";
 import {
   GrantError,
   parseAddGrantRequest,
@@ -127,7 +128,14 @@ test("workspace seat grants expose the pool owner encoded in sourceRef", () => {
     workspaceSeatOwner("workspace:owner:npub1owner:order:7:seat:2"),
     "npub1owner",
   );
+  // The backend writes the owner's hex pubkey, not an npub.
+  const hexOwner = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+  assert.equal(
+    workspaceSeatOwner(`workspace:owner:${hexOwner}:order:7:seat:2`),
+    nip19.npubEncode(hexOwner),
+  );
   assert.equal(workspaceSeatOwner("workspace:42:seat:1"), null);
+  assert.equal(workspaceSeatOwner("workspace:owner:not-a-pubkey:order:1:seat:1"), null);
   assert.equal(workspaceSeatOwner(null), null);
 });
 

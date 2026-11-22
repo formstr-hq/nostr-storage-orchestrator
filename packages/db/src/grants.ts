@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { nip19 } from "nostr-tools";
 
 /**
  * A grant is one entitlement with its own start and expiry. The effective
@@ -209,21 +210,32 @@ export function parseLegacyEntitlement(body: unknown, now = new Date()): ParsedG
 }
 
 /**
+ * The owner a workspace seat grant belongs to. New seat grants encode the
+ * owner in `sourceRef`; the backend writes the owner's **hex** pubkey, so both
+ * hex and npub are accepted and normalized to npub. Legacy domain-scoped refs
+ * have no owner to return to.
+ */
+const WORKSPACE_OWNER_REF = /^workspace:owner:(npub1[0-9a-z]+|[0-9a-f]{64}):/;
+
+export function workspaceSeatOwner(sourceRef: string | null | undefined): string | null {
+  const owner = WORKSPACE_OWNER_REF.exec(sourceRef ?? "")?.[1];
+  if (!owner) return null;
+  if (owner.startsWith("npub1")) return owner;
+  try {
+    return nip19.npubEncode(owner);
+  } catch {
+    // A malformed owner ref must not fail the purge; the grant simply falls
+    // through to the account's normal deletion path.
+    return null;
+  }
+}
+
+/**
  * `POST /users/grants/transfer` body. Used for workspace seats: the *same*
  * grant changes holder, so expiresAt/storageBytes are untouched. At least one
  * selector (source or sourceRefPrefix) is required so a seat transfer can never
  * accidentally move a paid grant.
  */
-const WORKSPACE_OWNER_REF = /^workspace:owner:(npub1[0-9a-z]+):/;
-
-/**
- * The owner a workspace seat grant belongs to. New seat grants encode the
- * owner in `sourceRef`; legacy domain-scoped refs have no owner to return to.
- */
-export function workspaceSeatOwner(sourceRef: string | null | undefined): string | null {
-  return WORKSPACE_OWNER_REF.exec(sourceRef ?? "")?.[1] ?? null;
-}
-
 export interface ParsedTransferRequest {
   fromNpub: string;
   toNpub: string;
