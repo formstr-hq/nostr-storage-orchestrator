@@ -214,6 +214,16 @@ export function parseLegacyEntitlement(body: unknown, now = new Date()): ParsedG
  * selector (source or sourceRefPrefix) is required so a seat transfer can never
  * accidentally move a paid grant.
  */
+const WORKSPACE_OWNER_REF = /^workspace:owner:(npub1[0-9a-z]+):/;
+
+/**
+ * The owner a workspace seat grant belongs to. New seat grants encode the
+ * owner in `sourceRef`; legacy domain-scoped refs have no owner to return to.
+ */
+export function workspaceSeatOwner(sourceRef: string | null | undefined): string | null {
+  return WORKSPACE_OWNER_REF.exec(sourceRef ?? "")?.[1] ?? null;
+}
+
 export interface ParsedTransferRequest {
   fromNpub: string;
   toNpub: string;

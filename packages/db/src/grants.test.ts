@@ -6,6 +6,7 @@ import {
   parseLegacyEntitlement,
   parseTransferRequest,
   summarizeGrants,
+  workspaceSeatOwner,
 } from "./grants.js";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -119,6 +120,15 @@ test("legacy entitlement translates to an additive grant", () => {
     NOW,
   );
   assert.equal(override.expiresAt.getTime(), NOW.getTime() + 5 * DAY);
+});
+
+test("workspace seat grants expose the pool owner encoded in sourceRef", () => {
+  assert.equal(
+    workspaceSeatOwner("workspace:owner:npub1owner:order:7:seat:2"),
+    "npub1owner",
+  );
+  assert.equal(workspaceSeatOwner("workspace:42:seat:1"), null);
+  assert.equal(workspaceSeatOwner(null), null);
 });
 
 test("transfer parsing requires a selector and a distinct target", () => {

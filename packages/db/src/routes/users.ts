@@ -6,6 +6,7 @@ import {
   parseAddGrantRequest,
   parseLegacyEntitlement,
   parseTransferRequest,
+  workspaceSeatOwner,
 } from "../grants.js";
 import { blobToJson, notificationToJson, userToJson } from "../serialize.js";
 import { paginated, parsePagination, queryString } from "../pagination.js";
@@ -348,7 +349,21 @@ usersRouter.delete("/:npub/blobs", requireServiceAccount, async (req, res) => {
           data: { usedStorage: 0n },
         });
       }
-      // A purge is terminal: the account's grants go with its data.
+      // Workspace seat grants belong to the owner's pool, not to this member.
+      // Return them to the owner before the account's own grants are removed;
+      // deleting them would silently destroy seats the owner paid for. Legacy
+      // domain-scoped refs have no owner encoded, so they fall through to delete.
+      const grants = await tx.storageGrant.findMany({ where: { npub } });
+      for (const grant of grants) {
+        if (grant.source !== "workspace") continue;
+        const owner = workspaceSeatOwner(grant.sourceRef);
+        if (!owner || owner === npub) continue;
+        await tx.storageGrant.update({
+          where: { id: grant.id },
+          data: { npub: owner },
+        });
+      }
+      // A purge is terminal for everything still held by this npub.
       await tx.storageGrant.deleteMany({ where: { npub } });
       return blobs;
     });
