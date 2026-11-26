@@ -19,7 +19,10 @@ pub struct Config {
     pub max_provider_attempts: u32,
     /// Per-provider HTTP timeout.
     pub provider_timeout: Duration,
-    /// Fan-out read per-provider timeout.
+    /// Per-provider read timeout for fan-out and point reads. Every relay
+    /// write does reads through the gateway (user lookup, replaceable-event
+    /// check), so a slow provider's timeout is added to every write: at 10s
+    /// one provider on a ~1s-RTT link made writes take 25-33s.
     pub fanout_timeout: Duration,
     /// Bearer token required by /pg/* endpoints on providers.
     pub provider_token: Option<String>,
@@ -50,7 +53,7 @@ impl Config {
             dispatch_batch_size: usize_env("PG_DISPATCH_BATCH_SIZE", 100),
             max_provider_attempts: u32_env("PG_MAX_PROVIDER_ATTEMPTS", 3),
             provider_timeout: Duration::from_secs(u64_env("PG_PROVIDER_TIMEOUT_SECS", 10)),
-            fanout_timeout: Duration::from_secs(u64_env("PG_FANOUT_TIMEOUT_SECS", 10)),
+            fanout_timeout: Duration::from_secs(u64_env("PG_FANOUT_TIMEOUT_SECS", 3)),
             provider_token: nonempty_env("PG_PROVIDER_TOKEN"),
             gateway_password: nonempty_env("PG_GATEWAY_PASSWORD"),
             catalog_database_url: match nonempty_env("PG_CATALOG_DATABASE_URL") {

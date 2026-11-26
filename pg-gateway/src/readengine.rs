@@ -12,15 +12,14 @@ use crate::error::{GatewayError, Result};
 use crate::provider::ProviderClient;
 use crate::registry::ProviderRegistry;
 
-/// Per-provider read timeout: a slow/hung provider drops out of a fan-out
-/// (the query returns partial) instead of stalling the client. Point reads
-/// fall through to the next replica on timeout.
-pub(crate) const PROVIDER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 pub struct ReadEngine {
     store: Arc<CentralStore>,
     registry: Arc<ProviderRegistry>,
     pub(crate) provider: ProviderClient,
+    /// Per-provider read timeout (`PG_FANOUT_TIMEOUT_SECS`): a slow/hung
+    /// provider drops out of a fan-out (the query returns partial) instead of
+    /// stalling the client. Point reads fall through to the next replica.
+    pub(crate) read_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -33,8 +32,13 @@ pub struct ReadResult {
 }
 
 impl ReadEngine {
-    pub fn new(store: Arc<CentralStore>, registry: Arc<ProviderRegistry>, provider: ProviderClient) -> Self {
-        Self { store, registry, provider }
+    pub fn new(
+        store: Arc<CentralStore>,
+        registry: Arc<ProviderRegistry>,
+        provider: ProviderClient,
+        read_timeout: std::time::Duration,
+    ) -> Self {
+        Self { store, registry, provider, read_timeout }
     }
 
     pub async fn table(&self, name: &str) -> Result<MeshTable> {
@@ -91,7 +95,7 @@ impl ReadEngine {
             };
             let replica_started = std::time::Instant::now();
             match tokio::time::timeout(
-                PROVIDER_READ_TIMEOUT,
+                self.read_timeout,
                 self.provider.query_with_columns(&provider.url, &effective_sql),
             )
             .await
@@ -152,13 +156,14 @@ impl ReadEngine {
         let mut handles = Vec::with_capacity(provider_count);
         for provider in providers {
             let client = self.provider.clone();
+            let read_timeout = self.read_timeout;
             let url = provider.url.clone();
             let sql = provider_sql.clone();
             handles.push(tokio::spawn(async move {
                 let npub = provider.npub.clone();
                 let provider_started = std::time::Instant::now();
                 let result = tokio::time::timeout(
-                    PROVIDER_READ_TIMEOUT,
+                    read_timeout,
                     client.query_with_columns(&url, &sql),
                 )
                 .await

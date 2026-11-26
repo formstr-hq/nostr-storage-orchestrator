@@ -1296,13 +1296,14 @@ impl GatewayHandlers {
         let mut handles = Vec::with_capacity(provider_count);
         for provider in providers {
             let client = self.read.provider.clone();
+            let read_timeout = self.read.read_timeout;
             let url = provider.url.clone();
             let sql = partial_sql.clone();
             handles.push(tokio::spawn(async move {
                 let npub = provider.npub.clone();
                 let started = std::time::Instant::now();
                 let result: Result<Vec<Value>, GatewayError> = tokio::time::timeout(
-                    crate::readengine::PROVIDER_READ_TIMEOUT,
+                    read_timeout,
                     client.query(&url, &sql),
                 )
                 .await

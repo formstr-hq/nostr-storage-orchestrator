@@ -67,7 +67,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move { schema.spawn_catch_up_loop(interval).await });
     }
 
-    let read = Arc::new(ReadEngine::new(store.clone(), registry.clone(), provider_client.clone()));
+    let read = Arc::new(ReadEngine::new(store.clone(), registry.clone(), provider_client.clone(), config.fanout_timeout));
     let dispatcher = dispatcher::Dispatcher::new(
         store.clone(),
         registry.clone(),
